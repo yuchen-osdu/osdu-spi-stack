@@ -86,6 +86,16 @@ def _resolve(cmd_list: List[str]) -> List[str]:
     return [found, *cmd_list[1:]] if found else cmd_list
 
 
+def _run(cmd_list: List[str], **kwargs: Any) -> Any:
+    """``run_command`` with argv[0] resolved for Windows (az/gh/kubectl are ``.cmd`` shims).
+
+    ``run_command`` invokes subprocess with ``shell=False``; a bare ``az`` is not found by
+    ``CreateProcess`` on Windows. Resolve up front so the mutating onboarding calls work
+    cross-platform, mirroring the ``_resolve`` wrapping used on the read-only paths.
+    """
+    return run_command(_resolve(cmd_list), **kwargs)
+
+
 @dataclass
 class OnboardInputs:
     service: str
@@ -231,7 +241,7 @@ def _verify_deployment(inp: OnboardInputs) -> None:
     # Ensure we have a kube context for this cluster (idempotent). Skip in dry-run -- fetching
     # credentials mutates the local kubeconfig, which a plan-only run must not do.
     if not inp.dry_run:
-        run_command(
+        _run(
             [
                 "az",
                 "aks",
@@ -293,7 +303,7 @@ def _ensure_identity(inp: OnboardInputs) -> None:
         _plan(f"az identity create --name {inp.identity_name} --resource-group {inp.identities_rg}")
         return
     else:
-        run_command(
+        _run(
             [
                 "az",
                 "identity",
@@ -352,7 +362,7 @@ def _ensure_federated_credentials(inp: OnboardInputs) -> None:
         if inp.dry_run:
             _plan(f"az identity federated-credential create --name {name} --subject {subject}")
             continue
-        run_command(
+        _run(
             [
                 "az",
                 "identity",
@@ -409,7 +419,7 @@ def _assign_role(inp: OnboardInputs, role: str, scope: str, description: str) ->
     if inp.dry_run:
         _plan(f"az role assignment create --role '{role}' --scope {scope}")
         return
-    run_command(
+    _run(
         [
             "az",
             "role",
@@ -457,7 +467,7 @@ def _ensure_custom_deploy_role(inp: OnboardInputs) -> None:
         return
     # az role definition create is idempotent-friendly via update when it exists.
     action = "update" if existing else "create"
-    run_command(
+    _run(
         [
             "az",
             "role",
