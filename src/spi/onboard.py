@@ -578,6 +578,11 @@ def _write_handoff(inp: OnboardInputs) -> None:
     # Variables (always reconcile; non-sensitive).
     _gh_set_variable(inp, "K8S_DEPLOYMENT_NAME", inp.deployment_name)
     _gh_set_variable(inp, "K8S_CONTAINER_NAME", inp.container_name)
+    # AZURE_CLIENT_ID is ALSO written as a variable (not just a secret) so the deploy lane's
+    # validate.yml `if:` can gate on `vars.AZURE_CLIENT_ID != ''` -- un-onboarded forks skip
+    # the deploy/integration-test jobs cleanly instead of failing azure/login (design SS6.1
+    # step 5 lists AZURE_CLIENT_ID as a variable for use in if: expressions).
+    _gh_set_variable(inp, "AZURE_CLIENT_ID", inp.identity_client_id)
 
 
 def _secret_present(inp: OnboardInputs, name: str) -> bool:
@@ -614,6 +619,7 @@ def _emit_summary(inp: OnboardInputs) -> None:
         "variables_written": {
             "K8S_DEPLOYMENT_NAME": inp.deployment_name,
             "K8S_CONTAINER_NAME": inp.container_name,
+            "AZURE_CLIENT_ID": inp.identity_client_id,
         },
         "kv_secret_names_to_populate": inp.kv_secret_names,
         "next_steps": [
