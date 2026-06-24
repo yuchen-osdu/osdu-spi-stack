@@ -686,6 +686,11 @@ def onboard(
         "--keyvault",
         help="Key Vault name to grant Secrets User on (for acceptance-test secrets).",
     ),
+    gateway_url: Optional[str] = typer.Option(
+        None,
+        "--gateway-url",
+        help="Cluster ingress base URL; written as the GATEWAY_URL repo variable when provided.",
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan without making changes."),
     force_rewrite_secrets: bool = typer.Option(
         False,
@@ -696,8 +701,11 @@ def onboard(
     """Grant a GitHub service-fork repo permission to deploy into this cluster.
 
     Cluster-side half of CI/CD onboarding (design SS9.4.A): creates a managed identity +
-    federated credentials + Azure RBAC, then writes AZURE_* secrets and K8S_* variables onto
-    the target repo. Idempotent; use --dry-run to preview.
+    federated credentials + Azure RBAC, then writes the AZURE_* secrets and the full
+    repo->cluster link variables (AZURE_CLIENT_ID, K8S_*, AKS_*, FLUX_NAMESPACE, KEYVAULT_NAME,
+    GATEWAY_URL) onto the target repo. Idempotent on re-run; running it against a NEW cluster
+    seamlessly re-homes the repo (repoints the identity secrets + routing variables). Use
+    --dry-run to preview.
     """
     from .onboard import OnboardInputs
     from .onboard import onboard as _run_onboard
@@ -712,6 +720,7 @@ def onboard(
             namespace=namespace,
             flux_namespace=flux_namespace,
             keyvault=keyvault,
+            gateway_url=gateway_url,
             dry_run=dry_run,
             force_rewrite_secrets=force_rewrite_secrets,
         )

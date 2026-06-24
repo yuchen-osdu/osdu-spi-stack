@@ -106,6 +106,7 @@ class OnboardInputs:
     namespace: str = "osdu"
     flux_namespace: str = "flux-system"
     keyvault: Optional[str] = None
+    gateway_url: Optional[str] = None
     dry_run: bool = False
     force_rewrite_secrets: bool = False
     # Captured/derived during the run.
@@ -572,27 +573,85 @@ def _gh_set_variable(inp: OnboardInputs, name: str, value: str) -> None:
     console.print(f"  [success]variable {name}={value} set[/success]")
 
 
+def _gh_get_variable(inp: OnboardInputs, name: str) -> str:
+    """Return the current value of a repo Actions variable, or '' if unset/unreadable.
+
+    Used to detect a re-home: if AZURE_CLIENT_ID already names a *different* identity, the repo
+    is being moved from a previous cluster to this one.
+    """
+    proc = subprocess.run(
+        _resolve(["gh", "api", f"repos/{inp.repo}/actions/variables/{name}", "--jq", ".value"]),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+def _should_write_secrets(secret_present: bool, is_rehome: bool, force: bool) -> bool:
+    """Decide whether to (re)write the AZURE_* secrets.
+
+    Write when they are missing, when the identity changed (a re-home onto a new cluster), or
+    when explicitly forced. Skipping only the true idempotent case -- the same identity is
+    already set -- keeps the AZURE_CLIENT_ID secret and its variable copy from ever diverging.
+    """
+    return (not secret_present) or is_rehome or force
+
+
 def _write_handoff(inp: OnboardInputs) -> None:
     console.print("\n[bold]Writing handoff secrets + variables to the repo...[/bold]")
-    secret_exists = _secret_present(inp, "AZURE_CLIENT_ID")
-    if secret_exists and not inp.force_rewrite_secrets:
+
+    # Re-home detection: the AZURE_CLIENT_ID variable records the identity (and therefore the
+    # cluster) the repo is currently linked to. A different value means this is a move from a
+    # previous cluster onto this one -- so we must repoint the AZURE_* secrets too, not just the
+    # variables, or azure/login would keep authenticating as the retired cluster's identity while
+    # everything else points here. (Model: one repo <-> one cluster; this makes retire-A /
+    # onboard-B seamless in a single command.)
+    existing_client_id = _gh_get_variable(inp, "AZURE_CLIENT_ID")
+    is_rehome = (
+        bool(existing_client_id)
+        and bool(inp.identity_client_id)
+        and existing_client_id != inp.identity_client_id
+    )
+    if is_rehome:
         console.print(
-            "  [info]AZURE_* secrets already present; leaving as-is "
-            "(use --force-rewrite-secrets to overwrite).[/info]"
+            f"  [warning]Re-homing {inp.repo}: AZURE_CLIENT_ID {existing_client_id} -> "
+            f"{inp.identity_client_id} (repointing the repo from the previous cluster's "
+            "identity to this one).[/warning]"
         )
-    else:
+
+    secret_present = _secret_present(inp, "AZURE_CLIENT_ID")
+    if _should_write_secrets(secret_present, is_rehome, inp.force_rewrite_secrets):
         _gh_set_secret(inp, "AZURE_CLIENT_ID", inp.identity_client_id)
         _gh_set_secret(inp, "AZURE_TENANT_ID", inp.tenant_id)
         _gh_set_secret(inp, "AZURE_SUBSCRIPTION_ID", inp.subscription_id)
+    else:
+        console.print(
+            "  [info]AZURE_* secrets already current for this identity; leaving as-is "
+            "(use --force-rewrite-secrets to overwrite).[/info]"
+        )
 
-    # Variables (always reconcile; non-sensitive).
+    # Variables (always reconcile; non-sensitive). Together with the AZURE_* secrets these fully
+    # pin the repo->cluster link, so a single `spi onboard` against a new cluster re-homes the
+    # repo with no manual variable edits.
     _gh_set_variable(inp, "K8S_DEPLOYMENT_NAME", inp.deployment_name)
     _gh_set_variable(inp, "K8S_CONTAINER_NAME", inp.container_name)
-    # AZURE_CLIENT_ID is ALSO written as a variable (not just a secret) so the deploy lane's
-    # validate.yml `if:` can gate on `vars.AZURE_CLIENT_ID != ''` -- un-onboarded forks skip
-    # the deploy/integration-test jobs cleanly instead of failing azure/login (design SS6.1
-    # step 5 lists AZURE_CLIENT_ID as a variable for use in if: expressions).
+    # AZURE_CLIENT_ID as a variable too: validate.yml's `if:` gates on `vars.AZURE_CLIENT_ID`,
+    # and the next onboard reads it for re-home detection (above). Kept in lock-step with the
+    # secret written above so the two never diverge (design SS6.1 step 5).
     _gh_set_variable(inp, "AZURE_CLIENT_ID", inp.identity_client_id)
+    # Cluster-routing variables -- onboard already knows these from its own arguments, so it
+    # writes them to remove the manual "set the AKS_*/KEYVAULT_NAME vars" step and to repoint
+    # them on a re-home.
+    _gh_set_variable(inp, "AKS_RESOURCE_GROUP", inp.aks_rg)
+    _gh_set_variable(inp, "AKS_CLUSTER_NAME", inp.aks_cluster)
+    _gh_set_variable(inp, "K8S_NAMESPACE", inp.namespace)
+    _gh_set_variable(inp, "FLUX_NAMESPACE", inp.flux_namespace)
+    if inp.keyvault:
+        _gh_set_variable(inp, "KEYVAULT_NAME", inp.keyvault)
+    if inp.gateway_url:
+        _gh_set_variable(inp, "GATEWAY_URL", inp.gateway_url)
 
 
 def _secret_present(inp: OnboardInputs, name: str) -> bool:
@@ -630,13 +689,26 @@ def _emit_summary(inp: OnboardInputs) -> None:
             "K8S_DEPLOYMENT_NAME": inp.deployment_name,
             "K8S_CONTAINER_NAME": inp.container_name,
             "AZURE_CLIENT_ID": inp.identity_client_id,
+            "AKS_RESOURCE_GROUP": inp.aks_rg,
+            "AKS_CLUSTER_NAME": inp.aks_cluster,
+            "K8S_NAMESPACE": inp.namespace,
+            "FLUX_NAMESPACE": inp.flux_namespace,
+            **({"KEYVAULT_NAME": inp.keyvault} if inp.keyvault else {}),
+            **({"GATEWAY_URL": inp.gateway_url} if inp.gateway_url else {}),
         },
         "kv_secret_names_to_populate": inp.kv_secret_names,
         "next_steps": [
-            "Set the remaining org variables on the repo/org: AKS_RESOURCE_GROUP, "
-            "AKS_CLUSTER_NAME, K8S_NAMESPACE, FLUX_NAMESPACE, GATEWAY_URL, KEYVAULT_NAME.",
-            "Set the per-service test variables: ACCEPTANCE_TEST_DIR, "
-            "ACCEPTANCE_TEST_SECRET_MAP, ACCEPTANCE_TEST_DEPENDENCIES.",
+            *(
+                []
+                if inp.gateway_url
+                else [
+                    "Set GATEWAY_URL on the repo (cluster ingress base URL); pass --gateway-url "
+                    "next time to have onboard write it."
+                ]
+            ),
+            "Set the per-service test variables: ACCEPTANCE_TEST_DIR, ACCEPTANCE_TEST_SECRET_MAP, "
+            "ACCEPTANCE_TEST_DEPENDENCIES (and ACCEPTANCE_TEST_ENV_MAP if the suite reads "
+            "non-secret config such as PARTITION_BASE_URL / MY_TENANT).",
             f"Run settings-apply.yml on {inp.repo} (or wait for its schedule) to reconcile "
             "rulesets, required-check filtering, and GHCR visibility.",
             "Populate the Key Vault secret VALUES out of band (this command grants read access "

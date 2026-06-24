@@ -23,6 +23,7 @@ from spi.onboard import (
     FLUX_READ_DATA_ACTIONS,
     OSDU_BRANCHES,
     OnboardInputs,
+    _should_write_secrets,
 )
 
 CLUSTER_ID = (
@@ -79,3 +80,14 @@ def test_deploy_data_actions_are_least_privilege():
 
 def test_osdu_branch_subjects_cover_the_three_branches():
     assert set(OSDU_BRANCHES) == {"main", "fork_integration", "fork_upstream"}
+
+
+def test_secret_write_policy_rehome_and_idempotency():
+    # First onboard: no secret yet -> write.
+    assert _should_write_secrets(secret_present=False, is_rehome=False, force=False) is True
+    # Idempotent re-run against the same cluster (same identity already set) -> skip.
+    assert _should_write_secrets(secret_present=True, is_rehome=False, force=False) is False
+    # Re-home onto a new cluster (identity changed) -> rewrite so the secret follows the variable.
+    assert _should_write_secrets(secret_present=True, is_rehome=True, force=False) is True
+    # Explicit force -> rewrite.
+    assert _should_write_secrets(secret_present=True, is_rehome=False, force=True) is True
