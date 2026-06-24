@@ -658,3 +658,61 @@ def update(
                 border_style="green",
             )
         )
+
+
+@app.command()
+def onboard(
+    service: str = typer.Option(..., "--service", help="Service short name (e.g. partition)."),
+    repo: str = typer.Option(
+        ..., "--repo", help="Target GitHub repo as org/repo (e.g. yuchen-osdu/partition)."
+    ),
+    aks_cluster: str = typer.Option(
+        ..., "--aks-cluster", help="AKS cluster name to grant deploy access to."
+    ),
+    aks_rg: str = typer.Option(..., "--aks-rg", help="Resource group of the AKS cluster."),
+    identities_rg: str = typer.Option(
+        ..., "--identities-rg", help="Resource group for the CI managed identity."
+    ),
+    namespace: str = typer.Option(
+        "osdu", "--namespace", help="Kubernetes namespace the service Deployment lives in."
+    ),
+    flux_namespace: str = typer.Option(
+        "flux-system",
+        "--flux-namespace",
+        help="Namespace holding the Flux Kustomizations (this stack uses osdu-flux).",
+    ),
+    keyvault: Optional[str] = typer.Option(
+        None,
+        "--keyvault",
+        help="Key Vault name to grant Secrets User on (for acceptance-test secrets).",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan without making changes."),
+    force_rewrite_secrets: bool = typer.Option(
+        False,
+        "--force-rewrite-secrets",
+        help="Overwrite AZURE_* repo secrets even if already present.",
+    ),
+):
+    """Grant a GitHub service-fork repo permission to deploy into this cluster.
+
+    Cluster-side half of CI/CD onboarding (design SS9.4.A): creates a managed identity +
+    federated credentials + Azure RBAC, then writes AZURE_* secrets and K8S_* variables onto
+    the target repo. Idempotent; use --dry-run to preview.
+    """
+    from .onboard import OnboardInputs
+    from .onboard import onboard as _run_onboard
+
+    _run_onboard(
+        OnboardInputs(
+            service=service,
+            repo=repo,
+            aks_cluster=aks_cluster,
+            aks_rg=aks_rg,
+            identities_rg=identities_rg,
+            namespace=namespace,
+            flux_namespace=flux_namespace,
+            keyvault=keyvault,
+            dry_run=dry_run,
+            force_rewrite_secrets=force_rewrite_secrets,
+        )
+    )
