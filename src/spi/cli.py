@@ -681,6 +681,11 @@ def onboard(
         "--flux-namespace",
         help="Namespace holding the Flux Kustomizations (this stack uses osdu-flux).",
     ),
+    partition: str = typer.Option(
+        "opendes",
+        "--partition",
+        help="Data partition whose entitlements groups the CI identity is seeded into.",
+    ),
     keyvault: Optional[str] = typer.Option(
         None,
         "--keyvault",
@@ -719,6 +724,7 @@ def onboard(
             identities_rg=identities_rg,
             namespace=namespace,
             flux_namespace=flux_namespace,
+            partition=partition,
             keyvault=keyvault,
             gateway_url=gateway_url,
             dry_run=dry_run,

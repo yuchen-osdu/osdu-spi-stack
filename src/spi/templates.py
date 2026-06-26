@@ -251,8 +251,13 @@ spec:
                   if aud == "https://management.azure.com/"
                      or aud == "https://management.azure.com" then
                     if payload["appid"] then
-                      h:headers():replace("x-app-id", entraClientId)
-                      h:headers():add("x-user-id", entraClientId)
+                      -- Per-identity (ADR-016 revisited): project the caller's REAL appid so each
+                      -- onboarded CI identity is itself in entitlements rather than silently the
+                      -- service account. The OSDU UAMI's own appid == entra_client_id, so bootstrap
+                      -- Jobs are unaffected (still resolve to the service-account bypass), while a
+                      -- CI MSI must be an explicit entitlements member (spi onboard seeds it).
+                      h:headers():replace("x-app-id", payload["appid"])
+                      h:headers():add("x-user-id", payload["appid"])
                     end
                     return
                   end

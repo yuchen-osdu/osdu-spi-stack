@@ -37,8 +37,10 @@ identities or role assignments and does not overwrite secrets unless
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -73,6 +75,119 @@ FLUX_READ_DATA_ACTIONS = [
 AKS_CLUSTER_USER_ROLE = "Azure Kubernetes Service Cluster User Role"
 KEY_VAULT_SECRETS_USER_ROLE = "Key Vault Secrets User"
 
+# Entitlements seed (per-identity model). `spi up` only provisions the tenant (the deployer
+# UAMI becomes OWNER of every group); it never grants any other identity access. So once a
+# freshly onboarded CI identity flows as itself through the mesh, it is a member of nothing
+# and 403s every user-facing service. `spi onboard` therefore seeds the new identity into
+# the same four root groups ADME data-seeding uses (InstanceInit.cs), via a short in-cluster
+# Job that runs under the OSDU workload identity (the OWNER, so it is authorized to call the
+# entitlements AddMember API). This is per CI identity, so it belongs to onboard, not to the
+# stack bootstrap.
+WORKLOAD_IDENTITY_SA = "workload-identity-sa"
+SEED_JOB_NAME = "spi-onboard-seed"
+SEED_IMAGE = "python:3.12-slim"
+ENTITLEMENTS_SEED_GROUPS = (
+    "users",
+    "users.datalake.ops",
+    "users.datalake.admins",
+    "users.data.root",
+)
+
+# Self-contained add-member script (no dependency on the bootstrap scripts ConfigMap). It
+# mints a v1.0 management token under the workload identity (matching osdu-spi-init auth.py),
+# discovers the entitlements domain from the OWNER's own group list, then adds the CI
+# identity appid to the four root groups and verifies membership.
+_SEED_SCRIPT = r"""
+import json, os, sys, time, urllib.parse, urllib.request, urllib.error
+
+PARTITION = os.environ["PARTITION"]
+APPID = os.environ["CI_MSI_APPID"].strip().lower()
+ENT = os.environ.get("ENTITLEMENTS_HOST", "http://entitlements.osdu.svc.cluster.local")
+BASE = ENT + "/api/entitlements/v2"
+GROUPS = ["users", "users.datalake.ops", "users.datalake.admins", "users.data.root"]
+
+
+def get_token():
+    tenant = os.environ["AZURE_TENANT_ID"]
+    client = os.environ["AZURE_CLIENT_ID"]
+    path = os.environ.get(
+        "AZURE_FEDERATED_TOKEN_FILE", "/var/run/secrets/azure/tokens/azure-identity-token"
+    )
+    with open(path) as fh:
+        assertion = fh.read().strip()
+    data = urllib.parse.urlencode({
+        "grant_type": "client_credentials",
+        "client_id": client,
+        "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        "client_assertion": assertion,
+        "resource": "https://management.azure.com/",
+    }).encode()
+    req = urllib.request.Request(
+        "https://login.microsoftonline.com/%s/oauth2/token" % tenant,
+        data=data, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    return json.loads(urllib.request.urlopen(req, timeout=60).read())["access_token"]
+
+
+def call(method, path, token, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(BASE + path, data=data, method=method, headers={
+        "Content-Type": "application/json", "Accept": "application/json",
+        "Authorization": "Bearer " + token, "data-partition-id": PARTITION})
+    try:
+        resp = urllib.request.urlopen(req, timeout=60)
+        return resp.getcode(), resp.read().decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode(errors="replace")
+
+
+def resolve_domain(token):
+    for _ in range(60):
+        code, payload = call("GET", "/groups", token)
+        if code == 200:
+            groups = json.loads(payload).get("groups", [])
+            for g in groups:
+                email = g.get("email", "")
+                if "@" in email:
+                    right = email.split("@", 1)[1]
+                    if right.startswith(PARTITION + "."):
+                        return right[len(PARTITION) + 1:], len(groups)
+        time.sleep(5)
+    return None, 0
+
+
+def main():
+    print("Seeding entitlements member '%s' into partition '%s'" % (APPID, PARTITION))
+    token = get_token()
+    domain, count = resolve_domain(token)
+    if not domain:
+        print("ERROR: could not resolve entitlements groups for '%s'" % PARTITION)
+        return 1
+    print("  domain = %s (groups visible: %d)" % (domain, count))
+    rc = 0
+    for name in GROUPS:
+        grp = "%s@%s.%s" % (name, PARTITION, domain)
+        code, payload = call("POST", "/groups/%s/members" % grp, token,
+                             {"email": APPID, "role": "MEMBER"})
+        ok = code in (200, 409)
+        print("  add %s -> %s%s" % (grp, code, "" if ok else " " + payload[:160]))
+        if not ok:
+            rc = 1
+    for name in GROUPS:
+        grp = "%s@%s.%s" % (name, PARTITION, domain)
+        code, payload = call("GET", "/groups/%s/members" % grp, token)
+        present = (APPID in payload.lower()) if code == 200 else False
+        print("  verify %s -> present=%s" % (grp, present))
+        if not present:
+            rc = 1
+    print("RESULT rc=%s" % rc)
+    return rc
+
+
+sys.exit(main())
+"""
+
 
 def _resolve(cmd_list: List[str]) -> List[str]:
     """Resolve argv[0] to an absolute path so subprocess (shell=False) finds it.
@@ -105,6 +220,7 @@ class OnboardInputs:
     identities_rg: str
     namespace: str = "osdu"
     flux_namespace: str = "flux-system"
+    partition: str = "opendes"
     keyvault: Optional[str] = None
     gateway_url: Optional[str] = None
     dry_run: bool = False
@@ -528,6 +644,169 @@ def _ensure_rbac(inp: OnboardInputs) -> None:
         )
 
 
+def _render_seed_manifest(inp: OnboardInputs) -> str:
+    """Render the ConfigMap (seed script) + Job that adds the CI identity to entitlements."""
+    indented = "\n".join("    " + ln for ln in _SEED_SCRIPT.strip("\n").splitlines())
+    return f"""apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {SEED_JOB_NAME}
+  namespace: {inp.namespace}
+data:
+  seed_member.py: |
+{indented}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {SEED_JOB_NAME}
+  namespace: {inp.namespace}
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: {WORKLOAD_IDENTITY_SA}
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: {SEED_IMAGE}
+          command: ["python", "/seed/seed_member.py"]
+          env:
+            - name: PARTITION
+              value: "{inp.partition}"
+            - name: CI_MSI_APPID
+              value: "{inp.identity_client_id}"
+            - name: ENTITLEMENTS_HOST
+              value: "http://entitlements.{inp.namespace}.svc.cluster.local"
+          volumeMounts:
+            - name: seed
+              mountPath: /seed
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 1000
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: seed
+          configMap:
+            name: {SEED_JOB_NAME}
+"""
+
+
+def _ensure_entitlements_membership(inp: OnboardInputs) -> None:
+    """Seed the onboarded CI identity into the partition's entitlements root groups.
+
+    `spi up` only provisions the tenant (the deployer UAMI becomes OWNER); no other identity
+    is granted access. With per-identity JWT projection a CI identity flows as itself and so
+    403s every user-facing service until it is a real member. This runs a short in-cluster Job
+    under the OSDU workload identity (the OWNER, authorized to AddMember) that POSTs the CI
+    identity's appid into users, users.datalake.ops, users.datalake.admins and users.data.root
+    for the partition. Idempotent: AddMember returns 409 for an existing member, which the Job
+    treats as success.
+    """
+    console.print("\n[bold]Seeding entitlements membership...[/bold]")
+    if not inp.identity_client_id:
+        console.print("  [warning]identity client id unknown; skipping entitlements seed[/warning]")
+        return
+    groups_human = ", ".join(ENTITLEMENTS_SEED_GROUPS)
+    if inp.dry_run:
+        _plan(
+            f"kubectl apply Job {SEED_JOB_NAME} (run as {WORKLOAD_IDENTITY_SA}) adding "
+            f"{inp.identity_client_id} to [{groups_human}]@{inp.partition}.<domain>"
+        )
+        return
+
+    handle = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8")
+    try:
+        handle.write(_render_seed_manifest(inp))
+        handle.close()
+        # The Job spec is immutable; clear any prior run before applying.
+        _run(
+            ["kubectl", "delete", "job", SEED_JOB_NAME, "-n", inp.namespace, "--ignore-not-found"],
+            description="Clear any prior entitlements seed Job",
+            check=False,
+        )
+        _run(
+            ["kubectl", "apply", "-f", handle.name],
+            description=f"Apply entitlements seed Job for {inp.identity_client_id}",
+        )
+        subprocess.run(
+            _resolve(
+                [
+                    "kubectl",
+                    "wait",
+                    "--for=condition=complete",
+                    f"job/{SEED_JOB_NAME}",
+                    "-n",
+                    inp.namespace,
+                    "--timeout=240s",
+                ]
+            ),
+            capture_output=True,
+            text=True,
+        )
+        logs = (
+            subprocess.run(
+                _resolve(
+                    ["kubectl", "logs", f"job/{SEED_JOB_NAME}", "-n", inp.namespace, "--tail=40"]
+                ),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            ).stdout
+            or ""
+        )
+        for line in logs.splitlines():
+            if line.strip():
+                console.print(f"    [dim]{line}[/dim]")
+        if "RESULT rc=0" not in logs:
+            console.print(
+                "  [error]Entitlements seed did not complete; see Job logs above. Confirm the "
+                "stack is deployed and tenant-provisioning has run.[/error]"
+            )
+            raise typer.Exit(code=1)
+        display_result(
+            f"CI identity {inp.identity_client_id} seeded into [{groups_human}]@{inp.partition}"
+        )
+    finally:
+        _run(
+            [
+                "kubectl",
+                "delete",
+                "job",
+                SEED_JOB_NAME,
+                "-n",
+                inp.namespace,
+                "--ignore-not-found",
+                "--wait=false",
+            ],
+            description="Remove entitlements seed Job",
+            check=False,
+        )
+        _run(
+            [
+                "kubectl",
+                "delete",
+                "configmap",
+                SEED_JOB_NAME,
+                "-n",
+                inp.namespace,
+                "--ignore-not-found",
+                "--wait=false",
+            ],
+            description="Remove entitlements seed ConfigMap",
+            check=False,
+        )
+        os.unlink(handle.name)
+
+
 def _list_kv_secret_names(vault: str) -> List[str]:
     data = _az_json(
         ["keyvault", "secret", "list", "--vault-name", vault, "--query", "[].name"], check=False
@@ -733,6 +1012,7 @@ def onboard(inp: OnboardInputs) -> None:
     _ensure_identity(inp)
     _ensure_federated_credentials(inp)
     _ensure_rbac(inp)
+    _ensure_entitlements_membership(inp)
     _write_handoff(inp)
     _emit_summary(inp)
 

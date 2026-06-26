@@ -36,3 +36,13 @@ Rejected alternatives:
 - **Solving with `AuthorizationPolicy` alone.** Works for service images whose Spring chain reads `RequestPrincipal` directly. Our images do not, so the in-process filter still rejects after Istio admits the request.
 - **Switching to a different OSDU provider.** Out of scope and inconsistent with the SPI Stack's stated commitment to the Azure provider (ADR-001).
 - **Imperative side-channel that pre-populates entitlements without going through the service API.** Bypasses the auth chain entirely but ties bootstrap to schema details internal to the entitlements implementation, and re-creates the maintenance burden ADR-013 and ADR-015 reduced.
+
+## Revision: per-identity projection
+
+The original Lua collapsed every `aud=https://management.azure.com/` app token to the OSDU UAMI client id (`entra_client_id`). That is correct for the bootstrap Jobs it was written for (they run as the UAMI), but it has an unintended side effect: any other identity that mints a management-audience token, notably a CI identity onboarded for the deploy lane, is also silently projected to the UAMI and inherits the bootstrap admin's authorization. Integration tests then pass without the test identity being a real entitlements member, so they do not actually exercise authorization.
+
+The Lua now projects the token's own `appid` (`payload["appid"]`) into `x-app-id` / `x-user-id` instead of `entra_client_id`. Because the OSDU UAMI's own appid equals `entra_client_id`, the bootstrap Jobs are unaffected (they still resolve to the service-account path), while every other identity flows as itself and must be an explicit entitlements member.
+
+To grant a newly onboarded CI identity access, `spi onboard` seeds it into the four root groups ADME data-seeding uses (`users`, `users.datalake.ops`, `users.datalake.admins`, `users.data.root`) via a short in-cluster Job run under the OSDU workload identity (the tenant-provisioning OWNER, authorized to call the entitlements AddMember API). Seeding is per CI identity, so it lives in `spi onboard`, not in the stack bootstrap (`spi up`). This stays consistent with the rejection above: it uses the public AddMember API, not a Gremlin side-channel.
+
+Note on partition: `partition-azure` is internal. Its `isDomainAdminServiceAccount` check authorizes any AAD-issued service-principal token regardless of group membership, so the partition deploy-lane test passes with or without this projection change or the seed. The per-identity model is only observable on user-facing services (storage, legal, search).
