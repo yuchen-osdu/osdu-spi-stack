@@ -128,15 +128,19 @@ def istio_auth_resources(
     are not rejected by managed-mesh defaults.
 
     Both ``entra_client_id`` (the OSDU UAMI client id) and ``aad_client_id``
-    are listed in the jwtRules audiences. The bootstrap Jobs present tokens
-    with ``aud=https://management.azure.com/``; the Lua's special-case branch
-    pins ``x-app-id`` to ``entra_client_id`` for those. Service-to-service
-    calls inside the cluster mint tokens via core-lib-azure's ``getWIToken``
-    with scope ``${{aadClientId}}/.default`` (i.e. ``aud=aad_client_id``),
-    so ``aad_client_id`` must also be a valid audience for those calls to
-    pass jwt_authn and have ``x-app-id`` projected. When the operator does
-    not override AAD_CLIENT_ID, both values are equal and only one entry is
-    emitted per jwtRule.
+    are listed in the jwtRules audiences, alongside
+    ``https://management.azure.com[/]`` which the bootstrap Jobs and onboarded
+    CI identities present. The Lua does not special-case any audience or
+    identity: it projects the caller's own application id (``appid`` for v1
+    app/MSI tokens, ``azp`` for v2) as ``x-app-id`` / ``x-user-id``, and the
+    access decision belongs to entitlements (the projected identity must be a
+    member; ``spi onboard`` seeds CI identities via the AddMember API).
+    Service-to-service calls inside the cluster mint tokens via core-lib-azure's
+    ``getWIToken`` with scope ``${{aadClientId}}/.default`` (i.e.
+    ``aud=aad_client_id``), so ``aad_client_id`` must also be a valid audience
+    for those calls to pass jwt_authn. When the operator does not override
+    AAD_CLIENT_ID, both values are equal and only one entry is emitted per
+    jwtRule.
     """
     extra_aud = (
         f'\n        - "{aad_client_id}"'
@@ -212,7 +216,6 @@ spec:
             inlineCode: |
               local AAD_V1_ISSUER = "sts.windows.net"
               local AAD_V2_ISSUER = "login.microsoftonline.com"
-              local entraClientId = "{entra_client_id}"
 
               local function processAADV1(payload, h)
                 if payload["unique_name"] then
@@ -245,22 +248,14 @@ spec:
                 end
                 local payload = meta["payload"]
 
-                local aud = payload["aud"]
-                if aud then
-                  h:headers():add("x-app-id", aud)
-                  if aud == "https://management.azure.com/"
-                     or aud == "https://management.azure.com" then
-                    if payload["appid"] then
-                      -- Per-identity (ADR-016 revisited): project the caller's REAL appid so each
-                      -- onboarded CI identity is itself in entitlements rather than silently the
-                      -- service account. The OSDU UAMI's own appid == entra_client_id, so bootstrap
-                      -- Jobs are unaffected (still resolve to the service-account bypass), while a
-                      -- CI MSI must be an explicit entitlements member (spi onboard seeds it).
-                      h:headers():replace("x-app-id", payload["appid"])
-                      h:headers():add("x-user-id", payload["appid"])
-                    end
-                    return
-                  end
+                -- This filter ONLY projects identity. It extracts the calling application
+                -- id (appid for v1 app/MSI tokens, azp for v2, falling back to the audience
+                -- for user tokens that carry neither) as x-app-id, and the caller identity
+                -- as x-user-id (below). The actual access decision belongs to entitlements,
+                -- which authorizes the projected x-user-id by group membership.
+                local appId = payload["appid"] or payload["azp"] or payload["aud"]
+                if appId then
+                  h:headers():add("x-app-id", appId)
                 end
 
                 local iss = payload["iss"]
