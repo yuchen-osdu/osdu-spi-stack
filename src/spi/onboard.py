@@ -76,6 +76,15 @@ FLUX_READER_ROLE = "spi-ci-flux-reader"
 AKS_CLUSTER_USER_ROLE = "Azure Kubernetes Service Cluster User Role"
 KEY_VAULT_SECRETS_USER_ROLE = "Key Vault Secrets User"
 
+# Audience the deploy lane's integration-test mints the acceptance-test token against
+# (`az account get-access-token --resource <AAD_CLIENT_ID>`). SPI CI identities are MSIs
+# federated to GitHub; an MSI is not itself a requestable resource (`--resource <msi-appid>`
+# -> AADSTS100040), and the stack has no dedicated OSDU AAD app registration. So the token is
+# minted for ARM (a universally-requestable resource); it carries aud=management.azure.com and
+# appid=<MSI>. The istio RequestAuthentication (ADR-016) trusts this audience and the Lua
+# projects the appid as x-user-id, which entitlements authorizes via the seeded membership.
+AAD_TOKEN_RESOURCE = "https://management.azure.com"
+
 # Entitlements seed (per-identity model). `spi up` only provisions the tenant (the deployer
 # UAMI becomes OWNER of every group); it never grants any other identity access. So once a
 # freshly onboarded CI identity flows as itself through the mesh, it is a member of nothing
@@ -585,20 +594,30 @@ def _ensure_custom_deploy_role(inp: OnboardInputs) -> None:
         return
     # az role definition create is idempotent-friendly via update when it exists.
     action = "update" if existing else "create"
-    _run(
-        [
-            "az",
-            "role",
-            "definition",
-            action,
-            "--role-definition",
-            json.dumps(role_def),
-            "--output",
-            "none",
-        ],
-        description=f"{action.capitalize()} custom role {inp.deploy_role_name}",
-        check=True,
-    )
+    # Pass the role definition as a temp @file rather than inline JSON. On Windows the az
+    # entrypoint is a .cmd shim, and cmd.exe re-parses an inline JSON string (the braces,
+    # quotes, and brackets trip "was unexpected at this time"); the @file form sidesteps all
+    # shell quoting. az reads JSON from the path after the leading '@'.
+    handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+    try:
+        json.dump(role_def, handle)
+        handle.close()
+        _run(
+            [
+                "az",
+                "role",
+                "definition",
+                action,
+                "--role-definition",
+                f"@{handle.name}",
+                "--output",
+                "none",
+            ],
+            description=f"{action.capitalize()} custom role {inp.deploy_role_name}",
+            check=True,
+        )
+    finally:
+        os.unlink(handle.name)
 
 
 def _ensure_flux_read_rbac(inp: OnboardInputs) -> None:
@@ -983,6 +1002,11 @@ def _write_handoff(inp: OnboardInputs) -> None:
     _gh_set_variable(inp, "AKS_CLUSTER_NAME", inp.aks_cluster)
     _gh_set_variable(inp, "K8S_NAMESPACE", inp.namespace)
     _gh_set_variable(inp, "FLUX_NAMESPACE", inp.flux_namespace)
+    # AAD_CLIENT_ID is the resource/audience the integration-test mints the acceptance-test
+    # token for, NOT an identity. SPI MSIs can only mint ARM-audience tokens, so this is a
+    # constant; the CI identity is carried by AZURE_CLIENT_ID (the token's appid). See
+    # AAD_TOKEN_RESOURCE.
+    _gh_set_variable(inp, "AAD_CLIENT_ID", AAD_TOKEN_RESOURCE)
     if inp.keyvault:
         _gh_set_variable(inp, "KEYVAULT_NAME", inp.keyvault)
     if inp.gateway_url:
