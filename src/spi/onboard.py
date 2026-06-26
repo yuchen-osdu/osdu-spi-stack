@@ -41,6 +41,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -526,46 +527,76 @@ def _assign_role(inp: OnboardInputs, role: str, scope: str, description: str) ->
             return
         console.print("  [error]Identity principalId unknown; cannot assign role.[/error]")
         raise typer.Exit(code=1)
-    existing = _az_json(
-        [
-            "role",
-            "assignment",
-            "list",
-            "--assignee",
-            inp.identity_principal_id,
-            "--role",
-            role,
-            "--scope",
-            scope,
-        ],
-        check=False,
-    )
-    if existing:
+    def _assignment_present() -> bool:
+        return bool(
+            _az_json(
+                [
+                    "role",
+                    "assignment",
+                    "list",
+                    "--assignee",
+                    inp.identity_principal_id,
+                    "--role",
+                    role,
+                    "--scope",
+                    scope,
+                ],
+                check=False,
+            )
+        )
+
+    if _assignment_present():
         console.print(f"  [info]{description}: already assigned[/info]")
         return
     if inp.dry_run:
         _plan(f"az role assignment create --role '{role}' --scope {scope}")
         return
-    _run(
-        [
-            "az",
-            "role",
-            "assignment",
-            "create",
-            "--assignee-object-id",
-            inp.identity_principal_id,
-            "--assignee-principal-type",
-            "ServicePrincipal",
-            "--role",
-            role,
-            "--scope",
-            scope,
-            "--output",
-            "none",
-        ],
-        description=description,
-        check=False,
+    # A freshly-created custom role definition can lag in propagation, so
+    # ``az role assignment create`` may transiently fail to resolve --role by name.
+    # Retry with backoff and verify via re-query (the source of truth), then surface
+    # a hard failure rather than continuing silently. Previously this ran once with
+    # check=False, so the propagation-race error was swallowed and the namespace
+    # deploy role was left unassigned (the deploy lane then 403'd and the grant had
+    # to be done by hand).
+    attempts = 6
+    delay_seconds = 10
+    for attempt in range(1, attempts + 1):
+        _run(
+            [
+                "az",
+                "role",
+                "assignment",
+                "create",
+                "--assignee-object-id",
+                inp.identity_principal_id,
+                "--assignee-principal-type",
+                "ServicePrincipal",
+                "--role",
+                role,
+                "--scope",
+                scope,
+                "--output",
+                "none",
+            ],
+            description=description,
+            check=False,
+        )
+        if _assignment_present():
+            if attempt > 1:
+                display_result(f"{description}: assigned (after {attempt} attempts)")
+            return
+        if attempt < attempts:
+            console.print(
+                f"  [warning]{description}: not yet present "
+                f"(attempt {attempt}/{attempts}); retrying in {delay_seconds}s "
+                "(role-definition propagation)[/warning]"
+            )
+            time.sleep(delay_seconds)
+    console.print(
+        f"  [error]{description}: role assignment did not materialize after "
+        f"{attempts} attempts (scope={scope}).[/error]"
     )
+    raise typer.Exit(code=1)
 
 
 def _ensure_custom_deploy_role(inp: OnboardInputs) -> None:
@@ -618,6 +649,17 @@ def _ensure_custom_deploy_role(inp: OnboardInputs) -> None:
         )
     finally:
         os.unlink(handle.name)
+    # A brand-new custom role definition is not immediately resolvable by name in
+    # ``az role assignment create``; poll until it is queryable so the subsequent
+    # namespace-scoped assignment does not lose a propagation race.
+    if action == "create":
+        for _ in range(12):
+            if _az_json(
+                ["role", "definition", "list", "--name", inp.deploy_role_name],
+                check=False,
+            ):
+                break
+            time.sleep(5)
 
 
 def _ensure_flux_read_rbac(inp: OnboardInputs) -> None:
