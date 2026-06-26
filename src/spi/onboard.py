@@ -59,19 +59,20 @@ GH_OIDC_AUDIENCE = "api://AzureADTokenExchange"
 
 # Least-privilege dataActions for the custom deploy role (Azure RBAC for Kubernetes).
 # Mirrors the Kubernetes Role in design SS6.1 step 3: patch the deployment + read the
-# pod/replicaset/event/log chain that `kubectl rollout status` and diagnostics walk.
+# pod/replicaset/event chain that `kubectl rollout status` walks. Pod log read and Flux
+# Kustomization read are intentionally NOT here: Azure RBAC for Kubernetes registers no
+# `pods/log/read` dataAction and no dataAction for the Flux CRD group (verified against the
+# Microsoft.ContainerService provider operations), so `az role definition create` rejects
+# them. Flux Kustomization read (needed by the CI-mode suspend pre-check) is granted via
+# native k8s RBAC instead; see _ensure_flux_read_rbac.
 DEPLOY_DATA_ACTIONS = [
     "Microsoft.ContainerService/managedClusters/apps/deployments/read",
     "Microsoft.ContainerService/managedClusters/apps/deployments/write",
     "Microsoft.ContainerService/managedClusters/apps/replicasets/read",
     "Microsoft.ContainerService/managedClusters/pods/read",
-    "Microsoft.ContainerService/managedClusters/pods/log/read",
     "Microsoft.ContainerService/managedClusters/events/read",
 ]
-# Read-only dataActions for the Flux CI-mode pre-check (list Kustomizations).
-FLUX_READ_DATA_ACTIONS = [
-    "Microsoft.ContainerService/managedClusters/kustomize.toolkit.fluxcd.io/kustomizations/read",
-]
+FLUX_READER_ROLE = "spi-ci-flux-reader"
 AKS_CLUSTER_USER_ROLE = "Azure Kubernetes Service Cluster User Role"
 KEY_VAULT_SECRETS_USER_ROLE = "Key Vault Secrets User"
 
@@ -571,7 +572,7 @@ def _ensure_custom_deploy_role(inp: OnboardInputs) -> None:
         ),
         "Actions": [],
         "NotActions": [],
-        "DataActions": DEPLOY_DATA_ACTIONS + FLUX_READ_DATA_ACTIONS,
+        "DataActions": DEPLOY_DATA_ACTIONS,
         "NotDataActions": [],
         "AssignableScopes": [inp.cluster_resource_id],
     }
@@ -596,8 +597,69 @@ def _ensure_custom_deploy_role(inp: OnboardInputs) -> None:
             "none",
         ],
         description=f"{action.capitalize()} custom role {inp.deploy_role_name}",
-        check=False,
+        check=True,
     )
+
+
+def _ensure_flux_read_rbac(inp: OnboardInputs) -> None:
+    """Grant the CI identity read on Flux Kustomizations via native k8s RBAC.
+
+    The deploy lane's CI-mode suspend pre-check lists Kustomizations in the flux namespace.
+    Azure RBAC for Kubernetes registers no dataAction for the Flux CRD group, so this cannot
+    be a custom Azure role; a native Role + RoleBinding is the path (native RBAC is additive
+    to Azure RBAC, so it is honored even with Azure RBAC enabled and local accounts disabled).
+    The binding subject is the identity's AAD object id (principalId), matching how the
+    cluster's Azure RBAC webhook names service-principal callers.
+    """
+    console.print("\n[bold]Ensuring Flux read (native RBAC)...[/bold]")
+    if not inp.identity_principal_id:
+        console.print("  [warning]identity principal id unknown; skipping Flux read RBAC[/warning]")
+        return
+    binding = f"spi-ci-{inp.service}-flux-reader"
+    if inp.dry_run:
+        _plan(
+            f"kubectl apply Role {FLUX_READER_ROLE} + RoleBinding {binding} in "
+            f"'{inp.flux_namespace}' (Kustomizations read for {inp.identity_principal_id})"
+        )
+        return
+    manifest = f"""apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {FLUX_READER_ROLE}
+  namespace: {inp.flux_namespace}
+rules:
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {binding}
+  namespace: {inp.flux_namespace}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {FLUX_READER_ROLE}
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {inp.identity_principal_id}
+"""
+    handle = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8")
+    try:
+        handle.write(manifest)
+        handle.close()
+        _run(
+            ["kubectl", "apply", "-f", handle.name],
+            description=f"Apply Flux read RBAC ({binding})",
+        )
+        display_result(
+            f"Flux Kustomization read granted to {inp.identity_principal_id} in "
+            f"'{inp.flux_namespace}'"
+        )
+    finally:
+        os.unlink(handle.name)
 
 
 def _ensure_rbac(inp: OnboardInputs) -> None:
@@ -614,15 +676,9 @@ def _ensure_rbac(inp: OnboardInputs) -> None:
         inp.namespace_scope,
         f"Custom deploy role on namespace '{inp.namespace}'",
     )
-    # Flux read lives in the same custom role; assign it at the flux namespace scope too so
-    # the deploy action's suspend pre-check can list Kustomizations there.
-    if inp.flux_namespace != inp.namespace:
-        _assign_role(
-            inp,
-            inp.deploy_role_name,
-            inp.flux_namespace_scope,
-            f"Custom deploy role (flux read) on namespace '{inp.flux_namespace}'",
-        )
+    # Flux Kustomization read for the CI-mode suspend pre-check. Azure RBAC for Kubernetes
+    # has no dataAction for the Flux CRD group, so this is granted via native k8s RBAC.
+    _ensure_flux_read_rbac(inp)
     # 7. Key Vault Secrets User (acceptance-test secrets).
     if inp.keyvault:
         kv = _az_json(["keyvault", "show", "--name", inp.keyvault], check=False)

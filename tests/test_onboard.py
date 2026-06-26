@@ -20,7 +20,6 @@ assignment scopes, identity/role names) without touching az/kubectl/gh.
 
 from spi.onboard import (
     DEPLOY_DATA_ACTIONS,
-    FLUX_READ_DATA_ACTIONS,
     OSDU_BRANCHES,
     OnboardInputs,
     _should_write_secrets,
@@ -69,13 +68,19 @@ def test_namespace_scope_is_not_cluster_wide():
 
 def test_deploy_data_actions_are_least_privilege():
     # No wildcard / delete / secrets-read actions in the deploy role.
-    blob = " ".join(DEPLOY_DATA_ACTIONS + FLUX_READ_DATA_ACTIONS).lower()
+    blob = " ".join(DEPLOY_DATA_ACTIONS).lower()
     assert "*" not in blob
     assert "secrets" not in blob
     assert "/delete" not in blob
-    # Deployments get write (set image); pods/logs/events are read-only.
+    # Deployments get write (set image); pods/events are read-only.
     assert "apps/deployments/write" in blob
-    assert "pods/log/read" in blob
+    assert "pods/read" in blob
+    assert "events/read" in blob
+    # pods/log/read and the Flux CRD read are not registered AKS dataActions, so they are
+    # NOT in the Azure role (they would make `az role definition create` fail); Flux read is
+    # granted via native k8s RBAC instead.
+    assert "pods/log" not in blob
+    assert "kustomize" not in blob
 
 
 def test_osdu_branch_subjects_cover_the_three_branches():
