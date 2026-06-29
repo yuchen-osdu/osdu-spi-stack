@@ -25,7 +25,7 @@ from . import __version__
 from .checks import PREREQ_TOOLS, check_prerequisites
 from .config import Config, IngressMode, Profile
 from .console import console, display_result, display_yaml
-from .guard import get_suspend_status, verify_spi_cluster
+from .guard import get_suspend_status, resolve_flux_namespace, verify_spi_cluster
 from .images import (
     DEFAULT_IMAGE_BRANCH,
     ImageResolutionError,
@@ -33,7 +33,7 @@ from .images import (
     resolve_image_lock,
 )
 from .ingress import resolve_acme_email, resolve_ingress_mode
-from .shell import kubectl_apply_yaml, run_command
+from .shell import kubectl_apply_yaml, kubectl_json, run_command
 
 app = typer.Typer(
     name="spi",
@@ -407,6 +407,41 @@ def status(
         render_status()
 
 
+def _flux_resource_names(kind: str, namespace: str) -> List[str]:
+    """Names of all Flux resources of ``kind`` in ``namespace`` (empty on error)."""
+    data = kubectl_json(["get", kind, "-n", namespace, "-o", "json"])
+    if not data:
+        return []
+    return [
+        item["metadata"]["name"]
+        for item in data.get("items", [])
+        if item.get("metadata", {}).get("name")
+    ]
+
+
+def _set_flux_suspend(namespace: str, suspend: bool) -> None:
+    """Suspend or resume the SPI Stack's GitRepository, Kustomizations, and HelmReleases.
+
+    The deploy lane (ADR-032) requires the cluster in CI mode -- all Flux reconcilers
+    frozen -- so a ``kubectl set image`` is not drift-corrected back to the chart's
+    pinned image. Suspending the GitRepository source alone (ADR-014) is not enough:
+    the Kustomizations and, critically, the HelmReleases keep reconciling the cached
+    artifact and revert the deployed image. Freeze all three.
+    """
+    patch = '{"spec":{"suspend":true}}' if suspend else '{"spec":{"suspend":false}}'
+    verb = "Suspend" if suspend else "Resume"
+    targets = [("gitrepository", ["osdu-spi-stack-system"])]
+    for kind in ("kustomization", "helmrelease"):
+        targets.append((kind, _flux_resource_names(kind, namespace)))
+    for kind, names in targets:
+        for name in names:
+            run_command(
+                ["kubectl", "patch", kind, name, "-n", namespace, "--type=merge", "-p", patch],
+                description=f"{verb} {kind}/{name}",
+                check=False,
+            )
+
+
 @app.command()
 def reconcile(
     suspend: bool = typer.Option(False, "--suspend", help="Freeze: stop Flux auto-reconciliation"),
@@ -440,42 +475,27 @@ def reconcile(
     console.print(f"  [dim]Cluster context: {ctx}[/dim]")
 
     if suspend:
-        console.print("\n[bold]Suspending GitRepository...[/bold]")
-        run_command(
-            [
-                "kubectl",
-                "patch",
-                "gitrepository",
-                "osdu-spi-stack-system",
-                "-n",
-                "flux-system",
-                "-p",
-                '{"spec":{"suspend":true}}',
-                "--type=merge",
-            ],
-            description="Suspend GitRepository (freeze reconciliation)",
+        ns = resolve_flux_namespace()
+        console.print(
+            f"\n[bold]Entering CI mode: freezing Flux reconciliation in '{ns}'...[/bold]"
         )
-        console.print("[warning]GitRepository suspended.[/warning]")
-        console.print("[dim]Run 'uv run spi reconcile --resume' to unfreeze.[/dim]")
+        _set_flux_suspend(ns, True)
+        console.print(
+            "[warning]GitRepository, Kustomizations, and HelmReleases suspended.[/warning]"
+        )
+        console.print(
+            "[dim]The cluster is pinned and safe for deploy-lane CI (ADR-032). "
+            "Run 'uv run spi reconcile --resume' to unfreeze.[/dim]"
+        )
         return
 
     if resume:
-        console.print("\n[bold]Resuming GitRepository...[/bold]")
-        run_command(
-            [
-                "kubectl",
-                "patch",
-                "gitrepository",
-                "osdu-spi-stack-system",
-                "-n",
-                "flux-system",
-                "-p",
-                '{"spec":{"suspend":false}}',
-                "--type=merge",
-            ],
-            description="Resume GitRepository (unfreeze reconciliation)",
+        ns = resolve_flux_namespace()
+        console.print(f"\n[bold]Resuming Flux reconciliation in '{ns}'...[/bold]")
+        _set_flux_suspend(ns, False)
+        console.print(
+            "[success]GitRepository, Kustomizations, and HelmReleases resumed.[/success]"
         )
-        console.print("[success]GitRepository resumed.[/success]")
         return
 
     if refresh_images:
@@ -508,7 +528,8 @@ def reconcile(
         )
 
     ts = datetime.datetime.now().isoformat()
-    console.print("\n[bold]Reconciling...[/bold]")
+    ns = resolve_flux_namespace()
+    console.print(f"\n[bold]Reconciling (namespace '{ns}')...[/bold]")
 
     run_command(
         [
@@ -517,19 +538,13 @@ def reconcile(
             "--overwrite",
             "gitrepository/osdu-spi-stack-system",
             "-n",
-            "flux-system",
+            ns,
             f"reconcile.fluxcd.io/requestedAt={ts}",
         ],
         description="Trigger GitRepository reconciliation",
     )
 
-    for name in [
-        "osdu-spi-stack",
-        "osdu-spi-stack-system-stack",
-        "stack",
-        "spi-osdu-services",
-        "spi-osdu-reference",
-    ]:
+    for name in _flux_resource_names("kustomization", ns):
         run_command(
             [
                 "kubectl",
@@ -537,7 +552,7 @@ def reconcile(
                 "--overwrite",
                 f"kustomization/{name}",
                 "-n",
-                "flux-system",
+                ns,
                 f"reconcile.fluxcd.io/requestedAt={ts}",
             ],
             description=f"Trigger Kustomization reconciliation ({name})",

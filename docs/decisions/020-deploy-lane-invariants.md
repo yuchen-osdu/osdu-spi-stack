@@ -99,10 +99,11 @@ through test.
 
 - The deploy lane no longer needs manual intervention to land and verify a single
   image digest, *provided* CI mode is established correctly (invariant 1).
-- Invariant 1 makes HelmRelease suspension a required operational step. The clean
-  follow-up is to fold "suspend Kustomizations + HelmReleases in `osdu-flux`"
-  into `spi reconcile --suspend` (today it only suspends the `flux-system`
-  GitRepository), so a single command yields the CI-mode state the lane asserts.
+- Invariant 1 makes HelmRelease suspension a required operational step, now
+  provided by `spi reconcile --suspend`: it resolves the Flux namespace from the
+  live `osdu-spi-stack-system` GitRepository and suspends the GitRepository, all
+  Kustomizations, and all HelmReleases, so a single command yields the CI-mode
+  state the deploy lane asserts (`--resume` reverses it for a baseline refresh).
 - Several of these were fixes that existed in exactly one fork (partition) and
   had silently not propagated (agent chmod, digest capture). The standing rule is
   reaffirmed: deploy-lane actions and the service Dockerfile are template-owned;
