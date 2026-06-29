@@ -61,3 +61,5 @@ Create an ADR for any decision that could plausibly have gone a different way an
 | [016](016-istio-jwt-projection.md) | Istio JWT Projection for Azure-Provider OSDU Services | Accepted |
 | [017](017-osdu-image-lock.md) | Per-Deploy Image Lock via ConfigMap + Flux Substitution | Accepted |
 | [018](018-karpenter-nodepool-authoring.md) | Karpenter NodePool Authoring as Workload Manifests | Accepted |
+| [019](019-adme-aligned-integration-tests.md) | ADME-Aligned, Secret-Less Integration Tests on the Deploy Lane | Accepted |
+| [020](020-deploy-lane-invariants.md) | Deploy-Lane CI-Mode and Digest-Pin Invariants | Accepted |
