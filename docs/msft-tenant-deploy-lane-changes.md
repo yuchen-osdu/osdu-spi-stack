@@ -322,122 +322,178 @@ live, and codified:
 
 ---
 
-# Part 3 — Deploy‑lane changes (CI/CD)
+# Part 3 — Deploy lane (CI/CD)
 
-The deploy lane = the `osdu-spi` **template** workflows/actions
-(`.github/actions/aks-deploy`, `integration-test`, `.github/template-workflows/validate.yml`)
-plus the per‑fork `validate.yml`. Goal: bring services live and run **ADME‑equivalent
-acceptance suites** that pass, secret‑less, on the per‑identity model.
+The engineering system Daniel built (the three‑branch fork model) produces validated
+Maven artifacts, but it stops there — no container image, no deployment, and no
+integration‑test signal against a live cluster. **Part 3 is the deploy lane we added
+on top of it**: a reusable pipeline that takes a merged change on a service fork,
+builds and pushes a container image, deploys it to the shared `osdu-spi-stack`
+cluster, and runs that service's ADME acceptance suite against the live gateway.
 
-## 3.1 `aks-deploy` deployed‑digest capture race
-- **What:** `aks-deploy` (and `integration-test`) captured the deployed image digest
-  from `.items[0]` / `.[0]` of **all** selector pods — including **terminating**
-  ones — so during a rollout it could record the **old (community) digest** and the
-  pin‑check would falsely fail (or the IT guard would skip).
-- **Fix:** filter to a **Running, non‑terminating (deletionTimestamp==null), Ready**
-  pod for both the previous and deployed captures. Partition already did this;
-  aligned the **template + legal + storage**. *(digest‑race, aks‑deploy‑digest‑capture)*
+Design principles it's built on:
 
-## 3.2 Integration‑test digest guard + concurrency (`digest-guard-race`)
-- **What:** The IT digest guard saw `8381ca14 != recorded 36bf9567` and **skipped**
-  the suite. Root cause: cross‑run race — the deploy‑job concurrency group
-  `spi-stack-<svc>` was on the **deploy job only**, not the integration‑test job, so
-  a second run's deploy slipped in during the first run's tests.
-- **Fix:** the Running/Ready‑pod digest capture (3.1) removed the false mismatch;
-  the durable recommendation is to put deploy + integration‑test under the **same
-  concurrency group**.
+- **Reusable template workflow (ADR‑015).** The whole lane is authored once in the
+  `osdu-spi` template (`.github/template-workflows/validate.yml` plus composite
+  actions under `.github/actions/`) and synced to every fork. Per‑service specifics
+  come from GitHub **repo variables** (`SERVICE_NAME`, `AKS_CLUSTER_NAME`,
+  `K8S_NAMESPACE`, `K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`, `FLUX_NAMESPACE`,
+  `GATEWAY_URL`, `KEYVAULT_NAME`, `AAD_CLIENT_ID`), so no fork edits the workflow.
+- **Immutable digests (ADR‑032).** Every deploy references the image by `sha256:`
+  digest, never a mutable tag, so the running image is provably the one the build
+  produced and the tests exercised.
+- **CI mode (ADR‑032).** The lane deploys imperatively into a Flux‑suspended cluster
+  (§3.6), so GitOps never reverts a CI image mid‑test.
+- **Secret‑less, per‑identity auth.** Every Azure step logs in with a federated
+  **OIDC** token (`id-token: write`), and the tests authenticate as the CI Managed
+  Identity — there is no service‑principal client secret anywhere in the lane.
 
-## 3.3 IT timeout + surefire flags
-- **`it-timeout`:** the retry action's per‑attempt `timeout_minutes` defaulted to
-  **10 min**; the storage reactor build + ~125 live tests exceed it → *"Timeout of
-  600000ms hit"* on attempt 1. **Fix:** wire `timeout_minutes = vars.IT_TIMEOUT_MINUTES || 25`
-  and `max_attempts = vars.IT_MAX_ATTEMPTS || 2` in the storage/legal fork
-  `validate.yml` **and** the canonical `osdu-spi/.github/template-workflows/validate.yml`
-  (benefits all forks; template also gained the missing `maven_goal` + `root_token_env`).
-- **`surefire-am-flag`:** a single `mvn -pl <svc>-test-azure -am verify -Dtest=!X`
-  leaks the `-Dtest` filter to `<svc>-test-core` (abstract bases, 0 concrete tests)
-  → *"No tests matching pattern"* → BUILD FAILURE. **Fix:** add
-  `-Dsurefire.failIfNoSpecifiedTests=false` (+ `-Dmaven.surefire.useFile=false` per
-  ADME). Equivalent to ADME's separate install(core)+verify(azure) invocations.
+## 3.1 Pipeline shape (`validate.yml`)
 
-## 3.4 ADME‑equivalent, secret‑less acceptance suites (`adme-suite-match`)
-- **What:** Standardize the deploy‑lane suites onto ADME's
-  `testing/<svc>-test-azure` shape, authenticating **secret‑less** with a
-  pre‑minted **federated** `INTEGRATION_TESTER_ACCESS_TOKEN` (no SP client secret).
-- **Fix:** the `integration-test` action exports `INTEGRATION_TESTER_ACCESS_TOKEN`;
-  `validate.yml` wires `maven_goal` + `root_token_env`. Per‑service specifics:
-  - **Legal (`legal-coo-blob-secretless`):** copied ADME `AzureLegalTagUtils`
-    verbatim (only `accessToken()` differs — prefers `INTEGRATION_TESTER_ACCESS_TOKEN`);
-    ADME's `OSDU-Legal` m26 **comments out** the COO‑blob `uploadTenantTestingConfigFile()`
-    calls, so the one residual SP‑secret test disappeared. **A previously‑created
-    service principal + secret was removed/deleted** — the suite is now fully
-    secret‑less, byte‑identical to ADME.
-  - **Storage:** `AzureTestUtils` already supports the pre‑minted
-    `INTEGRATION_TESTER_ACCESS_TOKEN`.
-  - **KV parity (`kv-secret-parity`):** the only remaining KV secrets
-    (`dataStorageAccount/Key`, `serviceBusConnectionString`) are a *delivery*
-    difference, not a *need* — ADME injects the same at runtime from the leased
-    instance's Key Vault. Mapped identically via `SECRET_MAP` from the dev5 KV.
+On a qualifying event the workflow runs a job graph:
 
-## 3.5 CI‑mode automation (setter + checker) — `cimode-automated-final`
-- **What:** "CI mode" (freeze GitOps so the deploy lane's imperative `kubectl set
-  image` isn't reverted) previously required manual `flux suspend` commands, and the
-  CLI only suspended **Kustomizations**, not **HelmReleases** (services are
-  HelmRelease‑managed → an HR reconcile reverted the deploy — `helmrelease-suspend-gap`).
-- **Fix (two merged PRs):**
-  - **Setter — `osdu-spi-stack #6`:** `spi reconcile --suspend` now performs a full
-    freeze — **GitRepository + ALL Kustomizations + ALL HelmReleases** (`--resume`
-    reverses). The Flux namespace is **auto‑resolved** from the live
-    `osdu-spi-stack-system` GitRepository (`guard.resolve_flux_namespace`,
-    namespace‑agnostic) — fixing a hardcoded `flux-system` that had made the CLI
-    broken on the `osdu-flux` stack. Reconciles ADR‑014 (freeze) with ADR‑032 (CI
-    mode). Live‑validated on dev5: one command → `kustomizations=0 / helmreleases=0`
-    not‑suspended, `gitrepository.suspend=true`.
-  - **Checker — `osdu-spi #26`:** `aks-deploy` pre‑flight now **asserts** all
-    HelmReleases **and** Kustomizations are suspended and fails loud, pointing at
-    `spi reconcile --suspend`.
-  - Net: the per‑run manual CI‑mode step went from two flux/kubectl commands to a
-    single `spi reconcile --suspend`.
+```
+check-init → check-repo-state → check-paths → java-build
+          → docker-build → docker-push → deploy → integration-test
+                                       (+ code-quality, cluster-health)
+```
 
-## 3.6 ONBOARD‑INIT per‑service variable automation (research only)
-- **What:** Today the per‑service acceptance‑test variables
-  (`ACCEPTANCE_TEST_DIR`, `MAVEN_GOAL`, `ROOT_TOKEN_ENV`, `ACCEPTANCE_TEST_ENV_MAP`,
-  `ACCEPTANCE_TEST_SECRET_MAP`) are **hand‑set per fork**. Research (no
-  implementation) produced a recommended design:
-  - Variables split into **3 tiers**: (1) universal auth (identical), (2) derivable
-    from stack facts + service name (URLs/partition/domain/KV), (3) irreducibly
-    service‑specific (test exclusions, cross‑service deps, feature tokens,
-    module‑name exceptions).
-  - **Recommendation:** auto‑derive tiers 1+2 (the deploy lane already mints the
-    token and `spi onboard` writes the stack facts); supply tier 3 via a small
-    per‑service **IT profile** translated once from each ADME
-    `ServiceITsProd.yml` block, checked into the `osdu-spi` template and read by
-    `setup-service-variables.sh`. Reject runtime‑parsing ADME (cross‑org coupling).
-  - Only **4 profiles needed now** (legal, storage, partition, entitlements — the
-    forked services). Recorded in separate ONBOARD‑INIT research notes.
-  - **Blocked:** ONBOARD‑INIT‑B (#11) depends on ONBOARD‑INIT‑A (input‑mechanism
-    spec) upstream.
+`deploy` and `integration-test` run only for same‑repo pushes — a PR from a fork
+can't reach the cluster. A **per‑service concurrency group**
+(`spi-stack-${SERVICE_NAME}`) serializes a service against itself while still letting
+different services deploy in parallel.
 
-### Tests / validation (Part 3) — the E2E results
+## 3.2 Build and push
+
+`java-build → docker-build → docker-push` compile the service, build the container
+(multi‑arch), and push it to the registry. `docker-push` outputs the **image digest**,
+which is the only image reference used from here on.
+
+## 3.3 Deploy — the `aks-deploy` action
+
+Given the cluster/namespace/deployment repo‑vars and the pushed digest, `aks-deploy`
+runs these steps:
+
+1. **OIDC login** to Azure (federated, secret‑less) and fetch AKS credentials.
+2. **Validate the digest format.**
+3. **CI‑mode pre‑flight assertion** — verify Flux is suspended (GitRepository,
+   Kustomizations, *and* HelmReleases) and **fail loud** if anything is reconciling,
+   pointing at `spi reconcile --suspend`. This is the guard that stops GitOps from
+   racing the deploy (§3.6).
+4. **Capture the previous digest**, so a bad deploy can be restored.
+5. **`kubectl set image deployment/<name> <container>=<repo>@<digest>`** — the deploy
+   itself: one imperative call, by digest.
+6. **Wait for rollout**, then **capture the deployed digest** from the new
+   **Running, non‑terminating, Ready** pod — deliberately not `.items[0]`, so a
+   draining old pod can never be recorded as the new one. That digest is handed to
+   the test job.
+
+## 3.4 Integration test — the `integration-test` action
+
+The test job re‑authenticates (OIDC), fetches AKS credentials, and then:
+
+1. **Digest guard** — confirm the pod that will serve the tests is *still* running the
+   exact digest `aks-deploy` recorded; if the cluster drifted (e.g. an overlapping
+   run), it stops rather than testing the wrong image.
+2. **Cross‑service health probe** (advisory) against the services this one depends on.
+3. **Mint the acceptance‑test token with no secret** — a federated
+   `INTEGRATION_TESTER_ACCESS_TOKEN` for the CI Managed Identity — and inject the
+   non‑secret config from `env_map` (service URLs, `INTEGRATION_TESTER`, `AZURE_AD_*`).
+4. **Load Key Vault secrets** named by `secret_map`, masked and multiline‑safe.
+5. **Run the ADME `<svc>-test-azure` suite** through the gateway (`maven_goal`), with
+   **retry** (`max_attempts`) and a tunable per‑attempt **timeout** (`timeout_minutes`)
+   sized for the reactor build plus the live tests.
+6. **Publish JUnit results** and a run summary.
+
+The per‑service inputs it consumes — `test_dir`, `maven_goal`, `root_token_env`,
+`env_map`, `secret_map`, `gateway_url`, `keyvault_name`, `aad_client_id` — are the
+onboarding variables covered in §3.7.
+
+Two robustness details were load‑bearing for getting stable green runs: the
+`maven_goal` carries `-Dsurefire.failIfNoSpecifiedTests=false` so a
+`-pl <svc>-test-azure -am` reactor build doesn't fail when a `-Dtest=!…` exclusion
+leaves the *core* module with zero matching tests; and the digest guard together with
+the per‑service concurrency group (§3.1) keep two overlapping runs from testing each
+other's images.
+
+## 3.5 Running the suites ADME‑equivalent and secret‑less
+
+The suites are the real ADME `testing/<svc>-test-azure` modules, made to run
+secret‑less on the per‑identity token:
+
+- **Legal** — adopted ADME's `AzureLegalTagUtils` (its `accessToken()` prefers the
+  pre‑minted `INTEGRATION_TESTER_ACCESS_TOKEN`), and — following ADME's `OSDU-Legal`
+  m26 — left the COO‑blob `uploadTenantTestingConfigFile()` calls commented out (the
+  deployed service already carries that config). That removed the last test needing a
+  storage‑account key, so the **service principal + secret we had created was deleted**
+  — the legal suite is now byte‑identical to ADME and fully secret‑less.
+- **Storage** — ADME's `AzureTestUtils` already accepts the pre‑minted token, so no
+  code change was needed.
+- **Key Vault parity** — the only KV‑sourced values (`dataStorageAccount/Key`,
+  `serviceBusConnectionString`) are a *delivery* difference, not an extra requirement:
+  ADME injects the same values at runtime from its leased instance's Key Vault, and we
+  map them identically via `secret_map` from the stack Key Vault.
+
+## 3.6 CI‑mode automation (setter + checker)
+
+CI mode — the Flux‑suspended steady state the lane deploys into (ADR‑032) — used to be
+a manual `flux suspend` step, and the CLI only suspended Kustomizations, which wasn't
+enough: the services are **HelmRelease‑managed**, so a HelmRelease reconcile would
+still revert a `kubectl set image`. Two merged changes closed that gap:
+
+- **Setter — `osdu-spi-stack #6`:** `spi reconcile --suspend` now performs a full
+  freeze (**GitRepository + all Kustomizations + all HelmReleases**; `--resume`
+  reverses), with the Flux namespace auto‑resolved from the live GitRepository (fixing
+  a hardcoded `flux-system` that broke on the `osdu-flux` stack).
+- **Checker — `osdu-spi #26`:** the `aks-deploy` pre‑flight (§3.3, step 3) asserts all
+  of it is suspended and fails loud otherwise.
+
+Net: entering CI mode is a single `spi reconcile --suspend`, and the deploy lane
+refuses to run unless the cluster is in it.
+
+## 3.7 Per‑service onboarding variables (ONBOARD‑INIT) — design only
+
+The per‑service acceptance‑test inputs in §3.4 (`test_dir`, `maven_goal`,
+`root_token_env`, `env_map`, `secret_map`, …) are today **hand‑set per fork**.
+Research (no implementation) produced a recommended way to automate them:
+
+- The variables split into **three tiers**: (1) universal auth (identical for every
+  service), (2) derivable from stack facts + service name (service URLs, partition,
+  domain, Key Vault), and (3) irreducibly service‑specific (test exclusions,
+  cross‑service dependencies, feature tokens, module‑name exceptions).
+- **Recommendation:** auto‑derive tiers 1 and 2 (the lane already mints the token and
+  `spi onboard` already writes the stack facts), and supply tier 3 from a small
+  per‑service **IT profile** translated once from that service's ADME
+  `ServiceITsProd.yml` block, checked into the `osdu-spi` template and read by
+  `setup-service-variables.sh`. Parsing ADME's pipeline at runtime was rejected
+  (cross‑org coupling).
+- Only **four profiles are needed now** (legal, storage, partition, entitlements — the
+  forked services). Captured in the separate ONBOARD‑INIT research notes.
+- **Blocked:** ONBOARD‑INIT‑B (#11) depends on ONBOARD‑INIT‑A (input‑mechanism spec)
+  upstream.
+
+### Validation — end‑to‑end results
+
 - **Storage acceptance (dev5, per‑identity federated token + seeded MSI):**
-  **133 run, 126 pass, 0 error, 1 skip, 7 fail.** All 7 failures =
-  `PostFetchRecordsIntegrationTests.should_returnRecordsAfterCrsConversion__*`
-  — **crs‑conversion is not deployed** in any namespace (out of scope for
-  partition/entitlements/legal/storage); route `/api/crs/converter/v3` 500s.
-  Resolution: exclude the 7 crs methods (ADME‑style dep exclusion). **The
-  per‑identity auth model is validated by the 126 passing tests.**
+  **133 run, 126 pass, 0 error, 1 skip, 7 fail.** All 7 failures are
+  `PostFetchRecordsIntegrationTests.should_returnRecordsAfterCrsConversion__*` —
+  **crs‑conversion is not deployed** in any namespace (out of scope for
+  partition/entitlements/legal/storage); its route `/api/crs/converter/v3` 500s. Those
+  7 methods are excluded ADME‑style; the **per‑identity auth model is validated by the
+  126 passing tests.**
 - **Legal acceptance (dev5):** green and **fully secret‑less** (federated CI‑MSI
-  token); the COO‑blob test removed to match ADME (3.4). `INTEGRATION_TESTER` set to
-  the legal CI MSI.
-- **Partition acceptance (deploy‑lane E2E):** validate run `28210313734` re‑run →
-  **Tests run: 11, Failures: 0** (`GetPartitionByIdApiTest` 4/4). The
-  `getpartition-404` chain was root‑caused (workflow HelmRelease InProgress →
-  osdu‑services health gate → bootstrap never ran → `opendes` record absent) and
-  fixed by pinning workflow to a dev3 known‑good image (see Part 4).
-- **CI‑mode automation:** `tests/test_reconcile.py` (5 tests) pass; setter
-  live‑validated on dev5 (0/0 not‑suspended); checker merged.
-- **Template/fork wiring:** the digest/timeout/surefire/token fixes were pushed to
-  the canonical template so all forks inherit them.
+  token); the COO‑blob test removed to match ADME (§3.5). `INTEGRATION_TESTER` is set
+  to the legal CI MSI.
+- **Partition acceptance (deploy‑lane E2E):** validate run `28210313734` (re‑run) →
+  **Tests run: 11, Failures: 0** (`GetPartitionByIdApiTest` 4/4). An earlier 404 chain
+  was root‑caused (workflow HelmRelease InProgress → osdu‑services health gate →
+  bootstrap never ran → `opendes` record absent) and fixed by pinning workflow to a
+  dev3 known‑good image (see Part 4).
+- **CI‑mode automation:** `tests/test_reconcile.py` (5 tests) pass; the setter was
+  live‑validated on dev5 (0/0 not‑suspended); the checker is merged.
+- **Template/fork wiring:** the deploy/test actions, timeout/surefire settings, and
+  the token standardization all live in the canonical template, so every fork inherits
+  them on sync.
 
 ---
 
