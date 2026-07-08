@@ -156,12 +156,19 @@ resource osduDb 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2023-11-15' 
   }
 }
 
-// SQL data-plane role assignment for the OSDU managed identity. The account
-// has local (key) auth disabled, so OSDU services authenticate to Cosmos with
-// their workload identity (AZURE_MSI_ISENABLED / WORKLOADIDENTITY). Without the
-// "Cosmos DB Built-in Data Contributor" role (id ...0002) every data-plane call
-// fails with 403 "does not have required RBAC permissions" -- this is the SQL
-// equivalent of the Gremlin role assignment in cosmos-gremlin.bicep.
+// SQL data-plane role assignment for the OSDU managed identity. This grants the
+// "Cosmos DB Built-in Data Contributor" role (id ...0002) so that services with
+// AZURE_MSI_ISENABLED reach Cosmos with their Workload Identity; without it, their
+// data-plane calls fail with 403 "does not have required RBAC permissions". It is
+// the SQL equivalent of the Gremlin role assignment in cosmos-gremlin.bicep.
+//
+// Local (key) auth is intentionally left ENABLED on this SQL account, unlike the
+// Gremlin account. The partition service enables Workload Identity for Key Vault
+// only (AZURE_PAAS_WORKLOADIDENTITY_ISENABLED, not AZURE_MSI_ISENABLED) and still
+// connects to Cosmos with the primary key it reads from Key Vault, so the
+// "<partition>-cosmos-primary-key" secret written below is required. Disabling
+// local auth here (the ADR-022 end state) is a follow-up gated on the partition
+// service supporting the Cosmos data-plane MSI path.
 var sqlDataContributorRoleId = '00000000-0000-0000-0000-000000000002'
 
 resource osduIdentitySqlDataContributor 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2023-11-15' = if (!empty(principalId)) {

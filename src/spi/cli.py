@@ -25,7 +25,13 @@ from . import __version__
 from .checks import PREREQ_TOOLS, check_prerequisites
 from .config import Config, IngressMode, Profile
 from .console import console, display_result, display_yaml
-from .guard import get_suspend_status, resolve_flux_namespace, verify_spi_cluster
+from .guard import (
+    DEFAULT_FLUX_NAMESPACE,
+    SPI_GITREPOSITORY,
+    get_suspend_status,
+    resolve_flux_namespace,
+    verify_spi_cluster,
+)
 from .images import (
     DEFAULT_IMAGE_BRANCH,
     ImageResolutionError,
@@ -408,10 +414,20 @@ def status(
 
 
 def _flux_resource_names(kind: str, namespace: str) -> List[str]:
-    """Names of all Flux resources of ``kind`` in ``namespace`` (empty on error)."""
-    data = kubectl_json(["get", kind, "-n", namespace, "-o", "json"])
-    if not data:
-        return []
+    """Names of all Flux resources of ``kind`` in ``namespace``.
+
+    Raises RuntimeError if the kubectl listing itself fails. A failed query
+    must not be mistaken for "no resources": CI-mode suspend (ADR-032) would
+    then report a successful freeze while HelmReleases keep reconciling, the
+    exact failure this path exists to prevent. ``kubectl_json`` returns None
+    on command failure and a dict (possibly with an empty ``items``) on success.
+    """
+    data = kubectl_json(["get", kind, "-n", namespace])
+    if data is None:
+        raise RuntimeError(
+            f"Failed to list Flux {kind} resources in namespace '{namespace}'; "
+            "refusing to continue because cluster state could not be read."
+        )
     return [
         item["metadata"]["name"]
         for item in data.get("items", [])
@@ -430,7 +446,7 @@ def _set_flux_suspend(namespace: str, suspend: bool) -> None:
     """
     patch = '{"spec":{"suspend":true}}' if suspend else '{"spec":{"suspend":false}}'
     verb = "Suspend" if suspend else "Resume"
-    targets = [("gitrepository", ["osdu-spi-stack-system"])]
+    targets = [("gitrepository", [SPI_GITREPOSITORY])]
     for kind in ("kustomization", "helmrelease"):
         targets.append((kind, _flux_resource_names(kind, namespace)))
     for kind, names in targets:
@@ -532,7 +548,7 @@ def reconcile(
             "kubectl",
             "annotate",
             "--overwrite",
-            "gitrepository/osdu-spi-stack-system",
+            f"gitrepository/{SPI_GITREPOSITORY}",
             "-n",
             ns,
             f"reconcile.fluxcd.io/requestedAt={ts}",
@@ -675,7 +691,7 @@ def update(
 def onboard(
     service: str = typer.Option(..., "--service", help="Service short name (e.g. partition)."),
     repo: str = typer.Option(
-        ..., "--repo", help="Target GitHub repo as org/repo (e.g. yuchen-osdu/partition)."
+        ..., "--repo", help="Target GitHub repo as org/repo (e.g. my-org/partition)."
     ),
     aks_cluster: str = typer.Option(
         ..., "--aks-cluster", help="AKS cluster name to grant deploy access to."
@@ -688,7 +704,7 @@ def onboard(
         "osdu", "--namespace", help="Kubernetes namespace the service Deployment lives in."
     ),
     flux_namespace: str = typer.Option(
-        "flux-system",
+        DEFAULT_FLUX_NAMESPACE,
         "--flux-namespace",
         help="Namespace holding the Flux Kustomizations (this stack uses osdu-flux).",
     ),

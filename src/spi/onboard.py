@@ -48,6 +48,7 @@ from typing import Any, Dict, List, Optional
 import typer
 
 from .console import console, display_result
+from .guard import DEFAULT_FLUX_NAMESPACE
 from .shell import run_command
 
 # Federated-credential subjects to register on the target repo. The corp Entra tenant
@@ -230,7 +231,7 @@ class OnboardInputs:
     aks_rg: str
     identities_rg: str
     namespace: str = "osdu"
-    flux_namespace: str = "flux-system"
+    flux_namespace: str = DEFAULT_FLUX_NAMESPACE
     partition: str = "opendes"
     keyvault: Optional[str] = None
     gateway_url: Optional[str] = None

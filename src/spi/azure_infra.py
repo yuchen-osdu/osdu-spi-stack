@@ -352,11 +352,20 @@ def _existing_aks_outputs(config: Config) -> "Dict[str, Any] | None":
     if identities:
         principal_id = next(iter(identities.values())).get("principalId", "")
 
+    # Kubelet (node) identity object ID. The fresh-deploy path receives this from the
+    # aks.bicep `kubeletIdentityObjectId` output; on an idempotent re-run against an
+    # existing cluster it must be read here too. Without it, `_build_bicep_params`
+    # passes an empty value and the kubelet AcrPull role assignment is silently
+    # skipped, so nodes cannot pull images from the SPI ACR on re-runs.
+    identity_profile = cluster.get("identityProfile") or {}
+    kubelet_identity = identity_profile.get("kubeletidentity") or {}
+
     return {
         "clusterName": cluster.get("name", config.cluster_name),
         "clusterResourceId": cluster.get("id", ""),
         "oidcIssuerUrl": cluster.get("oidcIssuerProfile", {}).get("issuerUrl", ""),
         "clusterPrincipalId": principal_id,
+        "kubeletIdentityObjectId": kubelet_identity.get("objectId", ""),
     }
 
 

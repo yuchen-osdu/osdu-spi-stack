@@ -34,7 +34,7 @@ CLUSTER_ID = (
 def _inputs(**overrides) -> OnboardInputs:
     base = dict(
         service="partition",
-        repo="yuchen-osdu/partition",
+        repo="my-org/partition",
         aks_cluster="spi-stack-dev3",
         aks_rg="spi-stack-dev3",
         identities_rg="spi-stack-dev3",

@@ -67,3 +67,38 @@ def test_set_flux_suspend_resume_sets_false():
     assert any(c[2] == "gitrepository" for c in calls)
     for cmd in calls:
         assert '{"spec":{"suspend":false}}' in cmd
+
+
+def test_flux_resource_names_returns_empty_on_no_items():
+    # A successful query with no resources yields [], not an error.
+    with mock.patch.object(cli, "kubectl_json", return_value={"items": []}):
+        assert cli._flux_resource_names("helmrelease", "osdu-flux") == []
+
+
+def test_flux_resource_names_raises_on_kubectl_error():
+    # kubectl_json returns None only on command failure; a failed listing must
+    # NOT be treated as "no resources", or CI-mode suspend would report a
+    # successful freeze while HelmReleases keep reconciling (ADR-032).
+    import pytest
+
+    with mock.patch.object(cli, "kubectl_json", return_value=None):
+        with pytest.raises(RuntimeError, match="Failed to list Flux helmrelease"):
+            cli._flux_resource_names("helmrelease", "osdu-flux")
+
+
+def test_set_flux_suspend_raises_when_listing_fails():
+    # If the helmrelease listing fails mid-freeze, the whole operation must fail
+    # loud rather than silently leaving HelmReleases reconciling.
+    import pytest
+
+    def fake_kubectl_json(args):
+        if args[1] == "kustomization":
+            return {"items": [{"metadata": {"name": "spi-osdu-services"}}]}
+        return None  # helmrelease listing fails
+
+    with (
+        mock.patch.object(cli, "kubectl_json", side_effect=fake_kubectl_json),
+        mock.patch.object(cli, "run_command", side_effect=lambda cmd, **kw: None),
+    ):
+        with pytest.raises(RuntimeError, match="Failed to list Flux helmrelease"):
+            cli._set_flux_suspend("osdu-flux", True)

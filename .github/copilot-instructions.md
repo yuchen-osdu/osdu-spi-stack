@@ -51,7 +51,7 @@ software/
 
 docs/
   architecture.md          System architecture document
-  decisions/               18 ADRs
+  decisions/               24 ADRs
   diagrams/                Excalidraw architecture diagram
 ```
 
@@ -130,7 +130,7 @@ in an SPI Stack deployment.
 Services use Azure SPI images from the OSDU community registry:
 - Pattern: `community.opengroup.org:5555/osdu/platform/.../*-master:tag`
 - `spi up` resolves current master SHA tags and writes them to
-  `flux-system/osdu-image-lock`; service manifests use Flux post-build
+  `osdu-flux/osdu-image-lock`; service manifests use Flux post-build
   substitution from that ConfigMap.
 - Refresh a live cluster with `uv run spi reconcile --refresh-images`.
 - To refresh static checked-in image references, run
