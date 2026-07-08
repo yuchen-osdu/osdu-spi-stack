@@ -14,7 +14,7 @@ All Azure resources are declared in Bicep. The Python CLI is a thin orchestrator
 
 Layout:
 
-- `infra/aks.bicep`. AKS Automatic cluster and managed Istio as raw `Microsoft.ContainerService/managedClusters` Bicep. Raw Bicep is used because AKS Automatic custom networking now requires `hostedSystemProfile` for managed system nodes, and the pinned AVM module did not expose it.
+- `infra/aks.bicep`. AKS Base SKU cluster with Node Auto-Provisioning and managed Istio as raw `Microsoft.ContainerService/managedClusters` Bicep (api-version 2026-03-01, ADR-021). Raw Bicep is used because the Node Auto-Provisioning surface (`nodeProvisioningProfile`) on this api-version is newer than the pinned AVM AKS module exposes.
 - `infra/main.bicep`. Every other PaaS resource as hand-written Bicep under `infra/modules/` (identity, keyvault, acr, cosmos-gremlin, partition, storage-common, rbac, external-dns-*, vnet). Raw Bicep is simpler than AVM passthrough modules for resources where AVM adds no material defaults.
 - `infra/flux.bicep`. AKS Flux extension and `fluxConfigurations` resource (ADR-009), deployed after K8s bootstrap.
 

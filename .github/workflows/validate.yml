@@ -125,7 +125,10 @@ jobs:
         run: az bicep install
       - name: Bicep build (syntax check)
         if: steps.gate.outputs.skip != 'true'
-        run: az bicep build --file infra/main.bicep
+        run: |
+          az bicep build --file infra/main.bicep
+          az bicep build --file infra/aks.bicep
+          az bicep build --file infra/flux.bicep
       - name: Ensure what-if RG exists
         if: steps.gate.outputs.skip != 'true'
         run: |
