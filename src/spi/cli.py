@@ -251,9 +251,7 @@ def _resolve_application_insights(
 
     component_exists = detect_existing_application_insights(rg, env) if exists else False
     workspace_exists = (
-        detect_existing_log_analytics(rg, env)
-        if exists and not component_exists
-        else False
+        detect_existing_log_analytics(rg, env) if exists and not component_exists else False
     )
     deployed_mode = (
         read_deployed_application_insights_mode(rg, env)

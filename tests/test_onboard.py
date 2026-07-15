@@ -31,8 +31,8 @@ CLUSTER_ID = (
 )
 
 
-def _inputs(**overrides) -> OnboardInputs:
-    base = dict(
+def _inputs() -> OnboardInputs:
+    inp = OnboardInputs(
         service="partition",
         repo="my-org/partition",
         aks_cluster="spi-stack-dev3",
@@ -41,8 +41,6 @@ def _inputs(**overrides) -> OnboardInputs:
         namespace="osdu",
         flux_namespace="osdu-flux",
     )
-    base.update(overrides)
-    inp = OnboardInputs(**base)
     inp.cluster_resource_id = CLUSTER_ID
     return inp
 

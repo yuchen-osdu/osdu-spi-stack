@@ -225,10 +225,7 @@ def test_detect_existing_application_insights_distinguishes_not_found():
             stderr="(ResourceNotFound) The Resource was not found.",
         ),
     ):
-        assert (
-            azure_infra.detect_existing_application_insights("spi-stack-dev1", "dev1")
-            is False
-        )
+        assert azure_infra.detect_existing_application_insights("spi-stack-dev1", "dev1") is False
 
 
 def test_resource_group_has_resources_treats_null_tsv_as_empty():

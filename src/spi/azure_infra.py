@@ -142,9 +142,7 @@ def create_resource_group(
     ]
     tags = []
     if persist_application_insights:
-        tags.append(
-            f"{RG_APPLICATION_INSIGHTS_TAG}={str(config.application_insights).lower()}"
-        )
+        tags.append(f"{RG_APPLICATION_INSIGHTS_TAG}={str(config.application_insights).lower()}")
     if config.name_suffix:
         tags.append(f"{RG_SUFFIX_TAG}={config.name_suffix}")
     if tags:
@@ -256,8 +254,7 @@ def write_rg_application_insights_tag(resource_group: str, enabled: bool) -> Non
             "none",
         ],
         description=(
-            f"Persist {RG_APPLICATION_INSIGHTS_TAG} tag on resource group: "
-            f"{resource_group}"
+            f"Persist {RG_APPLICATION_INSIGHTS_TAG} tag on resource group: {resource_group}"
         ),
     )
 
@@ -358,9 +355,7 @@ def read_deployed_application_insights_mode(
     try:
         parameters = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"Unable to parse deployment {deployment_name} parameters."
-        ) from exc
+        raise RuntimeError(f"Unable to parse deployment {deployment_name} parameters.") from exc
     if not isinstance(parameters, dict):
         return None
 
@@ -372,8 +367,7 @@ def read_deployed_application_insights_mode(
         if str(value).lower() in {"true", "false"}:
             return str(value).lower() == "true"
         raise RuntimeError(
-            f"Deployment {deployment_name} has invalid "
-            f"enableApplicationInsights value {value!r}."
+            f"Deployment {deployment_name} has invalid enableApplicationInsights value {value!r}."
         )
 
     name_parameter = parameters.get("appInsightsName")
