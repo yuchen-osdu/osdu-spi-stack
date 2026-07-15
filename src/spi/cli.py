@@ -23,7 +23,7 @@ from rich.table import Table
 
 from . import __version__
 from .checks import PREREQ_TOOLS, check_prerequisites
-from .config import Config, IngressMode, Profile
+from .config import BASE_NAME, Config, IngressMode, Profile
 from .console import console, display_result, display_yaml
 from .guard import (
     DEFAULT_FLUX_NAMESPACE,
@@ -68,7 +68,7 @@ def main(
     """SPI Stack - deploy, monitor, and manage OSDU on Azure AKS."""
 
 
-def _show_config(config: Config):
+def _show_config(config: Config, *, show_application_insights: bool = True):
     table = Table(title="SPI Stack Deployment", border_style="cyan")
     table.add_column("Setting", style="cyan")
     table.add_column("Value", style="green")
@@ -83,6 +83,11 @@ def _show_config(config: Config):
     table.add_row("Branch", config.repo_branch)
     table.add_row("Data Partitions", ", ".join(config.data_partitions))
     table.add_row("Key Vault", config.keyvault_name)
+    if show_application_insights:
+        table.add_row(
+            "Application Insights",
+            "enabled" if config.application_insights else "disabled (dummy configuration)",
+        )
     table.add_row("Ingress Mode", config.ingress_mode.value)
     if config.ingress_mode == IngressMode.DNS and config.dns_zone:
         table.add_row("DNS Zone", f"{config.dns_zone} (rg: {config.dns_zone_rg})")
@@ -125,6 +130,7 @@ def _build_config(
     ingress_prefix: str = "",
     acme_email: str = "",
     name_suffix: str = "",
+    application_insights: bool = False,
 ) -> Config:
     return Config.from_env(
         env=env,
@@ -138,6 +144,7 @@ def _build_config(
         dns_zone=dns_zone,
         ingress_prefix=ingress_prefix,
         acme_email=acme_email,
+        application_insights=application_insights,
     )
 
 
@@ -190,6 +197,82 @@ def _resolve_name_suffix(env: str, for_up: bool) -> str:
         if rg_exists.returncode == 0 and rg_exists.stdout.strip().lower() == "true":
             write_rg_suffix_tag(rg, suffix)
     return suffix
+
+
+def _resolve_application_insights(
+    env: str,
+    requested: Optional[bool],
+    for_up: bool,
+) -> bool:
+    """Resolve and preserve the environment's Application Insights mode.
+
+    New environments default to disabled. Once an environment has been
+    created, its mode is immutable so an idempotent rerun cannot silently
+    orphan paid resources or rewrite service configuration.
+    """
+    from .azure_infra import (
+        detect_existing_application_insights,
+        detect_existing_log_analytics,
+        read_deployed_application_insights_mode,
+        read_rg_application_insights_tag,
+        resource_group_has_resources,
+        write_rg_application_insights_tag,
+    )
+
+    environment_label = env or "base"
+    rg = f"{BASE_NAME}-{env}" if env else BASE_NAME
+    persisted = read_rg_application_insights_tag(rg)
+    if persisted is not None:
+        if requested is not None and requested != persisted:
+            raise RuntimeError(
+                f"Environment {environment_label!r} was created with Application Insights "
+                f"{'enabled' if persisted else 'disabled'}. The setting cannot be "
+                "changed in place; run 'spi down' and create a new environment."
+            )
+        return persisted
+
+    rg_exists = run_command(
+        ["az", "group", "exists", "--name", rg],
+        description=f"Check resource group exists: {rg}",
+        display=False,
+        check=False,
+    )
+    if rg_exists.returncode != 0:
+        raise RuntimeError(
+            f"Unable to determine whether resource group {rg} exists: "
+            f"{rg_exists.stderr.strip() or rg_exists.stdout.strip()}"
+        )
+    exists = rg_exists.stdout.strip().lower() == "true"
+    if exists and not resource_group_has_resources(rg):
+        resolved = bool(requested)
+        if for_up:
+            write_rg_application_insights_tag(rg, resolved)
+        return resolved
+
+    component_exists = detect_existing_application_insights(rg, env) if exists else False
+    workspace_exists = (
+        detect_existing_log_analytics(rg, env)
+        if exists and not component_exists
+        else False
+    )
+    deployed_mode = (
+        read_deployed_application_insights_mode(rg, env)
+        if exists and not component_exists and not workspace_exists
+        else None
+    )
+    inferred = component_exists or workspace_exists or deployed_mode is True
+
+    if exists and requested is not None and requested != inferred:
+        raise RuntimeError(
+            f"Existing environment {environment_label!r} has Application Insights "
+            f"{'enabled' if inferred else 'disabled'}. The setting cannot be changed "
+            "in place; run 'spi down' and create a new environment."
+        )
+
+    resolved = inferred if requested is None else requested
+    if for_up and exists:
+        write_rg_application_insights_tag(rg, resolved)
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +374,12 @@ def up(
         "--image-branch",
         help="OSDU image branch suffix to resolve from the community registry.",
     ),
+    application_insights: Optional[bool] = typer.Option(
+        None,
+        "--application-insights/--no-application-insights",
+        help="Deploy workspace-based Application Insights. New environments default "
+        "to disabled; the choice is preserved on reruns.",
+    ),
 ):
     """Provision Azure infrastructure and deploy the OSDU SPI stack."""
     if profile is None:
@@ -309,6 +398,11 @@ def up(
     # derived resource names are stable across `spi up` re-runs and don't
     # collide with deployments in other subscriptions.
     name_suffix = _resolve_name_suffix(env, for_up=True)
+    resolved_application_insights = _resolve_application_insights(
+        env,
+        requested=application_insights,
+        for_up=not dry_run,
+    )
 
     config = _build_config(
         profile=profile,
@@ -322,6 +416,7 @@ def up(
         ingress_prefix=ingress_prefix,
         acme_email=resolve_acme_email(acme_email),
         name_suffix=name_suffix,
+        application_insights=resolved_application_insights,
     )
 
     _show_config(config)
@@ -366,11 +461,12 @@ def down(
     console.print(Panel("[bold]SPI Stack Cleanup[/bold]", border_style="cyan"))
     check_prerequisites(["az"])
 
-    # Read-only lookup so the displayed config table reflects what's in
-    # Azure. cleanup_azure itself only deletes the resource group.
     name_suffix = _resolve_name_suffix(env, for_up=False)
-    config = _build_config(env=env, name_suffix=name_suffix)
-    _show_config(config)
+    config = _build_config(
+        env=env,
+        name_suffix=name_suffix,
+    )
+    _show_config(config, show_application_insights=False)
 
     from .deploy import cleanup_azure
 

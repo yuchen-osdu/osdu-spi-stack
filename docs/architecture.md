@@ -110,7 +110,7 @@ The Base SKU keeps the features the stack depends on, wired explicitly:
 | **Azure RBAC for Kubernetes** | Cluster authorization (explicit on Base) |
 | **Cilium CNI** | eBPF networking in overlay mode |
 | **Managed Prometheus / Container Insights** | Cluster metrics and logs to Azure Monitor / Log Analytics |
-| **Application Insights** | Per-service request, dependency, and exception telemetry ([ADR-023](decisions/023-application-insights-telemetry.md)) |
+| **Application Insights** | Optional per-service request, dependency, and exception telemetry (`spi up --application-insights`; [ADR-023](decisions/023-application-insights-telemetry.md)) |
 
 Deployment Safeguards were an Automatic-only feature and are no longer
 cluster-enforced. Compliance does not regress: the local `osdu-spi-service`
@@ -277,7 +277,7 @@ Redis and Elasticsearch TLS CAs live as Secrets in `platform`. trust-manager (in
 | Cosmos DB Gremlin | Entitlements graph | 4000 RU/s autoscale |
 | Key Vault | Secret management | Standard, RBAC-enabled |
 | ACR | Container images | Basic SKU |
-| Application Insights + Log Analytics | Service telemetry and logs | Workspace-based, 30-day retention |
+| Application Insights + Log Analytics | Optional service telemetry and logs | Workspace-based, 30-day retention; disabled by default |
 | Managed Identity (`osdu-identity`) | Workload Identity | Single, shared |
 | Managed Identity (`external-dns-identity`) | DNS Zone Contributor | Conditional on `dns` ingress mode |
 

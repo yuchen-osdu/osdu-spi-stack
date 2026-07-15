@@ -17,11 +17,19 @@
 # Disabled/dummy App Insights fallback. core-lib-azure >= 2.5.6 NPEs on every
 # request if the App Insights SDK is not initialized (see osdu_config_configmap).
 # When no real App Insights is provisioned we still set a syntactically valid
-# connection string so the SDK initializes; the non-routable ingestion endpoint
-# means no telemetry leaves the cluster.
+# connection string so the SDK initializes. Inline configuration disables
+# telemetry collection, auxiliary exporters, and retry persistence.
 _DUMMY_AI_INSTRUMENTATION_KEY = "00000000-0000-0000-0000-000000000000"
 _DUMMY_AI_CONNECTION_STRING = (
     f"InstrumentationKey={_DUMMY_AI_INSTRUMENTATION_KEY};IngestionEndpoint=https://localhost/"
+)
+_DUMMY_AI_CONFIGURATION = (
+    f'{{"connectionString":"{_DUMMY_AI_CONNECTION_STRING}",'
+    '"sampling":{"percentage":0},'
+    '"preview":{"liveMetrics":{"enabled":false},"profiler":{"enabled":false},'
+    '"statsbeat":{"disabled":true},"diskPersistenceMaxSizeMb":0},'
+    '"internal":{"statsbeat":{"disabledAll":true},'
+    '"preAggregatedStandardMetrics":{"enabled":false}}}'
 )
 
 
@@ -90,6 +98,11 @@ def osdu_config_configmap(
     """
     ai_conn = app_insights_connection_string or _DUMMY_AI_CONNECTION_STRING
     ai_key = appinsights_key or _DUMMY_AI_INSTRUMENTATION_KEY
+    ai_disabled_config = (
+        f"  APPLICATIONINSIGHTS_CONFIGURATION_CONTENT: '{_DUMMY_AI_CONFIGURATION}'\n"
+        if not app_insights_connection_string
+        else ""
+    )
     return f"""\
 apiVersion: v1
 kind: ConfigMap
@@ -112,10 +125,11 @@ data:
   PRIMARY_SERVICEBUS_NAMESPACE: "{primary_servicebus_namespace}"
   REDIS_PORT: "6379"
   SERVER_PORT: "8080"
-  APPINSIGHTS_KEY: "{appinsights_key}"
+  APPINSIGHTS_KEY: "{ai_key}"
   APPINSIGHTS_INSTRUMENTATIONKEY: "{ai_key}"
   APPLICATIONINSIGHTS_CONNECTION_STRING: "{ai_conn}"
   APPLICATIONINSIGHTS_SELF_DIAGNOSTICS_LEVEL: "OFF"
+{ai_disabled_config}\
   ELASTICSEARCH_HOST: "elasticsearch-es-http.platform.svc"
 """
 

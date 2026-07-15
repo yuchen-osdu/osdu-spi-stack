@@ -93,7 +93,7 @@ uv run spi reconcile --resume                # Unfreeze GitOps
   recovery + post-deploy Key Vault writes remain imperative (ADR-008)
 - Local auth disabled on Cosmos (Gremlin + SQL) and Service Bus for Microsoft-tenant
   CloudGov policy; Workload Identity + data-plane RBAC instead (ADR-022)
-- Real Application Insights provisioned in Bicep and wired to all services (ADR-023)
+- Application Insights is optional/default-off and wired to all services when enabled (ADR-023)
 - Record-ingestion data plane enabled: system-cosmos secrets, per-partition record
   blob container, Elasticsearch TLS (ADR-024)
 

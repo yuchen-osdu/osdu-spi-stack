@@ -102,10 +102,13 @@ param deployerPrincipalType string = 'ServicePrincipal'
 @description('Object ID of the AKS kubelet (node) identity. Empty string skips the kubelet AcrPull grant. Set by the CLI from the AKS deployment output so nodes can pull custom images from the ACR.')
 param kubeletIdentityObjectId string = ''
 
-@description('Application Insights component name. Empty string skips App Insights provisioning.')
+@description('Deploy workspace-based Application Insights and Log Analytics resources.')
+param enableApplicationInsights bool = false
+
+@description('Application Insights component name. Required when enableApplicationInsights is true.')
 param appInsightsName string = ''
 
-@description('Log Analytics workspace name backing the workspace-based App Insights component. Required when appInsightsName is set.')
+@description('Log Analytics workspace name backing the workspace-based App Insights component. Required when enableApplicationInsights is true.')
 param logAnalyticsName string = ''
 
 // ──────────────────────────────────────────────────────────
@@ -237,10 +240,11 @@ module externalDnsRoleModule 'modules/external-dns-role.bicep' = if (!empty(dnsZ
 // reads the App Insights request-telemetry context on every request with no
 // null guard -- if App Insights is not initialized the service returns HTTP 500
 // on every request. AKS Automatic enabled App Insights by default; AKS Base
-// does not, so we provision it here. The CLI wires the connection string into
-// the osdu-config ConfigMap that every service reads via envFrom.
+// does not. Operators can provision it here with `spi up
+// --application-insights`; the CLI otherwise writes disabled/dummy agent
+// configuration into the osdu-config ConfigMap that every service reads.
 
-resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = if (!empty(logAnalyticsName)) {
+resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = if (enableApplicationInsights) {
   name: logAnalyticsName
   location: location
   properties: {
@@ -251,14 +255,14 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = if
   }
 }
 
-resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (!empty(appInsightsName)) {
+resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (enableApplicationInsights) {
   name: appInsightsName
   location: location
   kind: 'web'
   properties: {
     Application_Type: 'web'
     #disable-next-line BCP318
-    WorkspaceResourceId: empty(logAnalyticsName) ? null : logAnalytics.id
+    WorkspaceResourceId: logAnalytics.id
   }
 }
 
@@ -444,6 +448,6 @@ output externalDnsPrincipalId string = !empty(dnsZoneName) ? externalDnsIdentity
 // the CLI falls back to a disabled/dummy connection string in osdu-config so
 // core-lib-azure's request filter does not NPE.
 #disable-next-line BCP318
-output appInsightsConnectionString string = !empty(appInsightsName) ? appInsights.properties.ConnectionString : ''
+output appInsightsConnectionString string = enableApplicationInsights ? appInsights.properties.ConnectionString : ''
 #disable-next-line BCP318
-output appInsightsInstrumentationKey string = !empty(appInsightsName) ? appInsights.properties.InstrumentationKey : ''
+output appInsightsInstrumentationKey string = enableApplicationInsights ? appInsights.properties.InstrumentationKey : ''

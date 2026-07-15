@@ -134,8 +134,13 @@ Use `--env` to run multiple isolated deployments. Each environment gets its own 
 
 ```bash
 uv run spi up --env dev1
+uv run spi up --env dev1 --application-insights
 uv run spi up --env staging
 ```
+
+Application Insights and its Log Analytics workspace are disabled by default.
+Use `--application-insights` when the environment needs request, dependency,
+and exception telemetry.
 
 </details>
 

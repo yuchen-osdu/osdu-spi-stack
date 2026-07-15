@@ -49,7 +49,7 @@ import time
 from typing import Any, Dict
 
 from .bicep import run_bicep_deployment
-from .config import RG_SUFFIX_TAG, Config
+from .config import RG_APPLICATION_INSIGHTS_TAG, RG_SUFFIX_TAG, Config
 from .console import console, display_result
 from .paths import INFRA_ROOT
 from .shell import run_command
@@ -112,7 +112,10 @@ def _cosmos_gremlin_name(env: str, suffix: str = "") -> str:
 # ─────────────────────────────────────────────────────────────
 
 
-def create_resource_group(config: Config):
+def create_resource_group(
+    config: Config,
+    persist_application_insights: bool = True,
+) -> None:
     console.print("\n[bold]Creating resource group...[/bold]")
     exists = run_command(
         ["az", "group", "exists", "--name", config.resource_group],
@@ -137,8 +140,15 @@ def create_resource_group(config: Config):
         "--output",
         "json",
     ]
+    tags = []
+    if persist_application_insights:
+        tags.append(
+            f"{RG_APPLICATION_INSIGHTS_TAG}={str(config.application_insights).lower()}"
+        )
     if config.name_suffix:
-        cmd.extend(["--tags", f"{RG_SUFFIX_TAG}={config.name_suffix}"])
+        tags.append(f"{RG_SUFFIX_TAG}={config.name_suffix}")
+    if tags:
+        cmd.extend(["--tags", *tags])
     run_command(cmd, description=f"Create resource group: {config.resource_group}")
     display_result(f"Resource group {config.resource_group} ready")
 
@@ -192,6 +202,212 @@ def write_rg_suffix_tag(resource_group: str, suffix: str) -> None:
         ],
         description=f"Persist {RG_SUFFIX_TAG} tag on resource group: {resource_group}",
     )
+
+
+def read_rg_application_insights_tag(resource_group: str) -> "bool | None":
+    """Read the persisted Application Insights mode from the resource group."""
+    result = run_command(
+        [
+            "az",
+            "group",
+            "show",
+            "--name",
+            resource_group,
+            "--query",
+            f'tags."{RG_APPLICATION_INSIGHTS_TAG}"',
+            "--output",
+            "tsv",
+        ],
+        description=f"Read Application Insights tag from resource group: {resource_group}",
+        display=False,
+        check=False,
+    )
+    if result.returncode != 0:
+        error = f"{result.stdout}\n{result.stderr}".lower()
+        if "resourcegroupnotfound" in error:
+            return None
+        raise RuntimeError(
+            f"Unable to read the Application Insights mode from "
+            f"{resource_group}: {result.stderr.strip() or result.stdout.strip()}"
+        )
+    value = result.stdout.strip().lower()
+    if not value or value == "none":
+        return None
+    if value not in {"true", "false"}:
+        raise RuntimeError(
+            f"Resource group {resource_group} has invalid "
+            f"{RG_APPLICATION_INSIGHTS_TAG} tag value {value!r}."
+        )
+    return value == "true"
+
+
+def write_rg_application_insights_tag(resource_group: str, enabled: bool) -> None:
+    """Persist the Application Insights mode without disturbing other tags."""
+    run_command(
+        [
+            "az",
+            "group",
+            "update",
+            "--name",
+            resource_group,
+            "--set",
+            f"tags.{RG_APPLICATION_INSIGHTS_TAG}={str(enabled).lower()}",
+            "--output",
+            "none",
+        ],
+        description=(
+            f"Persist {RG_APPLICATION_INSIGHTS_TAG} tag on resource group: "
+            f"{resource_group}"
+        ),
+    )
+
+
+def _resource_exists(
+    resource_group: str,
+    name: str,
+    resource_type: str,
+    description: str,
+) -> bool:
+    """Probe one Azure resource while distinguishing absence from CLI failure."""
+    result = run_command(
+        [
+            "az",
+            "resource",
+            "show",
+            "--resource-group",
+            resource_group,
+            "--name",
+            name,
+            "--resource-type",
+            resource_type,
+            "--output",
+            "none",
+        ],
+        description=description,
+        display=False,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+
+    error = f"{result.stdout}\n{result.stderr}".lower()
+    if "resourcenotfound" in error or "resourcegroupnotfound" in error:
+        return False
+    raise RuntimeError(
+        f"Unable to determine whether {name} exists in {resource_group}: "
+        f"{result.stderr.strip() or result.stdout.strip()}"
+    )
+
+
+def detect_existing_application_insights(resource_group: str, env: str) -> bool:
+    """Return True when the environment's legacy App Insights component exists."""
+    name = f"osdu-{env or 'base'}-insights"
+    return _resource_exists(
+        resource_group,
+        name,
+        "Microsoft.Insights/components",
+        f"Detect existing Application Insights: {name}",
+    )
+
+
+def detect_existing_log_analytics(resource_group: str, env: str) -> bool:
+    """Return True when the environment's legacy telemetry workspace exists."""
+    name = f"osdu-{env or 'base'}-logs"
+    return _resource_exists(
+        resource_group,
+        name,
+        "Microsoft.OperationalInsights/workspaces",
+        f"Detect existing Log Analytics workspace: {name}",
+    )
+
+
+def read_deployed_application_insights_mode(
+    resource_group: str,
+    env: str,
+) -> "bool | None":
+    """Read telemetry intent from the most recent main Bicep deployment."""
+    deployment_name = f"spi-{env or 'base'}"
+    result = run_command(
+        [
+            "az",
+            "deployment",
+            "group",
+            "show",
+            "--resource-group",
+            resource_group,
+            "--name",
+            deployment_name,
+            "--query",
+            "properties.parameters",
+            "--output",
+            "json",
+        ],
+        description=f"Read telemetry mode from deployment: {deployment_name}",
+        display=False,
+        check=False,
+    )
+    if result.returncode != 0:
+        error = f"{result.stdout}\n{result.stderr}".lower()
+        if "deploymentnotfound" in error:
+            return None
+        raise RuntimeError(
+            f"Unable to read deployment {deployment_name} in {resource_group}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+
+    try:
+        parameters = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Unable to parse deployment {deployment_name} parameters."
+        ) from exc
+    if not isinstance(parameters, dict):
+        return None
+
+    enabled_parameter = parameters.get("enableApplicationInsights")
+    if isinstance(enabled_parameter, dict) and "value" in enabled_parameter:
+        value = enabled_parameter["value"]
+        if isinstance(value, bool):
+            return value
+        if str(value).lower() in {"true", "false"}:
+            return str(value).lower() == "true"
+        raise RuntimeError(
+            f"Deployment {deployment_name} has invalid "
+            f"enableApplicationInsights value {value!r}."
+        )
+
+    name_parameter = parameters.get("appInsightsName")
+    if isinstance(name_parameter, dict) and "value" in name_parameter:
+        value = name_parameter["value"]
+        return None if value is None else bool(str(value).strip())
+    return None
+
+
+def resource_group_has_resources(resource_group: str) -> bool:
+    """Return whether an existing resource group contains deployed resources."""
+    result = run_command(
+        [
+            "az",
+            "resource",
+            "list",
+            "--resource-group",
+            resource_group,
+            "--query",
+            "[0].id",
+            "--output",
+            "tsv",
+        ],
+        description=f"Check resource group contents: {resource_group}",
+        display=False,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Unable to inspect resource group {resource_group}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    value = result.stdout.strip()
+    return bool(value and value.lower() != "none")
 
 
 def detect_legacy_keyvault(resource_group: str, env: str) -> bool:
@@ -650,11 +866,15 @@ def _build_bicep_params(
         # rbac.bicep grants it AcrPull so nodes can pull images from the SPI
         # ACR (required for custom OSDU service images). Empty in dry-run.
         "kubeletIdentityObjectId": kubelet_identity_object_id,
-        # Application Insights + Log Analytics (RG-scoped names). OSDU services
-        # require App Insights initialized (core-lib-azure >= 2.5.6 NPEs without
-        # it); the connection string is wired into osdu-config by deploy.py.
-        "appInsightsName": f"osdu-{config.env or 'base'}-insights",
-        "logAnalyticsName": f"osdu-{config.env or 'base'}-logs",
+        "enableApplicationInsights": config.application_insights,
+        # The resources are optional, but services always receive either the
+        # real connection values or a disabled/dummy fallback in osdu-config.
+        "appInsightsName": (
+            f"osdu-{config.env or 'base'}-insights" if config.application_insights else ""
+        ),
+        "logAnalyticsName": (
+            f"osdu-{config.env or 'base'}-logs" if config.application_insights else ""
+        ),
     }
 
 
@@ -770,7 +990,9 @@ def provision_azure_infra(config: Config, dry_run: bool = False) -> Dict[str, An
         f"  [info]Subscription: {account.get('name', 'unknown')} ({account.get('id', '')})[/info]"
     )
 
-    create_resource_group(config)
+    # What-if requires an RG but must not freeze an observability choice before
+    # anything is deployed. A later real run can choose either mode.
+    create_resource_group(config, persist_application_insights=not dry_run)
 
     # AKS Bicep deploy returns the OIDC issuer URL directly. In dry-run
     # we run what-if on aks.bicep (returning an empty dict) and pass an

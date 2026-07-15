@@ -41,6 +41,7 @@ _NAME_SUFFIX_LEN = 5
 # An empty value marks a pre-suffix (legacy) deployment whose names must
 # stay unsuffixed to keep matching the resources already in Azure.
 RG_SUFFIX_TAG = "spi-name-suffix"
+RG_APPLICATION_INSIGHTS_TAG = "spi-application-insights"
 
 
 def generate_name_suffix() -> str:
@@ -77,6 +78,10 @@ class Config(BaseModel):
     # Azure
     resource_group: str = BASE_NAME
     location: str = "eastus2"
+    # Application Insights is opt-in for new environments. The resolved value
+    # is persisted on the resource group so idempotent reruns preserve the
+    # environment's original observability mode.
+    application_insights: bool = False
     # Random 5-char suffix used by globally unique resource names (storage,
     # KV, ACR, Cosmos, Service Bus). Persisted as the `spi-name-suffix` tag
     # on the resource group; an empty value marks a legacy (pre-suffix)

@@ -20,6 +20,8 @@ Workload Identity SAs, in-cluster seed secrets), activates GitOps via Flux,
 and writes the KV runtime secrets that OSDU services read at startup.
 """
 
+import hashlib
+import json
 import os
 import subprocess
 import time
@@ -58,6 +60,7 @@ from .templates import (
 )
 
 GITREPO_NAME = "osdu-spi-stack-system"
+OSDU_CONFIG_ROLLOUT_ANNOTATION = "spi.osdu/config-rollout-hash"
 
 INFRA_FLUX_BICEP = INFRA_ROOT / "flux.bicep"
 
@@ -99,6 +102,7 @@ def _create_osdu_config(config: Config, infra_outputs: dict) -> None:
     display_yaml(yaml_content, "ConfigMap: osdu-config")
     kubectl_apply_yaml(yaml_content, "apply osdu-config ConfigMap")
     display_result("osdu-config ConfigMap created")
+    _restart_osdu_deployments_if_config_changed(yaml_content)
 
     for ns in ["platform", "osdu"]:
         sa_yaml = workload_identity_sa(
@@ -108,6 +112,68 @@ def _create_osdu_config(config: Config, infra_outputs: dict) -> None:
         )
         kubectl_apply_yaml(sa_yaml, f"apply workload-identity-sa in {ns}")
     display_result("Workload Identity ServiceAccounts created")
+
+
+def _restart_osdu_deployments_if_config_changed(
+    yaml_content: str,
+) -> None:
+    """Restart existing services until the current envFrom config is applied."""
+    config_hash = hashlib.sha256(yaml_content.encode("utf-8")).hexdigest()
+    configmap = run_command(
+        ["kubectl", "get", "configmap", "osdu-config", "--namespace", "osdu", "--output", "json"],
+        display=False,
+        check=False,
+    )
+    if configmap.returncode != 0:
+        raise RuntimeError(
+            "Unable to read osdu-config rollout state: "
+            f"{configmap.stderr.strip() or configmap.stdout.strip()}"
+        )
+    try:
+        configmap_json = json.loads(configmap.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Unable to parse osdu-config rollout state.") from exc
+
+    applied_hash = (
+        configmap_json.get("metadata", {})
+        .get("annotations", {})
+        .get(OSDU_CONFIG_ROLLOUT_ANNOTATION, "")
+    )
+    if applied_hash == config_hash:
+        return
+
+    deployments = run_command(
+        ["kubectl", "get", "deployment", "--namespace", "osdu", "--output", "name"],
+        display=False,
+        check=False,
+    )
+    if deployments.returncode != 0:
+        raise RuntimeError(
+            "Unable to list OSDU deployments before applying the updated "
+            f"configuration: {deployments.stderr.strip() or deployments.stdout.strip()}"
+        )
+    if deployments.stdout.strip():
+        run_command(
+            ["kubectl", "rollout", "restart", "deployment", "--namespace", "osdu"],
+            description="Restart services for updated osdu-config",
+        )
+        display_result("OSDU service deployments restarted with updated configuration")
+
+    # Record success only after the restart request completes. If listing or
+    # restart fails, the old hash remains and the next spi up retries.
+    run_command(
+        [
+            "kubectl",
+            "annotate",
+            "configmap",
+            "osdu-config",
+            "--namespace",
+            "osdu",
+            f"{OSDU_CONFIG_ROLLOUT_ANNOTATION}={config_hash}",
+            "--overwrite",
+        ],
+        description="Record osdu-config rollout state",
+    )
 
 
 def _create_istio_auth(config: Config, infra_outputs: dict) -> None:

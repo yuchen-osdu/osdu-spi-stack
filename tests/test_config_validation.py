@@ -44,6 +44,10 @@ class TestValidPartitions:
         cfg = Config(env="dev1")
         assert cfg.data_partitions == ["opendes"]
 
+    def test_application_insights_can_be_enabled(self):
+        cfg = Config(env="dev1", application_insights=True)
+        assert cfg.application_insights is True
+
     def test_empty_env_still_valid(self):
         cfg = Config(env="", data_partitions=["p1"])
         assert cfg.data_partitions == ["p1"]
