@@ -31,6 +31,7 @@ from spi.onboard import (
     NO_DATA_ACCESS_TOKEN_ENVS,
     OSDU_BRANCHES,
     OnboardInputs,
+    _gh_delete_variable,
     _gh_get_variable,
     _no_data_access_federated_credentials,
     _remove_no_data_access_federated_credentials,
@@ -265,6 +266,31 @@ def test_repo_variable_lookup_surfaces_non_404_errors(monkeypatch):
     )
     with pytest.raises(typer.Exit):
         _gh_get_variable(_inputs(), "BROKEN")
+
+
+def test_repo_variable_delete_attempts_empty_values_and_ignores_404(monkeypatch):
+    calls = []
+    responses = iter(
+        [
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="gh: variable not found (HTTP 404)",
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        onboard_module.subprocess,
+        "run",
+        lambda *args, **_kwargs: calls.append(args[0]) or next(responses),
+    )
+
+    _gh_delete_variable(_inputs(), "EMPTY_BUT_PRESENT")
+    _gh_delete_variable(_inputs(), "MISSING")
+
+    assert len(calls) == 2
+    assert all("delete" in command for command in calls)
 
 
 def test_secret_write_policy_rehome_and_idempotency():

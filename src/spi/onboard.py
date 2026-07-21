@@ -1208,8 +1208,6 @@ def _gh_set_variable(inp: OnboardInputs, name: str, value: str) -> None:
 
 
 def _gh_delete_variable(inp: OnboardInputs, name: str) -> None:
-    if not _gh_get_variable(inp, name):
-        return
     if inp.dry_run:
         _plan(f"gh variable delete {name} -R {inp.repo}")
         return
@@ -1219,9 +1217,10 @@ def _gh_delete_variable(inp: OnboardInputs, name: str) -> None:
         text=True,
     )
     if proc.returncode != 0:
-        console.print(
-            f"  [error]gh variable delete {name} failed: {(proc.stderr or '').strip()}[/error]"
-        )
+        error = (proc.stderr or "").strip()
+        if "HTTP 404" in error:
+            return
+        console.print(f"  [error]gh variable delete {name} failed: {error}[/error]")
         raise typer.Exit(code=1)
     console.print(f"  [success]variable {name} removed[/success]")
 
