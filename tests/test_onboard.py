@@ -18,10 +18,24 @@ These cover the security-relevant string construction (namespace-scoped role
 assignment scopes, identity/role names) without touching az/kubectl/gh.
 """
 
+from types import SimpleNamespace
+
+import pytest
+import typer
+
+import spi.onboard as onboard_module
 from spi.onboard import (
     DEPLOY_DATA_ACTIONS,
+    FEDERATED_CREDENTIAL_LIMIT,
+    NO_DATA_ACCESS_IDENTITY_NAME,
+    NO_DATA_ACCESS_TOKEN_ENVS,
     OSDU_BRANCHES,
     OnboardInputs,
+    _gh_get_variable,
+    _no_data_access_federated_credentials,
+    _remove_no_data_access_federated_credentials,
+    _resolve_no_data_access_profile,
+    _service_federated_credentials,
     _should_write_secrets,
 )
 
@@ -42,6 +56,7 @@ def _inputs() -> OnboardInputs:
         flux_namespace="osdu-flux",
     )
     inp.cluster_resource_id = CLUSTER_ID
+    inp.github_oidc_subject_prefix = "repo:my-org@123/partition@456"
     return inp
 
 
@@ -49,6 +64,47 @@ def test_identity_and_role_names_are_service_scoped():
     inp = _inputs()
     assert inp.identity_name == "spi-ci-partition"
     assert inp.deploy_role_name == "spi-ci-partition-deploy"
+    assert inp.no_data_access_identity_name == NO_DATA_ACCESS_IDENTITY_NAME
+
+
+def test_no_data_access_profile_is_opt_in_by_service():
+    storage = _inputs()
+    storage.service = "storage"
+    assert storage.uses_no_data_access_identity is True
+    assert storage.resolved_no_data_access_token_env == "NO_DATA_ACCESS_TESTER_ACCESS_TOKEN"
+
+    schema = _inputs()
+    schema.service = "schema"
+    assert schema.uses_no_data_access_identity is False
+    assert schema.resolved_no_data_access_token_env == ""
+
+    assert NO_DATA_ACCESS_TOKEN_ENVS == {"storage": "NO_DATA_ACCESS_TESTER_ACCESS_TOKEN"}
+
+
+def test_no_data_access_profile_allows_explicit_override():
+    inp = _inputs()
+    inp.no_data_access_token_env = ""
+    assert inp.uses_no_data_access_identity is False
+
+    inp.service = "schema"
+    inp.no_data_access_token_env = "CUSTOM_NO_ACCESS_TOKEN"
+    assert inp.uses_no_data_access_identity is True
+    assert inp.resolved_no_data_access_token_env == "CUSTOM_NO_ACCESS_TOKEN"
+
+
+def test_no_data_access_profile_reuses_existing_repo_value(monkeypatch):
+    inp = _inputs()
+    inp.service = "workflow"
+    monkeypatch.setattr(
+        onboard_module,
+        "_gh_get_variable",
+        lambda _inp, name: "NO_ACCESS_USER_TOKEN" if name == "NO_DATA_ACCESS_TOKEN_ENV" else "",
+    )
+
+    _resolve_no_data_access_profile(inp)
+
+    assert inp.uses_no_data_access_identity is True
+    assert inp.resolved_no_data_access_token_env == "NO_ACCESS_USER_TOKEN"
 
 
 def test_namespace_scope_targets_the_service_namespace():
@@ -83,6 +139,132 @@ def test_deploy_data_actions_are_least_privilege():
 
 def test_osdu_branch_subjects_cover_the_three_branches():
     assert set(OSDU_BRANCHES) == {"main", "fork_integration", "fork_upstream"}
+
+
+def test_service_federated_subjects_use_resolved_github_prefix():
+    subjects = _service_federated_credentials(_inputs())
+    assert subjects["spi-ci-partition-pull-request"] == (
+        "repo:my-org@123/partition@456:pull_request"
+    )
+    assert subjects["spi-ci-partition-branch-main"] == (
+        "repo:my-org@123/partition@456:ref:refs/heads/main"
+    )
+
+
+def test_shared_no_data_identity_uses_existing_repo_subjects():
+    subjects = _no_data_access_federated_credentials(_inputs())
+    assert subjects["spi-no-data-partition-pull-request"] == (
+        "repo:my-org@123/partition@456:pull_request"
+    )
+    assert subjects["spi-no-data-partition-branch-main"] == (
+        "repo:my-org@123/partition@456:ref:refs/heads/main"
+    )
+    assert len(subjects) == 4
+    assert FEDERATED_CREDENTIAL_LIMIT // len(subjects) == 5
+
+
+def test_federated_credential_subject_change_updates_in_place(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        onboard_module,
+        "_az_json",
+        lambda *_args, **_kwargs: [
+            {
+                "name": "spi-no-data-partition-pull-request",
+                "subject": "repo:old-org/partition:pull_request",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        onboard_module,
+        "_run",
+        lambda command, **_kwargs: calls.append(command),
+    )
+
+    onboard_module._reconcile_federated_credentials(
+        _inputs(),
+        NO_DATA_ACCESS_IDENTITY_NAME,
+        {"spi-no-data-partition-pull-request": ("repo:my-org@123/partition@456:pull_request")},
+    )
+
+    assert len(calls) == 1
+    assert "update" in calls[0]
+    assert "create" not in calls[0]
+    assert "repo:my-org@123/partition@456:pull_request" in calls[0]
+
+
+def test_federated_credential_limit_fails_before_create(monkeypatch):
+    existing = [
+        {"name": f"credential-{index}", "subject": f"subject-{index}"}
+        for index in range(FEDERATED_CREDENTIAL_LIMIT)
+    ]
+    monkeypatch.setattr(
+        onboard_module,
+        "_az_json",
+        lambda *_args, **_kwargs: existing,
+    )
+    monkeypatch.setattr(
+        onboard_module,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("must not mutate at the credential limit"),
+    )
+
+    with pytest.raises(typer.Exit):
+        onboard_module._reconcile_federated_credentials(
+            _inputs(),
+            NO_DATA_ACCESS_IDENTITY_NAME,
+            _no_data_access_federated_credentials(_inputs()),
+        )
+
+
+def test_disabling_profile_removes_repo_federated_credentials(monkeypatch):
+    calls = []
+
+    def fake_az_json(args, **_kwargs):
+        if args[:2] == ["identity", "show"]:
+            return {"clientId": "shared-client", "principalId": "shared-principal"}
+        return [
+            {
+                "name": "spi-no-data-partition-pull-request",
+                "subject": "repo:my-org@123/partition@456:pull_request",
+            }
+        ]
+
+    monkeypatch.setattr(onboard_module, "_az_json", fake_az_json)
+    monkeypatch.setattr(
+        onboard_module,
+        "_run",
+        lambda command, **_kwargs: calls.append(command),
+    )
+
+    _remove_no_data_access_federated_credentials(_inputs())
+
+    assert len(calls) == 1
+    assert "delete" in calls[0]
+    assert "spi-no-data-partition-pull-request" in calls[0]
+
+
+def test_repo_variable_lookup_treats_only_404_as_missing(monkeypatch):
+    monkeypatch.setattr(
+        onboard_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr="gh: variable not found (HTTP 404)"
+        ),
+    )
+    assert _gh_get_variable(_inputs(), "MISSING") == ""
+
+
+def test_repo_variable_lookup_surfaces_non_404_errors(monkeypatch):
+    monkeypatch.setattr(
+        onboard_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr="gh: service unavailable (HTTP 503)"
+        ),
+    )
+    with pytest.raises(typer.Exit):
+        _gh_get_variable(_inputs(), "BROKEN")
 
 
 def test_secret_write_policy_rehome_and_idempotency():

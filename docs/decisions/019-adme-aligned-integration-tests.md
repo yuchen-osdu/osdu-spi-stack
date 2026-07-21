@@ -37,12 +37,11 @@ entitlements member seeded by `spi onboard`.
 Service-specific alignment, each verified byte-identical against the ADME fork
 (`OpenEnergyPlatform/OSDU-Legal`, `OSDU-Storage`, …):
 
-- **storage** — `storage-test-azure`'s `AzureTestUtils` already consumes
-  `INTEGRATION_TESTER_ACCESS_TOKEN` if present, so no source change. The
-  `TestRecordAccessAuthorization` and `should_returnRecordsAfterCrsConversion*`
-  cases are excluded: the former needs a second *no-data-access* identity (out of
-  scope for now); the latter need the `crs-conversion` service, which is not
-  deployed in the scoped stack.
+- **storage** — `storage-test-azure`'s `AzureTestUtils` consumes
+  `INTEGRATION_TESTER_ACCESS_TOKEN` for its entitled caller and
+  `NO_DATA_ACCESS_TESTER_ACCESS_TOKEN` for its negative authorization caller, so
+  no source change is required. The unrelated
+  `should_returnRecordsAfterCrsConversion*` cases remain independently scoped.
 - **legal** — `legal-test-azure`'s `AzureLegalTagUtils.accessToken()` is
   forward-ported from ADME so it prefers `INTEGRATION_TESTER_ACCESS_TOKEN` and
   only falls back to the SP client-credentials flow when no token is supplied.
@@ -68,6 +67,44 @@ all driven by repo variables (`ROOT_TOKEN_ENV`, `MAVEN_GOAL`, `MAVEN_PROFILE`,
 `IT_TIMEOUT_MINUTES`/`IT_MAX_ATTEMPTS`) so a service is configured without
 editing the workflow.
 
+For negative authorization coverage, each Stack environment owns one shared
+UAMI named `spi-ci-no-data-access`. ADME makes this token optional and wires it
+only into services whose active test suites contain negative-access cases.
+Current ADME pipelines opt in Register, Secret, EDS-DMS, Partition, File, and
+Storage; Workflow uses the same identity concept under `NO_ACCESS_USER_TOKEN`.
+SPI currently opts in Storage because its deployed profile is the one with a
+skipped negative-access test. Other services opt in when their ADME-aligned
+profile is enabled, either by an existing `NO_DATA_ACCESS_TOKEN_ENV` repository
+variable or `spi onboard --no-data-access-token-env`.
+
+`spi onboard` creates or reuses the identity only for an opted-in repository,
+but does not assign Azure RBAC and does not seed it into any OSDU entitlements
+group.
+
+For an opted-in repository, onboarding writes the identity's client ID,
+principal ID, name, and the target token environment variable as non-secret
+repository variables. The default is
+`NO_DATA_ACCESS_TESTER_ACCESS_TOKEN`; Workflow uses
+`NO_ACCESS_USER_TOKEN`, matching ADME's current Workflow acceptance-test
+contract. Other services neither receive a federated credential nor mint the
+second token.
+
+The shared identity uses the same exact GitHub OIDC subjects as the service
+identity: pull request plus `main`, `fork_integration`, and `fork_upstream`.
+`spi onboard` reads GitHub's actual `sub_claim_prefix`, including immutable
+owner/repository IDs where applicable. Azure permits at most 20 federated
+credentials per UAMI, so one shared identity currently supports at most five
+opted-in repositories. That covers the current SPI need; a broader service fleet
+must shard the identity or adopt a generally available flexible-federation
+mechanism.
+
+The integration-test action requests a second GitHub OIDC assertion and uses a
+temporary `AZURE_CONFIG_DIR` to authenticate the shared UAMI without replacing
+the service UAMI's Azure CLI session. It mints an ARM-audience token, masks it,
+exports it only under the opted-in profile's token env, and deletes the
+temporary Azure CLI state before Maven starts. No long-lived test credential is
+stored.
+
 ## Consequences
 
 - Both legal and storage run their full ADME suites green on the SPI Stack with
@@ -82,9 +119,12 @@ editing the workflow.
   frame-of-reference conversion path would not be caught here. The exclusion is
   documented as a scoped-stack dependency gap, not a permanent decision — once
   `crs-conversion` is deployed the exclusion should be removed.
-- The `NO_DATA_ACCESS_TESTER` placeholder for storage leaves the negative
-  authorization test (`TestRecordAccessAuthorization`) unexercised. Wiring a real
-  second identity is follow-up work.
+- Storage's `TestRecordAccessAuthorization` now distinguishes authentication
+  from authorization by requiring the shared identity's valid bearer token and
+  asserting the service returns HTTP 403.
+- The shared UAMI supports five opted-in repositories with the current four
+  exact subjects per repository. Additional negative-test profiles require
+  sharding or a generally available flexible-federation mechanism.
 
 Rejected alternatives:
 

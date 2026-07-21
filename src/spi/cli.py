@@ -817,6 +817,15 @@ def onboard(
         "--gateway-url",
         help="Cluster ingress base URL; written as the GATEWAY_URL repo variable when provided.",
     ),
+    no_data_access_token_env: Optional[str] = typer.Option(
+        None,
+        "--no-data-access-token-env",
+        help=(
+            "Opt this repo into a no-data-access token and choose its test env name. "
+            "Storage defaults to NO_DATA_ACCESS_TESTER_ACCESS_TOKEN; an existing repo "
+            "profile value is reused. Pass an empty value to disable."
+        ),
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan without making changes."),
     force_rewrite_secrets: bool = typer.Option(
         False,
@@ -827,11 +836,11 @@ def onboard(
     """Grant a GitHub service-fork repo permission to deploy into this cluster.
 
     Cluster-side half of CI/CD onboarding (design SS9.4.A): creates a managed identity +
-    federated credentials + Azure RBAC, then writes the AZURE_* secrets and the full
-    repo->cluster link variables (AZURE_CLIENT_ID, K8S_*, AKS_*, FLUX_NAMESPACE, KEYVAULT_NAME,
-    GATEWAY_URL) onto the target repo. Idempotent on re-run; running it against a NEW cluster
-    seamlessly re-homes the repo (repoints the identity secrets + routing variables). Use
-    --dry-run to preview.
+    federated credentials + Azure RBAC and, for test profiles that opt in, creates or reuses
+    the shared no-data-access identity without RBAC or entitlements. It then writes the
+    AZURE_* secrets and repo->cluster link variables onto the target repo. Idempotent on
+    re-run; running it against a NEW cluster seamlessly re-homes the repo. Use --dry-run
+    to preview.
     """
     from .onboard import OnboardInputs
     from .onboard import onboard as _run_onboard
@@ -848,6 +857,7 @@ def onboard(
             partition=partition,
             keyvault=keyvault,
             gateway_url=gateway_url,
+            no_data_access_token_env=no_data_access_token_env,
             dry_run=dry_run,
             force_rewrite_secrets=force_rewrite_secrets,
         )

@@ -47,4 +47,9 @@ Concretely the responsibilities split three ways: the Lua (deploy / `spi up`) on
 
 To grant a newly onboarded CI identity access, `spi onboard` seeds it into the four root groups ADME data-seeding uses (`users`, `users.datalake.ops`, `users.datalake.admins`, `users.data.root`) via a short in-cluster Job run under the OSDU workload identity (the tenant-provisioning OWNER, authorized to call the entitlements AddMember API). Seeding is per CI identity, so it lives in `spi onboard`, not in the stack bootstrap (`spi up`). This stays consistent with the rejection above: it uses the public AddMember API, not a Gremlin side-channel.
 
+The shared `spi-ci-no-data-access` integration-test identity is the explicit
+exception: onboarding creates and federates it but never passes it to the
+entitlements seed Job. Its valid token must therefore authenticate through the
+same Lua path while remaining unauthorized by entitlements.
+
 Note on partition: `partition-azure` is internal. Its `isDomainAdminServiceAccount` check authorizes any AAD-issued service-principal token regardless of group membership, so the partition deploy-lane test passes with or without this projection change or the seed. The per-identity model is only observable on user-facing services (storage, legal, search).
