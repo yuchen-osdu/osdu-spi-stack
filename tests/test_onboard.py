@@ -18,6 +18,7 @@ These cover the security-relevant string construction (namespace-scoped role
 assignment scopes, identity/role names) without touching az/kubectl/gh.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -31,6 +32,7 @@ from spi.onboard import (
     NO_DATA_ACCESS_TOKEN_ENVS,
     OSDU_BRANCHES,
     OnboardInputs,
+    _ensure_flux_read_rbac,
     _gh_delete_variable,
     _gh_get_variable,
     _no_data_access_federated_credentials,
@@ -136,6 +138,25 @@ def test_deploy_data_actions_are_least_privilege():
     # granted via native k8s RBAC instead.
     assert "pods/log" not in blob
     assert "kustomize" not in blob
+
+
+def test_flux_reader_covers_kustomizations_and_helmreleases(monkeypatch):
+    inp = _inputs()
+    inp.identity_principal_id = "service-principal-object-id"
+    manifests = []
+
+    def capture_manifest(command, **_kwargs):
+        manifests.append(Path(command[-1]).read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(onboard_module, "_run", capture_manifest)
+
+    _ensure_flux_read_rbac(inp)
+
+    assert len(manifests) == 1
+    assert 'apiGroups: ["kustomize.toolkit.fluxcd.io"]' in manifests[0]
+    assert 'resources: ["kustomizations"]' in manifests[0]
+    assert 'apiGroups: ["helm.toolkit.fluxcd.io"]' in manifests[0]
+    assert 'resources: ["helmreleases"]' in manifests[0]
 
 
 def test_osdu_branch_subjects_cover_the_three_branches():

@@ -59,6 +59,10 @@ CI identity without the namespace deploy role — the deploy lane then returned
 `Forbidden` on `kubectl get deployments` and the grant had to be made by hand.
 Onboard now polls until the role definition is queryable, retries the assignment
 with backoff, verifies via re-query, and hard-fails if it never materializes.
+The native `spi-ci-flux-reader` Role also grants read-only access to both Flux
+Kustomizations and HelmReleases. The deploy preflight checks both resource types;
+granting only Kustomization read made the newer HelmRelease assertion fail before
+deployment even when the cluster was correctly suspended.
 
 ### 4. App Insights agent jar must be readable by the non-root runtime user
 

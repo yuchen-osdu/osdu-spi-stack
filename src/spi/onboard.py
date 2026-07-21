@@ -901,14 +901,14 @@ def _ensure_custom_deploy_role(inp: OnboardInputs) -> None:
 
 
 def _ensure_flux_read_rbac(inp: OnboardInputs) -> None:
-    """Grant the CI identity read on Flux Kustomizations via native k8s RBAC.
+    """Grant the CI identity read on Flux reconciliation resources via native k8s RBAC.
 
-    The deploy lane's CI-mode suspend pre-check lists Kustomizations in the flux namespace.
-    Azure RBAC for Kubernetes registers no dataAction for the Flux CRD group, so this cannot
-    be a custom Azure role; a native Role + RoleBinding is the path (native RBAC is additive
-    to Azure RBAC, so it is honored even with Azure RBAC enabled and local accounts disabled).
-    The binding subject is the identity's AAD object id (principalId), matching how the
-    cluster's Azure RBAC webhook names service-principal callers.
+    The deploy lane's CI-mode suspend pre-check lists Kustomizations and HelmReleases in the
+    flux namespace. Azure RBAC for Kubernetes registers no dataAction for Flux CRD groups, so
+    this cannot be a custom Azure role; a native Role + RoleBinding is the path (native RBAC
+    is additive to Azure RBAC, so it is honored even with Azure RBAC enabled and local accounts
+    disabled). The binding subject is the identity's AAD object id (principalId), matching how
+    the cluster's Azure RBAC webhook names service-principal callers.
     """
     console.print("\n[bold]Ensuring Flux read (native RBAC)...[/bold]")
     if not inp.identity_principal_id:
@@ -918,7 +918,7 @@ def _ensure_flux_read_rbac(inp: OnboardInputs) -> None:
     if inp.dry_run:
         _plan(
             f"kubectl apply Role {FLUX_READER_ROLE} + RoleBinding {binding} in "
-            f"'{inp.flux_namespace}' (Kustomizations read for {inp.identity_principal_id})"
+            f"'{inp.flux_namespace}' (Flux read for {inp.identity_principal_id})"
         )
         return
     manifest = f"""apiVersion: rbac.authorization.k8s.io/v1
@@ -929,6 +929,9 @@ metadata:
 rules:
   - apiGroups: ["kustomize.toolkit.fluxcd.io"]
     resources: ["kustomizations"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -954,7 +957,7 @@ subjects:
             description=f"Apply Flux read RBAC ({binding})",
         )
         display_result(
-            f"Flux Kustomization read granted to {inp.identity_principal_id} in "
+            f"Flux Kustomization/HelmRelease read granted to {inp.identity_principal_id} in "
             f"'{inp.flux_namespace}'"
         )
     finally:
