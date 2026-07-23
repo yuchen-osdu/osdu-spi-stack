@@ -16,19 +16,14 @@ def _kustomizations(relative_path: str) -> list[dict]:
 
 def _by_name(documents: list[dict], name: str) -> dict:
     matches = [
-        document
-        for document in documents
-        if document.get("metadata", {}).get("name") == name
+        document for document in documents if document.get("metadata", {}).get("name") == name
     ]
     assert len(matches) == 1
     return matches[0]
 
 
 def _dependencies(document: dict) -> set[str]:
-    return {
-        dependency["name"]
-        for dependency in document.get("spec", {}).get("dependsOn", [])
-    }
+    return {dependency["name"] for dependency in document.get("spec", {}).get("dependsOn", [])}
 
 
 def _resources(relative_path: str) -> set[str]:
@@ -55,10 +50,7 @@ def test_each_ingress_profile_has_exactly_one_gateway_owner():
         gateway = _by_name(documents, "spi-gateway")
 
         assert gateway["spec"]["path"] == expected_path
-        assert all(
-            document["metadata"]["name"] != "spi-gateway-tls"
-            for document in documents
-        )
+        assert all(document["metadata"]["name"] != "spi-gateway-tls" for document in documents)
         assert "spi-gateway" in _dependencies(_by_name(documents, "spi-osdu-routes"))
 
 
