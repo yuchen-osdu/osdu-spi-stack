@@ -104,6 +104,7 @@ def test_init_jobs_are_ordered_replaceable_helm_hooks():
     assert 'helm.sh/hook-weight: "-10"' in partition
     assert 'helm.sh/hook-weight: "0"' in entitlements
     assert "force" not in release["spec"]["upgrade"]
+    assert release["spec"]["chart"]["spec"]["reconcileStrategy"] == "Revision"
 
 
 def test_entitlements_init_uses_bearer_token_and_case_safe_verification():
