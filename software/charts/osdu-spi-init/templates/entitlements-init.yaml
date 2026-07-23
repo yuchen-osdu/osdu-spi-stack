@@ -42,6 +42,8 @@ spec:
           env:
             - name: PARTITION
               value: {{ $partition | quote }}
+            - name: CREATOR_USER_IDS_JSON
+              value: {{ $.Values.creatorUserIds | toJson | quote }}
           volumeMounts:
             - name: scripts
               mountPath: /scripts

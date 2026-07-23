@@ -14,6 +14,8 @@
 
 """YAML templates for Kubernetes resources."""
 
+import json
+
 # Disabled/dummy App Insights fallback. core-lib-azure >= 2.5.6 NPEs on every
 # request if the App Insights SDK is not initialized (see osdu_config_configmap).
 # When no real App Insights is provisioned we still set a syntactically valid
@@ -309,7 +311,9 @@ spec:
 """
 
 
-def spi_init_values_configmap(partitions: list[str]) -> str:
+def spi_init_values_configmap(
+    partitions: list[str], creator_user_ids: list[str] | None = None
+) -> str:
     """ConfigMap consumed by the osdu-spi-init HelmRelease via valuesFrom.
 
     Lives in osdu-flux (where the HelmRelease is reconciled) and carries the
@@ -329,4 +333,5 @@ data:
   values.yaml: |
     partitions:
 {partition_lines}
+    creatorUserIds: {json.dumps(creator_user_ids or [])}
 """

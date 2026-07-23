@@ -64,6 +64,10 @@ spi check
 # Deploy (provisions Azure resources + activates GitOps)
 spi up --env dev1
 
+# Creator access is seeded into Entitlements by default.
+# Disable it for workload-only automation:
+spi up --env dev1 --no-seed-creator
+
 # Deploy a coordinated release tag across SPI service repositories
 spi up --env dev1 --image-tag v1.2.3
 

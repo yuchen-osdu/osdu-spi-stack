@@ -32,6 +32,7 @@ from .guard import (
     resolve_flux_namespace,
     verify_spi_cluster,
 )
+from .identity import decode_jwt_claims, projected_user_ids
 from .images import (
     DEFAULT_GHCR_ORG,
     DEFAULT_GHCR_TAG,
@@ -107,6 +108,10 @@ def _show_config(config: Config, *, show_application_insights: bool = True):
         table.add_row("AAD Client ID", f"{aad_override} [dim](env override)[/dim]")
     else:
         table.add_row("AAD Client ID", "[dim](default: UAMI client id)[/dim]")
+    table.add_row(
+        "Creator Access",
+        ", ".join(config.creator_user_ids) if config.creator_user_ids else "[dim]disabled[/dim]",
+    )
 
     console.print(table)
 
@@ -139,6 +144,7 @@ def _build_config(
     dns_zone: str = "",
     ingress_prefix: str = "",
     acme_email: str = "",
+    creator_user_ids: Optional[List[str]] = None,
     name_suffix: str = "",
     application_insights: bool = False,
     image_source: ImageSource = ImageSource.GHCR,
@@ -166,12 +172,50 @@ def _build_config(
         dns_zone=dns_zone,
         ingress_prefix=ingress_prefix,
         acme_email=acme_email,
+        creator_user_ids=creator_user_ids or [],
         application_insights=application_insights,
         image_source=image_source,
         image_org=image_org,
         image_tag=resolved_tag or "",
         image_ref=resolved_ref,
     )
+
+
+def _resolve_creator_user_ids(seed_creator: bool, override: str) -> list[str]:
+    """Resolve the current Azure caller exactly as the gateway projects it."""
+
+    requested = override.strip()
+    if not seed_creator:
+        if requested:
+            raise ValueError("--creator-user-id cannot be used with --no-seed-creator")
+        return []
+    if requested:
+        if "\n" in requested or "\r" in requested:
+            raise ValueError("--creator-user-id must be a single-line value")
+        return [requested]
+
+    result = run_command(
+        [
+            "az",
+            "account",
+            "get-access-token",
+            "--resource",
+            "https://management.azure.com/",
+            "--query",
+            "accessToken",
+            "--output",
+            "tsv",
+        ],
+        description="Resolve Stack creator identity",
+        display=False,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise ValueError(
+            "Unable to resolve the current Azure caller for Entitlements initialization. "
+            "Run 'az login', pass --creator-user-id, or use --no-seed-creator."
+        )
+    return projected_user_ids(decode_jwt_claims(result.stdout.strip()))
 
 
 def _resolve_image_selection(
@@ -500,6 +544,17 @@ def up(
         "--acme-email",
         help="Contact email for Let's Encrypt ACME account. Also honors SPI_ACME_EMAIL.",
     ),
+    seed_creator: bool = typer.Option(
+        True,
+        "--seed-creator/--no-seed-creator",
+        help="Seed the current Azure caller into Entitlements root groups during init.",
+    ),
+    creator_user_id: str = typer.Option(
+        "",
+        "--creator-user-id",
+        help="Override the creator identifier projected as x-user-id. "
+        "Defaults to the current Azure CLI token claims.",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -567,6 +622,7 @@ def up(
         for_up=not dry_run,
     )
     try:
+        resolved_creator_user_ids = _resolve_creator_user_ids(seed_creator, creator_user_id)
         (
             resolved_image_source,
             resolved_image_org,
@@ -594,6 +650,7 @@ def up(
         dns_zone=dns_zone,
         ingress_prefix=ingress_prefix,
         acme_email=resolve_acme_email(acme_email),
+        creator_user_ids=resolved_creator_user_ids,
         name_suffix=name_suffix,
         application_insights=resolved_application_insights,
         image_source=resolved_image_source,

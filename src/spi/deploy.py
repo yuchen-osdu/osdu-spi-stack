@@ -202,11 +202,16 @@ def _create_spi_init_values(config: Config) -> None:
     consumes via valuesFrom. Must run before Flux reconciles the HelmRelease.
     """
     console.print("\n[bold]Creating SPI init values ConfigMap...[/bold]")
-    yaml_content = spi_init_values_configmap(config.data_partitions)
+    yaml_content = spi_init_values_configmap(config.data_partitions, config.creator_user_ids)
     display_yaml(yaml_content, "ConfigMap: spi-init-values")
     kubectl_apply_yaml(yaml_content, "apply spi-init-values ConfigMap")
     display_result(
         f"spi-init-values ConfigMap created for partitions: {', '.join(config.data_partitions)}"
+        + (
+            f"; creator access: {', '.join(config.creator_user_ids)}"
+            if config.creator_user_ids
+            else "; creator access disabled"
+        )
     )
 
 

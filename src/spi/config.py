@@ -98,6 +98,9 @@ class Config(BaseModel):
     name_suffix: str = ""
     # Data partitions
     data_partitions: List[str] = ["opendes"]
+    # Identities projected for the creator by accepted AAD token versions and
+    # seeded during partition initialization. Empty means creator seeding is off.
+    creator_user_ids: List[str] = []
     # Derived names (set in from_env)
     identity_name: str = ""
     external_dns_identity_name: str = ""
