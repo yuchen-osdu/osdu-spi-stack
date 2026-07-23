@@ -150,6 +150,9 @@ def test_custom_role_rehome_preserves_existing_cluster_scope(monkeypatch):
     )
     existing_role = {
         "id": ("/subscriptions/sub-1/providers/Microsoft.Authorization/roleDefinitions/role-guid"),
+        "name": "role-guid",
+        "roleName": "spi-ci-partition-deploy",
+        "roleType": "CustomRole",
         "assignableScopes": [old_cluster],
     }
     captured = {}
@@ -170,8 +173,10 @@ def test_custom_role_rehome_preserves_existing_cluster_scope(monkeypatch):
     _ensure_custom_deploy_role(inp)
 
     assert "update" in captured["command"]
-    assert captured["role"]["Id"] == "role-guid"
-    assert captured["role"]["AssignableScopes"] == [old_cluster, CLUSTER_ID]
+    assert captured["role"]["id"].endswith("/roleDefinitions/role-guid")
+    assert captured["role"]["roleName"] == "spi-ci-partition-deploy"
+    assert captured["role"]["assignableScopes"] == [old_cluster, CLUSTER_ID]
+    assert captured["role"]["permissions"][0]["dataActions"] == DEPLOY_DATA_ACTIONS
 
 
 def test_flux_reader_covers_kustomizations_and_helmreleases(monkeypatch):

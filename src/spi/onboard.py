@@ -842,28 +842,18 @@ def _ensure_custom_deploy_role(inp: OnboardInputs) -> None:
 
     Assignable at the cluster scope; the assignment (separate step) is namespace-scoped.
     """
-    role_def = {
-        "Name": inp.deploy_role_name,
-        "Description": (
-            f"SPI CI deploy for {inp.service}: patch Deployment/{inp.deployment_name} and read "
-            "pods/replicasets/events/logs in its namespace. Least-privilege (design SS6.1)."
-        ),
-        "Actions": [],
-        "NotActions": [],
-        "DataActions": DEPLOY_DATA_ACTIONS,
-        "NotDataActions": [],
-        "AssignableScopes": [inp.cluster_resource_id],
-    }
+    description = (
+        f"SPI CI deploy for {inp.service}: patch Deployment/{inp.deployment_name} and read "
+        "pods/replicasets/events/logs in its namespace. Least-privilege (design SS6.1)."
+    )
     existing = _az_json(["role", "definition", "list", "--name", inp.deploy_role_name], check=False)
     existing_role = existing[0] if isinstance(existing, list) and existing else None
     if existing_role:
-        role_id = existing_role.get("name") or str(existing_role.get("id", "")).rsplit("/", 1)[-1]
-        if not role_id:
+        if not existing_role.get("id") or not existing_role.get("roleName"):
             console.print(
                 f"  [error]Existing custom role '{inp.deploy_role_name}' has no role ID.[/error]"
             )
             raise typer.Exit(code=1)
-        role_def["Id"] = role_id
 
         # Custom roles are subscription-wide. Rehoming one service repo to a new
         # Stack must add the new AKS scope without invalidating retained clusters.
@@ -874,7 +864,32 @@ def _ensure_custom_deploy_role(inp: OnboardInputs) -> None:
             if normalized not in seen:
                 scopes.append(scope)
                 seen.add(normalized)
-        role_def["AssignableScopes"] = scopes
+        role_def = {
+            **existing_role,
+            "roleName": inp.deploy_role_name,
+            "description": description,
+            "permissions": [
+                {
+                    "actions": [],
+                    "notActions": [],
+                    "dataActions": DEPLOY_DATA_ACTIONS,
+                    "notDataActions": [],
+                }
+            ],
+            "assignableScopes": scopes,
+        }
+    else:
+        # ``az role definition create`` accepts the documented create schema,
+        # while update requires the camelCase shape returned by list/show.
+        role_def = {
+            "Name": inp.deploy_role_name,
+            "Description": description,
+            "Actions": [],
+            "NotActions": [],
+            "DataActions": DEPLOY_DATA_ACTIONS,
+            "NotDataActions": [],
+            "AssignableScopes": [inp.cluster_resource_id],
+        }
 
     if inp.dry_run:
         verb = "update" if existing_role else "create"
