@@ -21,7 +21,7 @@ Each mode is a self-contained Flux Kustomization tree under `software/stacks/osd
 Some pieces are in every mode and live under `software/components/`:
 
 - **Managed Istio** from AKS Automatic (ADR-002). Provides the Gateway API implementation and the ingress LoadBalancer service.
-- **`Gateway` resource** in the `aks-istio-ingress` namespace. The Gateway listens on HTTP:80; the HTTPS listener is added by the mode-specific Kustomization (since it needs a cert that depends on the hostname).
+- **`Gateway` resource** in the `aks-istio-ingress` namespace. The selected ingress profile is its sole Flux owner. `ip` renders HTTP:80 only; `azure` and `dns` render HTTP:80 plus their HTTPS listeners in the same Kustomization.
 - **cert-manager** for any mode that issues TLS (`azure`, `dns`).
 - **`spi-ingress-config` ConfigMap** in `flux-system`, written by the CLI during K8s bootstrap. Carries `GATEWAY_HOSTNAME`, `GATEWAY_LABEL`, `DNS_ZONE`, and similar values consumed by Flux `postBuild.substituteFrom`.
 
@@ -37,7 +37,7 @@ Routing in this mode: every OSDU API is reached at `https://<label>.<region>.clo
 What `software/stacks/osdu/ingress/azure/` lands:
 
 - A `Kustomization` for cert-manager issuers (Let's Encrypt staging + prod).
-- A `Kustomization` for the single-host `Certificate` and the HTTPS listener patch.
+- One `spi-gateway` Kustomization for the HTTP/HTTPS Gateway and single-host `Certificate`.
 - HTTPRoutes for every OSDU service path, plus the Kibana subpath route.
 
 This mode requires zero Azure outside the resource group: no DNS zone, no public IP outside the AKS LB, no extra UAMI.
@@ -63,7 +63,7 @@ What `software/stacks/osdu/ingress/dns/` lands:
 
 - cert-manager issuers (same as `azure`).
 - ExternalDNS HelmRelease with the UAMI ServiceAccount.
-- Three `Certificate` resources and three HTTPS listeners on the Gateway.
+- One `spi-gateway` owner with three `Certificate` resources and three HTTPS listeners.
 - HTTPRoutes scoped per subdomain.
 
 ## Mode: `ip`
@@ -72,7 +72,8 @@ Intentionally minimal. The Istio ingress LB has a public IP; no hostname, no cer
 
 What `software/stacks/osdu/ingress/ip/` lands:
 
-- HTTPRoutes bound to the HTTP:80 listener with no `hostnames` field.
+- One HTTP-only `spi-gateway` owner.
+- HTTPRoutes bound to its HTTP:80 listener with no `hostnames` field.
 - No cert issuer.
 - No Kibana, no Airflow UI routing (the workloads still exist; you reach them via port-forward).
 
@@ -126,7 +127,7 @@ Same drill, plus one: **ExternalDNS wrote the A record.** `kubectl logs deploy/e
 - `software/stacks/osdu/ingress/dns/` -- the multi-host mode
 - `software/stacks/osdu/ingress/ip/` -- the debug mode
 - `software/stacks/osdu/routes/single-host/`, `routes/multi-host/`, `routes/ip-only/` -- HTTPRoute overlays
-- `software/components/gateway/` -- the shared Gateway resource
+- `software/components/gateway/` -- the shared Gateway base rendered by exactly one ingress profile
 - `infra/modules/external-dns-identity.bicep`, `infra/modules/external-dns-role.bicep` -- the conditional UAMI + role
 - `src/spi/ingress.py` -- CLI logic for `--ingress-mode`
 - `infra/flux.bicep` -- carries `ingressMode` as a Bicep parameter

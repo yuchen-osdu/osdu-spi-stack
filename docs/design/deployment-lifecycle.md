@@ -51,8 +51,7 @@ L0a  spi-namespaces
        |
        +--> L0b  spi-nodepools                            (ADR-018)
        +--> L1   spi-cert-manager, spi-trust-manager,
-       |          spi-eck-operator, spi-cnpg-operator,
-       |          spi-gateway
+       |          spi-eck-operator, spi-cnpg-operator
        |          |
        |          +--> L2   spi-elasticsearch, spi-redis, spi-postgresql
        |                     |
@@ -71,7 +70,7 @@ L0a  spi-namespaces
                                                              +--> L6  spi-osdu-reference
 ```
 
-Each edge is a `dependsOn` entry. Each dependency gates on the parent's health check. See [flux reconciliation](flux-reconciliation.md) for the full mechanics.
+The selected ingress profile adds the sole L1 `spi-gateway` owner and its L6 routes. Each edge is a `dependsOn` entry. Each dependency gates on the parent's health check. See [flux reconciliation](flux-reconciliation.md) for the full mechanics.
 
 Rough timing on the default profile with a freshly-deployed cluster:
 

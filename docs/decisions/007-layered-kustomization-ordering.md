@@ -16,7 +16,7 @@ The core profile (`software/stacks/osdu/profiles/core/stack.yaml`) defines a set
 |---|---|---|
 | 0a | `spi-namespaces` | none |
 | 0b | `spi-nodepools` | 0a |
-| 1 | `spi-cert-manager`, `spi-trust-manager`, `spi-eck-operator`, `spi-cnpg-operator`, `spi-gateway` | 0a (trust-manager also on cert-manager) |
+| 1 | `spi-cert-manager`, `spi-trust-manager`, `spi-eck-operator`, `spi-cnpg-operator` | 0a (trust-manager also on cert-manager) |
 | 2 | `spi-elasticsearch`, `spi-redis`, `spi-postgresql` | matching L1 operator + 0b |
 | 3 | `spi-airflow` | `spi-postgresql` |
 | 4a | `spi-osdu-config` | 0a |
@@ -26,7 +26,7 @@ The core profile (`software/stacks/osdu/profiles/core/stack.yaml`) defines a set
 | 5b | `spi-osdu-schema-load` (one-shot Job, ADR-013) | `spi-osdu-init` |
 | 6 | `spi-osdu-reference` (reference services) | 5, 5b |
 
-The ingress profile (`software/stacks/osdu/ingress/<mode>/stack.yaml`, ADR-012) attaches additional Kustomizations at Layer 1 (cert issuers, ExternalDNS, TLS overlays) and Layer 6 (HTTPRoutes). The two profiles reconcile independently under one `fluxConfigurations` resource (ADR-009).
+The ingress profile (`software/stacks/osdu/ingress/<mode>/stack.yaml`, ADR-012) owns exactly one `spi-gateway` Kustomization at Layer 1, plus cert issuers and ExternalDNS where required, and attaches HTTPRoutes at Layer 6. The core and ingress profiles reconcile independently under one `fluxConfigurations` resource (ADR-009).
 
 All Kustomizations use `wait: true` so each layer's Ready gate reflects actual workload health; per-layer `timeout` is tuned to the slowest workload in that layer (15 min for Elasticsearch and Airflow, 30 min for the OSDU service layers, 35 min for schema-load).
 

@@ -24,11 +24,13 @@ Three ingress profiles, each a self-contained Flux Kustomization tree under `sof
 | `dns` | `*.<user-zone>` (osdu, kibana, airflow subdomains) | Let's Encrypt HTTP-01, multi-host overlay | ExternalDNS to Azure DNS Zone | Team environments on an owned zone |
 | `ip` | bare ingress IP | none | none | Smoke tests, skills, debugging |
 
-Shared pieces (cert-manager install, Gateway resource, Istio ingress LB Service) live under `software/components/` and are brought in by all three profiles. The profile owns the variable surface:
+Shared manifests (cert-manager install, Gateway base, Istio ingress LB Service) live under `software/components/`, but the selected ingress profile is the sole Flux owner of the `Gateway` resource. The core profile never applies it. The profile owns the variable surface:
 
 - `azure` uses the AKS cloud controller's `azure-dns-label-name` Service annotation (propagated via the Gateway's infrastructure annotations) to pin an Azure FQDN; cert-manager issues one cert against that FQDN; Kibana is served under `/kibana` via a subpath overlay.
 - `dns` provisions a second UAMI (`<cluster>-external-dns`, scoped `DNS Zone Contributor` on the target DNS zone, ADR-005). ExternalDNS reads HTTPRoute hostnames and writes A and TXT records. The Gateway has one HTTPS listener per hostname, each with its own certificate. Kibana is its own subdomain (no subpath).
 - `ip` is the minimum surface: HTTPRoutes without hostnames bound to the HTTP:80 listener. No cert-manager issuers, no ExternalDNS, no Kibana routing, no TLS overlay.
+
+The ownership rule is invariant across modes: exactly one child Kustomization named `spi-gateway` applies `Gateway/aks-istio-ingress/spi-gateway`. In `azure` and `dns`, that owner renders the base Gateway plus the mode-specific certificates and HTTPS listeners. In `ip`, it renders only the HTTP base.
 
 Inputs per mode land in a single `spi-ingress-config` ConfigMap in `flux-system`, consumed by Flux `postBuild.substituteFrom`.
 
@@ -41,6 +43,12 @@ Rejected:
 
 - Switching modes is a Bicep parameter change plus one Flux reconcile; no hand-edits to Kustomizations.
 - Each mode's surface is self-describing. A reader sees the full topology in one `stack.yaml` plus the overlays it references.
+- Independent Flux reconcilers never compete for the same Gateway, so an HTTPS profile cannot drift back to HTTP-only between reconciliation intervals.
 - `dns` mode introduces a second UAMI and a DNS Zone Contributor role assignment. Both are conditional in `infra/main.bicep` on a non-empty `dnsZoneName` parameter.
 - `ip` mode is intentionally low-fidelity; endpoints lose HTTPS and middleware UIs (Kibana, Airflow) are not routed. It is documented as debug-only.
 - Adding a fourth mode is adding a fourth subdirectory under `software/stacks/osdu/ingress/` and a fourth enum value; no core Flux surgery.
+
+Existing clusters that predate single ownership require a controlled one-time
+migration. Disable pruning on the live Gateway and Certificate, reconcile the
+ingress parent so the selected profile adopts them, reconcile the core parent to
+remove its obsolete child Kustomization, then restore normal pruning.
