@@ -18,6 +18,7 @@ These cover the security-relevant string construction (namespace-scoped role
 assignment scopes, identity/role names) without touching az/kubectl/gh.
 """
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,6 +33,7 @@ from spi.onboard import (
     NO_DATA_ACCESS_TOKEN_ENVS,
     OSDU_BRANCHES,
     OnboardInputs,
+    _ensure_custom_deploy_role,
     _ensure_flux_read_rbac,
     _gh_delete_variable,
     _gh_get_variable,
@@ -138,6 +140,38 @@ def test_deploy_data_actions_are_least_privilege():
     # granted via native k8s RBAC instead.
     assert "pods/log" not in blob
     assert "kustomize" not in blob
+
+
+def test_custom_role_rehome_preserves_existing_cluster_scope(monkeypatch):
+    inp = _inputs()
+    old_cluster = (
+        "/subscriptions/sub-1/resourceGroups/spi-stack-old/providers/"
+        "Microsoft.ContainerService/managedClusters/spi-stack-old"
+    )
+    existing_role = {
+        "id": ("/subscriptions/sub-1/providers/Microsoft.Authorization/roleDefinitions/role-guid"),
+        "assignableScopes": [old_cluster],
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        onboard_module,
+        "_az_json",
+        lambda *_args, **_kwargs: [existing_role],
+    )
+
+    def capture_role(command, **_kwargs):
+        definition = command[command.index("--role-definition") + 1]
+        captured["command"] = command
+        captured["role"] = json.loads(Path(definition.removeprefix("@")).read_text())
+
+    monkeypatch.setattr(onboard_module, "_run", capture_role)
+
+    _ensure_custom_deploy_role(inp)
+
+    assert "update" in captured["command"]
+    assert captured["role"]["Id"] == "role-guid"
+    assert captured["role"]["AssignableScopes"] == [old_cluster, CLUSTER_ID]
 
 
 def test_flux_reader_covers_kustomizations_and_helmreleases(monkeypatch):

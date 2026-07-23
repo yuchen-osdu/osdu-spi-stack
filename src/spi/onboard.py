@@ -855,14 +855,34 @@ def _ensure_custom_deploy_role(inp: OnboardInputs) -> None:
         "AssignableScopes": [inp.cluster_resource_id],
     }
     existing = _az_json(["role", "definition", "list", "--name", inp.deploy_role_name], check=False)
+    existing_role = existing[0] if isinstance(existing, list) and existing else None
+    if existing_role:
+        role_id = existing_role.get("name") or str(existing_role.get("id", "")).rsplit("/", 1)[-1]
+        if not role_id:
+            console.print(
+                f"  [error]Existing custom role '{inp.deploy_role_name}' has no role ID.[/error]"
+            )
+            raise typer.Exit(code=1)
+        role_def["Id"] = role_id
+
+        # Custom roles are subscription-wide. Rehoming one service repo to a new
+        # Stack must add the new AKS scope without invalidating retained clusters.
+        scopes: list[str] = []
+        seen: set[str] = set()
+        for scope in [*existing_role.get("assignableScopes", []), inp.cluster_resource_id]:
+            normalized = scope.lower()
+            if normalized not in seen:
+                scopes.append(scope)
+                seen.add(normalized)
+        role_def["AssignableScopes"] = scopes
+
     if inp.dry_run:
-        verb = "update" if existing else "create"
+        verb = "update" if existing_role else "create"
         _plan(
             f"az role definition {verb} '{inp.deploy_role_name}' (custom least-privilege deploy role)"
         )
         return
-    # az role definition create is idempotent-friendly via update when it exists.
-    action = "update" if existing else "create"
+    action = "update" if existing_role else "create"
     # Pass the role definition as a temp @file rather than inline JSON. On Windows the az
     # entrypoint is a .cmd shim, and cmd.exe re-parses an inline JSON string (the braces,
     # quotes, and brackets trip "was unexpected at this time"); the @file form sidesteps all
