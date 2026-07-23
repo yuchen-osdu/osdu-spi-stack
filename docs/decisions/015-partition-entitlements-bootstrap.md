@@ -27,7 +27,7 @@ Shape:
 - New Kustomization `spi-osdu-init` at `software/stacks/osdu/init/`, wired into the core profile as Layer 5a (after `spi-osdu-services`, before `spi-osdu-schema-load`) per ADR-007. `schema-load` depends on `spi-osdu-init` so the schema POSTs see a tenant that is already provisioned.
 - Idempotence: 201 and 409 from partition-service count as success; 200 and 409 from entitlements-tenant-provisioning count as success. No `ttlSecondsAfterFinished` (same rationale as ADR-013 — Flux would re-create an auto-deleted Job and turn one-shot into periodic).
 - Creator access is enabled by default. `--no-seed-creator` disables it for workload-only automation, and `--creator-user-id` supplies an explicit projected identity when Azure CLI token discovery is unsuitable.
-- The init HelmRelease uses forced replacement on upgrade because Kubernetes Job pod templates are immutable. Changing creator values therefore reruns the idempotent partition/Entitlements Jobs instead of wedging the release.
+- Both init Jobs are ordered Helm post-install/post-upgrade hooks with `before-hook-creation`. Changing creator values therefore deletes the prior completed Jobs and reruns partition before Entitlements without patching immutable Job pod templates.
 
 Rejected:
 

@@ -12,7 +12,6 @@ spec:
       retries: 3
   upgrade:
     timeout: 15m
-    force: true
     remediation:
       retries: 3
   chart:
@@ -22,8 +21,9 @@ spec:
         kind: GitRepository
         name: osdu-spi-stack-system
   # Partition list and creator identities are injected by the CLI via the
-  # spi-init-values ConfigMap in osdu-flux. Force replacement lets creator
-  # changes recreate the immutable one-shot Jobs safely.
+  # spi-init-values ConfigMap in osdu-flux. The chart renders init Jobs as
+  # ordered Helm hooks with before-hook-creation, so creator changes rerun them
+  # without patching immutable Job pod templates.
   valuesFrom:
     - kind: ConfigMap
       name: spi-init-values

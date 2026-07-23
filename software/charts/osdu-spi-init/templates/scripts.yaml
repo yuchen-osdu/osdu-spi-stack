@@ -196,11 +196,14 @@ data:
     from wait import wait_for_status
 
     PARTITION = os.environ["PARTITION"]
-    CREATOR_USER_IDS = [
-        str(value).strip().lower()
-        for value in json.loads(os.environ.get("CREATOR_USER_IDS_JSON", "[]"))
-        if str(value).strip()
-    ]
+    CREATOR_USER_IDS = []
+    seen_creator_ids = set()
+    for value in json.loads(os.environ.get("CREATOR_USER_IDS_JSON", "[]")):
+        creator_user_id = str(value).strip()
+        normalized = creator_user_id.lower()
+        if creator_user_id and normalized not in seen_creator_ids:
+            CREATOR_USER_IDS.append(creator_user_id)
+            seen_creator_ids.add(normalized)
     ENTITLEMENTS_HOST = os.environ.get(
         "ENTITLEMENTS_HOST", "http://entitlements.osdu.svc.cluster.local"
     )
@@ -224,7 +227,7 @@ data:
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "Authorization": f"******",
+                "Authorization": f"Bearer {token}",
                 "data-partition-id": PARTITION,
             },
         )
@@ -281,7 +284,8 @@ data:
                 code, payload = call("GET", f"/groups/{group}/members", token)
                 members = json.loads(payload).get("members", []) if code == 200 else []
                 present = any(
-                    member.get("email", "").lower() == creator_user_id for member in members
+                    member.get("email", "").lower() == creator_user_id.lower()
+                    for member in members
                 )
                 print(f"  verify {group} -> present={present}")
                 success = success and present

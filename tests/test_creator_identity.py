@@ -88,11 +88,29 @@ def test_init_values_include_creator_identity():
     assert values["creatorUserIds"] == ["creator@example.com", "user-object-id"]
 
 
-def test_init_release_force_replaces_immutable_jobs():
+def test_init_jobs_are_ordered_replaceable_helm_hooks():
+    rendered = ROOT / "software" / "charts" / "osdu-spi-init" / "templates"
+    partition = (rendered / "partition-init.yaml").read_text(encoding="utf-8")
+    entitlements = (rendered / "entitlements-init.yaml").read_text(encoding="utf-8")
     release = yaml.safe_load(
         (ROOT / "software" / "stacks" / "osdu" / "init" / "release.yaml").read_text(
             encoding="utf-8"
         )
     )
 
-    assert release["spec"]["upgrade"]["force"] is True
+    for template in (partition, entitlements):
+        assert "helm.sh/hook: post-install,post-upgrade" in template
+        assert "helm.sh/hook-delete-policy: before-hook-creation" in template
+    assert 'helm.sh/hook-weight: "-10"' in partition
+    assert 'helm.sh/hook-weight: "0"' in entitlements
+    assert "force" not in release["spec"]["upgrade"]
+
+
+def test_entitlements_init_uses_bearer_token_and_case_safe_verification():
+    script = (
+        ROOT / "software" / "charts" / "osdu-spi-init" / "templates" / "scripts.yaml"
+    ).read_text(encoding="utf-8")
+
+    assert '"Authorization": f"Bearer {token}"' in script
+    assert '"Authorization": f"******"' not in script
+    assert "creator_user_id.lower()" in script
