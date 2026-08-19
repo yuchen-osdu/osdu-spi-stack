@@ -216,6 +216,24 @@ def test_dry_run_resource_group_does_not_persist_observability_tag():
     assert "spi-name-suffix=abc12" in create_command
 
 
+def test_existing_resource_group_removes_retired_aks_mode_tag():
+    cfg = Config.from_env("dev1", name_suffix="abc12")
+    with mock.patch.object(
+        azure_infra,
+        "run_command",
+        side_effect=[
+            _result("true"),
+            _result("automatic"),
+            _result(""),
+        ],
+    ) as run:
+        azure_infra.create_resource_group(cfg)
+
+    remove_command = run.call_args_list[2].args[0]
+    assert remove_command[:4] == ["az", "group", "update", "--name"]
+    assert f"tags.{azure_infra.LEGACY_RG_AKS_MODE_TAG}" in remove_command
+
+
 def test_detect_existing_application_insights_distinguishes_not_found():
     with mock.patch.object(
         azure_infra,

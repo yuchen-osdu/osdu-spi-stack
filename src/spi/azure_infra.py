@@ -57,6 +57,7 @@ from .shell import run_command
 INFRA_MAIN_BICEP = INFRA_ROOT / "main.bicep"
 INFRA_AKS_BICEP = INFRA_ROOT / "aks.bicep"
 MINIMUM_KUBERNETES_MINOR = (1, 36)
+LEGACY_RG_AKS_MODE_TAG = "spi-aks-mode"
 
 # System pool VM size. Kept here rather than only in Bicep so the CLI can
 # resolve the zones this exact size can actually use in the target region.
@@ -129,6 +130,8 @@ def create_resource_group(
         check=False,
     )
     if exists.returncode == 0 and exists.stdout.strip().lower() == "true":
+        if persist_application_insights:
+            _remove_legacy_aks_mode_tag(config.resource_group)
         display_result(f"Resource group {config.resource_group} ready")
         return
 
@@ -154,6 +157,42 @@ def create_resource_group(
         cmd.extend(["--tags", *tags])
     run_command(cmd, description=f"Create resource group: {config.resource_group}")
     display_result(f"Resource group {config.resource_group} ready")
+
+
+def _remove_legacy_aks_mode_tag(resource_group: str) -> None:
+    """Remove the retired selectable-topology tag from existing environments."""
+    result = run_command(
+        [
+            "az",
+            "group",
+            "show",
+            "--name",
+            resource_group,
+            "--query",
+            f'tags."{LEGACY_RG_AKS_MODE_TAG}"',
+            "--output",
+            "tsv",
+        ],
+        description=f"Check retired {LEGACY_RG_AKS_MODE_TAG} tag",
+        display=False,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return
+    run_command(
+        [
+            "az",
+            "group",
+            "update",
+            "--name",
+            resource_group,
+            "--remove",
+            f"tags.{LEGACY_RG_AKS_MODE_TAG}",
+            "--output",
+            "none",
+        ],
+        description=f"Remove retired {LEGACY_RG_AKS_MODE_TAG} tag",
+    )
 
 
 def read_rg_suffix_tag(resource_group: str) -> "str | None":
