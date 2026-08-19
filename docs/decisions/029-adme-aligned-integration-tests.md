@@ -1,4 +1,4 @@
-# ADR-026: ADME-Aligned, Secret-Less Integration Tests on the Deploy Lane
+# ADR-029: ADME-Aligned, Secret-Less Integration Tests on the Deploy Lane
 
 **Status**: Accepted
 
@@ -31,7 +31,7 @@ suite with the single federated `INTEGRATION_TESTER_ACCESS_TOKEN`, minted as the
 service's CI managed identity (`azure/login` OIDC → `az account
 get-access-token --resource $AAD_CLIENT_ID`). No test service-principal secret
 is introduced; the stack stays secret-less and the suite exercises the
-per-identity entitlements model (ADR-016) because the CI MSI is a real
+per-identity entitlements model (ADR-036) because the CI MSI is a real
 entitlements member seeded by `spi onboard`.
 
 Service-specific alignment, each verified byte-identical against the ADME fork

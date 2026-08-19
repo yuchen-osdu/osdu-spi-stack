@@ -5,7 +5,7 @@ date: "2026-08-19"
 deciders: "Yuchen Wang"
 ---
 
-# ADR-026: Graduated profile starts with the Wellbore service pair
+# ADR-039: Graduated profile starts with the Wellbore service pair
 
 ## Context
 

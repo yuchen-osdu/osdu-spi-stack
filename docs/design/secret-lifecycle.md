@@ -35,12 +35,14 @@ Most KV secrets are declared in Bicep, where the source value is Azure itself. T
 | `tenant-id`, `subscription-id`, `osdu-identity-id`, `keyvault-uri`, `system-storage` | `tenant()` / `subscription()` / resource outputs | `main.bicep` |
 | `graph-db-endpoint` | Cosmos Gremlin endpoint | `main.bicep` |
 | `{p}-cosmos-endpoint`, `{p}-storage`, `{p}-sb-namespace` | Resource outputs | `main.bicep` |
-| `{p}-cosmos-primary-key`, `{p}-storage-account-blob-endpoint` | `listKeys()` / resource `.properties` | `partition.bicep` |
-| `{p}-cosmos-connection`, `{p}-storage-account-key`, `{p}-sb-connection` | `"DISABLED"` placeholder | `partition.bicep` |
+| `{p}-storage-account-blob-endpoint` | Resource `.properties` | `partition.bicep` |
+| `{p}-cosmos-primary-key`, `{p}-cosmos-connection`, `{p}-storage-account-key`, `{p}-sb-connection` | `"DISABLED"` compatibility placeholder | `partition.bicep` |
 
 Bicep writes are atomic with the rest of the deploy: the KV secret either lands with the resource or the whole deploy fails. ARM is idempotent on secret writes (a re-deploy with the same value is a no-op).
 
-The Gremlin account intentionally has local authentication disabled. SPI Stack does not write `graph-db-primary-key`; Entitlements must use a Microsoft Entra token with the Gremlin Data Contributor assignment declared in `cosmos-gremlin.bicep`.
+Cosmos and Service Bus local authentication is disabled. SPI Stack does not
+write usable data-plane keys; services authenticate with Microsoft Entra
+Workload Identity and the data-plane assignments declared in Bicep.
 
 ### Writer B: the CLI (post-handoff)
 

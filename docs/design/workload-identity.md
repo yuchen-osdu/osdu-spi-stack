@@ -95,7 +95,7 @@ No change to the federation chain, no change to the ServiceAccount, no change to
 
 ## Related ADRs
 
-- [ADR-033](../decisions/033-selectable-aks-deployment-modes.md) -- both AKS modes provide the OIDC issuer
+- [ADR-040](../decisions/040-aks-automatic-only.md) -- AKS Automatic provides the OIDC issuer
 - [ADR-005](../decisions/005-workload-identity.md) -- Workload Identity for Azure PaaS Access
 - [ADR-010](../decisions/010-keyvault-secret-management.md) -- Key Vault + ConfigMap Secret Model
 - [ADR-016](../decisions/016-istio-jwt-projection.md) -- Istio JWT Projection

@@ -4,7 +4,7 @@
 
 ### Azure-Native Software for OSDU
 
-SPI Stack deploys the OSDU platform onto Azure using the AKS Base SKU with Node Autoprovisioning and Azure PaaS services with a bootstrap + [Flux CD](https://fluxcd.io/) GitOps model. Infrastructure is provisioned via `az` CLI commands, then Flux continuously reconciles Kubernetes workloads from this Git repository.
+SPI Stack deploys the OSDU platform onto Azure using AKS Automatic and Azure PaaS services with a bootstrap + [Flux CD](https://fluxcd.io/) GitOps model. Infrastructure is provisioned via `az` CLI commands, then Flux continuously reconciles Kubernetes workloads from this Git repository.
 
 This project is currently optimized for Azure dev/test environments and is still evolving.
 
@@ -17,7 +17,7 @@ This project is currently optimized for Azure dev/test environments and is still
 ## Why SPI Stack
 
 - **Azure-native**: leverages CosmosDB, Service Bus, Storage, Key Vault, and Entra ID
-- **AKS Base + NAP**: managed Istio and Karpenter Node Autoprovisioning; pod hardening baked into the local Helm chart
+- **AKS Automatic**: managed Istio, automatic node provisioning, and managed platform safeguards
 - **GitOps-driven**: Flux continuously reconciles desired state after bootstrap
 - **Transparent**: every `az` and `kubectl` command is shown before execution
 - **Workload Identity**: no stored credentials; all Azure access via federated identity
@@ -127,7 +127,6 @@ spi up --env dev1 --profile minimal
 |---------|----------|--------------|
 | `core` (default) | 10 core + 3 reference services | General Azure SPI development |
 | `graduated` | Core + Wellbore DDMS + internal Wellbore worker | Wellbore domain workflows |
-| `full` | Backward-compatible alias for the implemented core stack | Reserved for future expansion |
 
 Image resolution is profile-aware and atomic. `spi up` verifies every image
 required by the selected profile before provisioning Azure resources. A
@@ -169,7 +168,7 @@ SPI Stack is **GitOps + bootstrap**, not "pure GitOps from an empty cluster."
 The CLI performs a bootstrap phase:
 
 - Provision Azure PaaS resources (CosmosDB, Service Bus, Storage, Key Vault)
-- Create an AKS Base SKU cluster (Node Autoprovisioning) with Managed Identity
+- Create an AKS Automatic 1.36 cluster with Managed Identity
 - Configure Workload Identity and RBAC role assignments
 - Bootstrap the cluster with namespaces, secrets, ConfigMap, and ServiceAccount
 - Activate the AKS native Flux extension pointing to this repo
@@ -179,7 +178,7 @@ After that handoff, **Flux owns steady-state reconciliation** and continuously c
 <details>
 <summary>Deployment phases</summary>
 
-1. **Core Infra**: Resource Group, AKS (Base SKU + NAP), Managed Identity, Key Vault, ACR
+1. **Core Infra**: Resource Group, AKS Automatic, Managed Identity, Key Vault, ACR
 2. **Data Infra**: CosmosDB (Gremlin + SQL), Service Bus, Storage Accounts
 3. **IAM**: Federated credentials, RBAC role assignments, Key Vault secrets
 4. **K8s Bootstrap**: Namespaces, StorageClasses, secrets, ConfigMap, ServiceAccount
@@ -224,6 +223,7 @@ Three namespaces, deployed in dependency order via a 7-layer Kustomization stack
 | Profile | Deploys |
 |---------|---------|
 | `core` (default) | Everything above. |
+| `graduated` | `core` plus the public Wellbore DDMS API and its internal worker. |
 | `minimal` | `foundation` and `platform` only — operators, cert-manager, trust-manager, Gateway, Elasticsearch, Redis, PostgreSQL, Airflow. No OSDU services. |
 | `bare` | Nothing; infra plus activated GitOps only. Flux reconciles empty stack and ingress trees. The CLI bootstrap seeds namespaces, secrets, the `osdu-config` ConfigMap, and the Workload Identity ServiceAccount. |
 
@@ -235,7 +235,7 @@ Use `bare` for Bicep, Workload Identity, or RBAC iteration, or for bring-your-ow
 
 | Resource | Purpose |
 |----------|---------|
-| AKS (Base SKU + NAP) | Kubernetes with managed Istio and Karpenter Node Autoprovisioning |
+| AKS Automatic | Kubernetes 1.36 with managed Istio and automatic node provisioning |
 | CosmosDB Gremlin | Entitlements graph |
 | CosmosDB SQL | OSDU operational data (per partition) |
 | Service Bus | Async messaging (per partition, 14 topics) |
@@ -271,7 +271,12 @@ Commands:
   reconcile  Force Flux to re-sync from Git               [--suspend] [--resume] [--refresh-images]
 ```
 
-Use `--dry-run` on `spi up` to preview the Bicep changes (`az deployment group what-if`) before any Azure resources are created beyond the resource group. `--ingress-mode` defaults to `azure`; the other supported modes are `dns` (per-service hostnames on an owned Azure DNS zone) and `ip` (bare IP, debug only). Service images default to each public `yuchen-osdu` package's `main-snapshot`, which is immediately pinned to an immutable digest. Use `--image-tag` for a coordinated release tag, `--image-ref` for advanced multi-repository feature validation, or `--image-source community` for the OSDU GitLab fallback. `--refresh-images` re-resolves the configured selector and reconciles the service Kustomizations.
+Use `--dry-run` on `spi up` to preview the Bicep changes (`az deployment group what-if`) before any Azure resources are created beyond the resource group. `--ingress-mode` defaults to `azure`; the other supported modes are `dns` (per-service hostnames on an owned Azure DNS zone) and `ip` (bare IP, debug only). Service images default to each public `yuchen-osdu` package's `main-snapshot`, which is immediately pinned to an immutable digest. Use `--image-tag` for a coordinated release tag or `--image-ref` for advanced
+multi-repository feature validation. `--image-source community` is an explicit
+whole-fleet compatibility selection, not an automatic fallback; selected
+community builds must support the Entra-only Azure data plane.
+`--refresh-images` re-resolves the configured selector and reconciles the
+service Kustomizations.
 
 
 ## Documentation

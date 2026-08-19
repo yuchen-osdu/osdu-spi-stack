@@ -31,6 +31,7 @@ from spi.shell import (
     build_batch_command_line,
     escape_batch_argument,
     prepare_command,
+    run_command,
     run_process,
 )
 
@@ -156,3 +157,16 @@ def test_run_process_forwards_kwargs_to_subprocess():
     assert result is completed
     prepare.assert_called_once_with(["kubectl", "get"])
     run.assert_called_once_with(["kubectl", "get"], capture_output=True, text=True, timeout=10)
+
+
+def test_run_command_uses_platform_safe_launcher():
+    completed = subprocess.CompletedProcess(["az"], 0, stdout="{}", stderr="")
+    with mock.patch("spi.shell.run_process", return_value=completed) as run:
+        result = run_command(["az", "account", "show"], display=False)
+
+    assert result is completed
+    run.assert_called_once_with(
+        ["az", "account", "show"],
+        capture_output=True,
+        text=True,
+    )

@@ -56,10 +56,6 @@ class TestValidPartitions:
         assert cfg.image_tag == "main-snapshot"
         assert cfg.image_ref == ""
 
-    def test_full_profile_uses_the_implemented_thirteen_service_stack(self):
-        cfg = Config(env="dev1", profile=Profile.FULL)
-        assert cfg.gitops_profile == "core"
-
     def test_graduated_profile_selects_wellbore_stack_and_ingress(self):
         cfg = Config(
             env="dev1",

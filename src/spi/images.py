@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -143,9 +144,9 @@ CORE_IMAGE_NAMES = (
     "unit",
 )
 PROFILE_IMAGE_NAMES = {
+    "bare": (),
+    "minimal": (),
     "core": CORE_IMAGE_NAMES,
-    # Full remains the backward-compatible alias for the implemented core stack.
-    "full": CORE_IMAGE_NAMES,
     "graduated": CORE_IMAGE_NAMES
     + (
         "wellbore-domain-services",

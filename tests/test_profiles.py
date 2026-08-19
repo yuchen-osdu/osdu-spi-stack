@@ -38,8 +38,30 @@ KUSTOMIZATION_KIND = "Kustomization"
 FLUX_API_PREFIX = "kustomize.toolkit.fluxcd.io/"
 
 
+def _composed_trees(tree: Path, seen: set[Path] | None = None):
+    """Yield stack directories included by a profile's Kustomize resources."""
+    seen = seen or set()
+    tree = tree.resolve()
+    if tree in seen:
+        return
+    seen.add(tree)
+    yield tree
+
+    document = yaml.safe_load((tree / "kustomization.yaml").read_text())
+    for resource in document.get("resources", []):
+        target = (tree / resource).resolve()
+        if target.is_dir() and (target / "kustomization.yaml").is_file():
+            yield from _composed_trees(target, seen)
+
+
 def _flux_kustomizations(tree: Path):
-    """Yield every Flux Kustomization doc declared under a stack directory."""
+    """Yield every Flux Kustomization in the fully composed stack tree."""
+    for composed_tree in _composed_trees(tree):
+        yield from _direct_flux_kustomizations(composed_tree)
+
+
+def _direct_flux_kustomizations(tree: Path):
+    """Yield Flux Kustomizations declared directly under one stack directory."""
     for path in sorted(tree.glob("*.yaml")):
         if path.name == "kustomization.yaml":
             continue
@@ -134,6 +156,29 @@ class TestMinimalProfileScope:
     def test_ingress_declares_no_osdu_routes(self, mode):
         names = _declared_names(_ingress_tree(Profile.MINIMAL, mode))
         assert "spi-osdu-routes" not in names
+
+
+class TestRuntimeContracts:
+    @pytest.mark.parametrize("profile", (Profile.CORE, Profile.MINIMAL), ids=lambda p: p.value)
+    def test_namespace_layer_substitutes_runtime_istio_revision(self, profile):
+        namespaces = next(
+            k
+            for k in _flux_kustomizations(PROFILES_DIR / profile.value)
+            if k["metadata"]["name"] == "spi-namespaces"
+        )
+        assert namespaces["spec"]["postBuild"]["substituteFrom"] == [
+            {"kind": "ConfigMap", "name": "spi-ingress-config"}
+        ]
+
+    def test_schema_load_flux_timeout_exceeds_job_deadline(self):
+        schema_load = next(
+            k
+            for k in _flux_kustomizations(PROFILES_DIR / Profile.CORE.value)
+            if k["metadata"]["name"] == "spi-osdu-schema-load"
+        )
+        job = yaml.safe_load((STACKS / "schema-load" / "job.yaml").read_text())
+        timeout_minutes = int(schema_load["spec"]["timeout"].removesuffix("m"))
+        assert timeout_minutes * 60 > job["spec"]["activeDeadlineSeconds"]
 
 
 class TestBareProfileScope:

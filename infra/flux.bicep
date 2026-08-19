@@ -25,6 +25,7 @@ param repoBranch string = 'main'
   'bare'
   'minimal'
   'core'
+  'graduated'
 ])
 param profile string = 'core'
 
@@ -55,6 +56,8 @@ var gitRepositoryBase = {
 var gitRepositoryAuth = !empty(gitRepositoryLocalAuthRef) ? {
   localAuthRef: gitRepositoryLocalAuthRef
 } : {}
+
+var ingressPath = './software/stacks/osdu/ingress/${ingressMode}'
 
 resource aks 'Microsoft.ContainerService/managedClusters@2024-10-01' existing = {
   name: clusterName

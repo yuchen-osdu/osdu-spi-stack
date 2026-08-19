@@ -1,8 +1,8 @@
 # SPI Stack - Ingress profile: IP (bare IP, no TLS, debug only)
 #
-# Owns the HTTP-only spi-gateway and wires HTTPRoutes (no hostnames)
-# to its HTTP:80 listener. No cert-manager issuers, no ExternalDNS,
-# no Kibana, no TLS overlay.
+# Attaches a single Flux Kustomization that wires HTTPRoutes (no
+# hostnames) to the existing HTTP:80 listener on spi-gateway. No
+# cert-manager issuers, no ExternalDNS, no Kibana, no TLS overlay.
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization

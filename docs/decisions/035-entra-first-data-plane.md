@@ -1,5 +1,5 @@
 ---
-status: "accepted"
+status: "superseded by [ADR-027](027-entra-only-data-plane.md)"
 contact: "Yuchen Wang"
 date: "2026-07-24"
 deciders: "Yuchen Wang"
@@ -18,7 +18,7 @@ accounts.
 
 Both are correct about their own constraint, and the difference is not
 theoretical: the deployed service images decide which paths actually work. The
-committed GHCR fleet (ADR-030) includes an Entra-capable Entitlements build and
+committed GHCR fleet (ADR-032) includes an Entra-capable Entitlements build and
 a Workload-Identity-capable indexer-queue, while the Partition service still
 reads its Cosmos SQL key from Key Vault.
 

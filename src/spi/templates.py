@@ -92,9 +92,8 @@ def osdu_config_configmap(
     web SDK. core-lib-azure >= 2.5.6 ships LogCustomDimensionFilter, which reads
     the App Insights request-telemetry context on EVERY request with no null
     guard; if App Insights is not initialized the service returns HTTP 500 on
-    every request. AKS Automatic enabled App Insights by default, but AKS Base
-    does not, so we always populate a connection string here -- the real one
-    when App Insights is provisioned (infra/main.bicep), or a disabled/dummy
+    every request. We therefore always populate a connection string here --
+    the real one when App Insights is provisioned (infra/main.bicep), or a disabled/dummy
     fallback (telemetry goes nowhere) so the SDK still initializes and the
     filter does not NPE.
     """

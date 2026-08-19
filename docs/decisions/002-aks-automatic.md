@@ -1,12 +1,10 @@
 # ADR-002: AKS Automatic as Compute Substrate
 
-**Status**: Superseded by [ADR-021](021-aks-base-node-autoprovisioning.md)
+**Status**: Accepted; reaffirmed by [ADR-040](040-aks-automatic-only.md)
 
-> Superseded 2026-06. AKS Automatic began enforcing a non-bypassable guardrail
-> that blocks the `MutatingWebhookConfiguration` objects cert-manager and
-> CloudNativePG require, so the stack can no longer reconcile on Automatic.
-> ADR-021 moves to the Base SKU with Node Autoprovisioning. The rationale below
-> is retained for history.
+> Reaffirmed 2026-08. Kubernetes 1.36 replaced the former blanket admission
+> restriction with a scoped policy compatible with cert-manager and
+> CloudNativePG (ADR-019). ADR-040 removes the temporary alternate topology.
 
 ## Context
 

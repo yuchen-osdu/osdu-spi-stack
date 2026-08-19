@@ -26,7 +26,6 @@ spec:
   interval: 10m
   dependsOn:
     - name: spi-cert-manager
-    - name: spi-gateway
   sourceRef:
     kind: GitRepository
     name: osdu-spi-stack-system
@@ -91,7 +90,7 @@ spec:
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
-  name: spi-gateway-tls
+  name: spi-gateway
   namespace: osdu-flux
   labels:
     spi-stack.layer: "1"
@@ -125,7 +124,7 @@ spec:
   dependsOn:
     - name: spi-airflow
     - name: spi-kibana
-    - name: spi-gateway-tls
+    - name: spi-gateway
     - name: spi-external-dns
   sourceRef:
     kind: GitRepository

@@ -38,8 +38,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -49,7 +47,7 @@ import typer
 
 from .console import console, display_result
 from .guard import DEFAULT_FLUX_NAMESPACE
-from .shell import run_command
+from .shell import run_command, run_process
 
 # Federated-credential subjects to register on the target repo. The corp Entra tenant
 # commonly disables wildcard subjects, so we enumerate the OSDU branch set explicitly
@@ -208,26 +206,9 @@ sys.exit(main())
 """
 
 
-def _resolve(cmd_list: List[str]) -> List[str]:
-    """Resolve argv[0] to an absolute path so subprocess (shell=False) finds it.
-
-    Windows exposes az/gh/kubectl as ``.cmd`` shims that PATHEXT resolves for a shell but
-    not for ``subprocess.run`` with a bare name. Resolve up front; fall back to the name.
-    """
-    if not cmd_list:
-        return cmd_list
-    found = shutil.which(cmd_list[0])
-    return [found, *cmd_list[1:]] if found else cmd_list
-
-
 def _run(cmd_list: List[str], **kwargs: Any) -> Any:
-    """``run_command`` with argv[0] resolved for Windows (az/gh/kubectl are ``.cmd`` shims).
-
-    ``run_command`` invokes subprocess with ``shell=False``; a bare ``az`` is not found by
-    ``CreateProcess`` on Windows. Resolve up front so the mutating onboarding calls work
-    cross-platform, mirroring the ``_resolve`` wrapping used on the read-only paths.
-    """
-    return run_command(_resolve(cmd_list), **kwargs)
+    """Run a visible onboarding command through the platform-safe launcher."""
+    return run_command(cmd_list, **kwargs)
 
 
 @dataclass
@@ -296,8 +277,13 @@ def _az_json(args: List[str], check: bool = True) -> Any:
     ``run_command`` would be noise. ``check=False`` lets callers treat a non-zero
     exit (e.g. "not found") as ``None`` for idempotency checks.
     """
-    cmd = _resolve(["az", *args, "--output", "json"])
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    result = run_process(
+        ["az", *args, "--output", "json"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
     if result.returncode != 0:
         if check:
             console.print(
@@ -313,8 +299,8 @@ def _az_json(args: List[str], check: bool = True) -> Any:
 
 def _gh_json(args: List[str], check: bool = True) -> Any:
     """Run a read-only ``gh ...`` command and return decoded JSON."""
-    result = subprocess.run(
-        _resolve(["gh", *args]),
+    result = run_process(
+        ["gh", *args],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -379,12 +365,12 @@ def _check_preconditions(inp: OnboardInputs) -> None:
         )
 
     # gh auth + admin on the target repo (needed to write secrets/variables).
-    gh_status = subprocess.run(_resolve(["gh", "auth", "status"]), capture_output=True, text=True)
+    gh_status = run_process(["gh", "auth", "status"], capture_output=True, text=True)
     if gh_status.returncode != 0:
         console.print("  [error]GitHub CLI is not authenticated. Run: gh auth login[/error]")
         raise typer.Exit(code=1)
-    repo_view = subprocess.run(
-        _resolve(["gh", "repo", "view", inp.repo, "--json", "viewerPermission"]),
+    repo_view = run_process(
+        ["gh", "repo", "view", inp.repo, "--json", "viewerPermission"],
         capture_output=True,
         text=True,
     )
@@ -463,8 +449,8 @@ def _verify_deployment(inp: OnboardInputs) -> None:
         )
 
     candidate = f"osdu-{inp.service}"
-    deployment = subprocess.run(
-        _resolve(["kubectl", "get", "deployment", candidate, "-n", inp.namespace, "-o", "json"]),
+    deployment = run_process(
+        ["kubectl", "get", "deployment", candidate, "-n", inp.namespace, "-o", "json"],
         capture_output=True,
         text=True,
     )
@@ -1129,26 +1115,22 @@ def _ensure_entitlements_membership(inp: OnboardInputs) -> None:
             ["kubectl", "apply", "-f", handle.name],
             description=f"Apply entitlements seed Job for {inp.identity_client_id}",
         )
-        subprocess.run(
-            _resolve(
-                [
-                    "kubectl",
-                    "wait",
-                    "--for=condition=complete",
-                    f"job/{SEED_JOB_NAME}",
-                    "-n",
-                    inp.namespace,
-                    "--timeout=240s",
-                ]
-            ),
+        run_process(
+            [
+                "kubectl",
+                "wait",
+                "--for=condition=complete",
+                f"job/{SEED_JOB_NAME}",
+                "-n",
+                inp.namespace,
+                "--timeout=240s",
+            ],
             capture_output=True,
             text=True,
         )
         logs = (
-            subprocess.run(
-                _resolve(
-                    ["kubectl", "logs", f"job/{SEED_JOB_NAME}", "-n", inp.namespace, "--tail=40"]
-                ),
+            run_process(
+                ["kubectl", "logs", f"job/{SEED_JOB_NAME}", "-n", inp.namespace, "--tail=40"],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -1214,8 +1196,8 @@ def _gh_set_secret(inp: OnboardInputs, name: str, value: str) -> None:
     if inp.dry_run:
         _plan(f"gh secret set {name} -R {inp.repo} (value hidden)")
         return
-    proc = subprocess.run(
-        _resolve(["gh", "secret", "set", name, "-R", inp.repo, "--body", value]),
+    proc = run_process(
+        ["gh", "secret", "set", name, "-R", inp.repo, "--body", value],
         capture_output=True,
         text=True,
     )
@@ -1232,8 +1214,8 @@ def _gh_set_variable(inp: OnboardInputs, name: str, value: str) -> None:
         _plan(f"gh variable set {name}={value} -R {inp.repo}")
         return
     # `gh variable set` updates if present, so this is idempotent.
-    proc = subprocess.run(
-        _resolve(["gh", "variable", "set", name, "-R", inp.repo, "--body", value]),
+    proc = run_process(
+        ["gh", "variable", "set", name, "-R", inp.repo, "--body", value],
         capture_output=True,
         text=True,
     )
@@ -1249,8 +1231,8 @@ def _gh_delete_variable(inp: OnboardInputs, name: str) -> None:
     if inp.dry_run:
         _plan(f"gh variable delete {name} -R {inp.repo}")
         return
-    proc = subprocess.run(
-        _resolve(["gh", "variable", "delete", name, "-R", inp.repo]),
+    proc = run_process(
+        ["gh", "variable", "delete", name, "-R", inp.repo],
         capture_output=True,
         text=True,
     )
@@ -1269,8 +1251,8 @@ def _gh_get_variable(inp: OnboardInputs, name: str) -> str:
     Used to detect a re-home: if AZURE_CLIENT_ID already names a *different* identity, the repo
     is being moved from a previous cluster to this one.
     """
-    proc = subprocess.run(
-        _resolve(["gh", "api", f"repos/{inp.repo}/actions/variables/{name}", "--jq", ".value"]),
+    proc = run_process(
+        ["gh", "api", f"repos/{inp.repo}/actions/variables/{name}", "--jq", ".value"],
         capture_output=True,
         text=True,
     )
@@ -1399,8 +1381,8 @@ def _write_handoff(inp: OnboardInputs) -> None:
 
 
 def _secret_present(inp: OnboardInputs, name: str) -> bool:
-    proc = subprocess.run(
-        _resolve(["gh", "secret", "list", "-R", inp.repo]),
+    proc = run_process(
+        ["gh", "secret", "list", "-R", inp.repo],
         capture_output=True,
         text=True,
     )

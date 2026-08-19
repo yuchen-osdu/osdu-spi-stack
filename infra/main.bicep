@@ -9,10 +9,9 @@
 // partition, common and per-partition Storage, and the scoped RBAC
 // role assignments that bind the identity to the above.
 //
-// Key Vault secret VALUES are also declared here: static metadata plus
-// ``listKeys()`` on local-auth-enabled partition Cosmos accounts is resolved at deploy time, so the CLI
-// no longer has to run ``az cosmosdb keys list`` + ``az keyvault secret set``
-// post-deploy.
+// Key Vault endpoint metadata and disabled compatibility placeholders are
+// declared here. Azure data-plane access uses Entra Workload Identity; the CLI
+// writes only the runtime middleware secrets after deployment.
 //
 // Not in scope of this template:
 //   - AKS Automatic cluster + managed Istio -- declared separately in
@@ -239,8 +238,7 @@ module externalDnsRoleModule 'modules/external-dns-role.bicep' = if (!empty(dnsZ
 // 2.x web SDK. core-lib-azure >= 2.5.6 ships LogCustomDimensionFilter, which
 // reads the App Insights request-telemetry context on every request with no
 // null guard -- if App Insights is not initialized the service returns HTTP 500
-// on every request. AKS Automatic enabled App Insights by default; AKS Base
-// does not. Operators can provision it here with `spi up
+// on every request. Operators can provision it here with `spi up
 // --application-insights`; the CLI otherwise writes disabled/dummy agent
 // configuration into the osdu-config ConfigMap that every service reads.
 

@@ -11,9 +11,9 @@ deciders: "Yuchen Wang"
 
 Sidecar injection on the `osdu` namespace is selected by an `istio.io/rev`
 label that must match the managed Istio revision AKS actually installed. That
-revision is not constant: it is pinned per cluster template and must track the
-Kubernetes minimum (ADR-019), so Automatic and Base clusters can legitimately
-run different revisions.
+revision is not constant: it is pinned by the AKS Automatic deployment and must
+track the Kubernetes minimum (ADR-019), so future platform versions can select
+a different revision without changing software manifests.
 
 The revision was previously hardcoded in two places, a Flux-managed Namespace
 manifest and a CLI fallback constant. Because Flux owns that Namespace, a stale

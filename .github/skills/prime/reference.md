@@ -1,6 +1,6 @@
 # OSDU SPI Stack -- Deep Reference
 
-Azure-native OSDU deployment using AKS (Base SKU + Node Autoprovisioning) + Azure PaaS + Flux CD GitOps.
+Azure-native OSDU deployment using AKS Automatic 1.36 + Azure PaaS + Flux CD GitOps.
 Repository: `Azure/osdu-spi-stack`
 
 ## Project Layout
@@ -91,7 +91,7 @@ must themselves comply with the guide; do not propose wording the guide bans.
 ## Key Design Decisions
 
 - Azure-only (no KinD/AWS/GCP); SPI services depend on Azure PaaS (ADR-001)
-- AKS Base SKU with Node Autoprovisioning + managed Istio (ADR-021, supersedes ADR-002)
+- AKS Automatic 1.36 + managed Istio (ADR-019, ADR-040)
 - Imperative CLI bootstrap, then Flux CD + AKS GitOps Extension for K8s workloads (ADR-009)
 - Local Helm chart bakes Safeguards compliance into templates (ADR-004)
 - Workload Identity for all Azure PaaS access; no stored credentials (ADR-005)

@@ -18,9 +18,7 @@ def _flux_documents(path: Path) -> list[dict]:
 
 def test_every_cli_profile_resolves_to_a_real_kustomize_tree():
     for profile in Profile:
-        path = (
-            OSDU / "profiles" / (Profile.CORE.value if profile == Profile.FULL else profile.value)
-        )
+        path = OSDU / "profiles" / profile.value
         assert (path / "kustomization.yaml").is_file(), profile
 
 
@@ -45,6 +43,9 @@ def test_graduated_ingress_variants_exist_for_every_mode():
 
 
 def test_worker_is_internal_only_and_main_is_the_only_http_route():
+    main = (OSDU / "services-graduated" / "wellbore-domain-services.yaml").read_text(
+        encoding="utf-8"
+    )
     services = (OSDU / "services-graduated" / "wellbore-domain-services-worker.yaml").read_text(
         encoding="utf-8"
     )
@@ -57,6 +58,10 @@ def test_worker_is_internal_only_and_main_is_the_only_http_route():
     )
 
     assert "SERVICE_HOST_PARTITION" in services
+    assert "spi-pool: osdu" in main
+    assert "spi-pool: osdu" in services
+    assert "agentpool:" not in main
+    assert "agentpool:" not in services
     assert "kind: NetworkPolicy" in policy
     assert "kind: AuthorizationPolicy" in policy
     assert "requestPrincipals:" in policy

@@ -31,8 +31,8 @@ param isPrimaryPartition bool = false
 @description('Key Vault name that receives the Cosmos primary key. Empty string skips the secret write.')
 param keyVaultName string = ''
 
-@description('Principal ID (object ID) of the OSDU managed identity that accesses Cosmos SQL data. Empty string skips the SQL data-plane role assignment.')
-param principalId string = ''
+@description('Principal ID (object ID) of the OSDU managed identity that accesses Cosmos SQL data.')
+param principalId string
 
 // ──────────────────────────────────────────────────────────
 // Data definitions (ported from azure_infra.py)
@@ -157,22 +157,11 @@ resource osduDb 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2023-11-15' 
   }
 }
 
-// SQL data-plane role assignment for the OSDU managed identity. This grants the
-// "Cosmos DB Built-in Data Contributor" role (id ...0002) so that services with
-// AZURE_MSI_ISENABLED reach Cosmos with their Workload Identity; without it, their
-// data-plane calls fail with 403 "does not have required RBAC permissions". It is
-// the SQL equivalent of the Gremlin role assignment in cosmos-gremlin.bicep.
-//
-// Local (key) auth is intentionally left ENABLED on this SQL account, unlike the
-// Gremlin account. The partition service enables Workload Identity for Key Vault
-// only (AZURE_PAAS_WORKLOADIDENTITY_ISENABLED, not AZURE_MSI_ISENABLED) and still
-// connects to Cosmos with the primary key it reads from Key Vault, so the
-// "<partition>-cosmos-primary-key" secret written below is required. Disabling
-// local auth here (the ADR-022 end state) is a follow-up gated on the partition
-// service supporting the Cosmos data-plane MSI path.
+// Cosmos data-plane role for the OSDU managed identity. Local auth is disabled,
+// so services authenticate with Entra Workload Identity.
 var sqlDataContributorRoleId = '00000000-0000-0000-0000-000000000002'
 
-resource osduIdentitySqlDataContributor 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2023-11-15' = if (!empty(principalId)) {
+resource osduIdentitySqlDataContributor 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2023-11-15' = {
   parent: cosmosAccount
   name: guid(cosmosAccount.id, principalId, sqlDataContributorRoleId)
   properties: {
@@ -333,11 +322,8 @@ resource storageAccountBlobEndpointSecret 'Microsoft.KeyVault/vaults/secrets@202
   }
 }
 
-// cosmos-connection, sb-connection, and storage-account-key hold the literal "DISABLED".
-// The partition record references these secret names; Workload Identity
-// supplies the real credentials at runtime for every code path that supports
-// it, and writing "DISABLED" keeps the schema satisfied without exposing
-// real credentials.
+// Local auth is disabled. These placeholders keep the partition-record schema
+// satisfied while every data-plane call uses Workload Identity.
 resource cosmosConnectionSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(keyVaultName)) {
   name: '${partition}-cosmos-connection'
   parent: keyVault
@@ -382,7 +368,7 @@ resource systemCosmosPrimaryKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07
   name: 'system-cosmos-primary-key'
   parent: keyVault
   properties: {
-    value: cosmosAccount.listKeys().primaryMasterKey
+    value: 'DISABLED'
   }
 }
 

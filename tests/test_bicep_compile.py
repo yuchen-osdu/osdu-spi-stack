@@ -45,7 +45,7 @@ def _bicep_files():
 )
 def test_bicep_compiles(bicep_file: Path):
     assert AZ is not None
-    result = subprocess.run(
+    result = run_process(
         [AZ, "bicep", "build", "--file", str(bicep_file), "--stdout"],
         capture_output=True,
         text=True,
@@ -64,7 +64,7 @@ def test_bicepparam_files_compile():
     param_files = sorted((INFRA_DIR / "params").glob("*.bicepparam"))
     assert param_files, "expected at least one .bicepparam in infra/params/"
     for pf in param_files:
-        result = subprocess.run(
+        result = run_process(
             [AZ, "bicep", "build-params", "--file", str(pf), "--stdout"],
             capture_output=True,
             text=True,
