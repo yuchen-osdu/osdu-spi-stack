@@ -36,3 +36,20 @@ Rejected alternatives:
 - **Solving with `AuthorizationPolicy` alone.** Works for service images whose Spring chain reads `RequestPrincipal` directly. Our images do not, so the in-process filter still rejects after Istio admits the request.
 - **Switching to a different OSDU provider.** Out of scope and inconsistent with the SPI Stack's stated commitment to the Azure provider (ADR-001).
 - **Imperative side-channel that pre-populates entitlements without going through the service API.** Bypasses the auth chain entirely but ties bootstrap to schema details internal to the entitlements implementation, and re-creates the maintenance burden ADR-013 and ADR-015 reduced.
+
+## Revision: per-identity projection
+
+The original Lua collapsed every `aud=https://management.azure.com/` app token to the OSDU UAMI client id (`entra_client_id`). That is correct for the bootstrap Jobs it was written for (they run as the UAMI), but it has an unintended side effect: any other identity that mints a management-audience token, notably a CI identity onboarded for the deploy lane, is also silently projected to the UAMI and inherits the bootstrap admin's authorization. Integration tests then pass without the test identity being a real entitlements member, so they do not actually exercise authorization.
+
+The Lua is now a pure identity extractor: the `aud=management.azure.com` special-case (and the `entra_client_id` constant inside the Lua) are removed. It projects the caller's own application id, `appid` for v1 app/MSI tokens or `azp` for v2, as `x-app-id`, and extracts `x-user-id` from the token via the standard issuer-based path (`processAADV1`/`processAADV2`). It makes no authorization decision and is unaware of entitlements. Because the OSDU UAMI's own appid is the bootstrap-admin service account, the bootstrap Jobs are unaffected, while every other identity now flows as itself and must be an explicit entitlements member.
+
+Concretely the responsibilities split three ways: the Lua (deploy / `spi up`) only projects identity; entitlements makes the access decision against the projected `x-user-id`; and initialization/onboarding use the public Entitlements AddMember API for identities that should receive access. `spi up` passes the creator's projected identifier plus its user object-ID alias to `osdu-spi-init`, while `spi onboard` adds each onboarded CI identity. Neither path changes the Lua.
+
+The fresh Stack creator and newly onboarded CI identities use the same four root groups ADME data-seeding uses (`users`, `users.datalake.ops`, `users.datalake.admins`, `users.data.root`). The creator is seeded by the per-partition Entitlements init Job immediately after tenant provisioning; each CI identity is seeded by a short onboarding Job. Both run under the OSDU workload identity, the tenant-provisioning OWNER authorized to call AddMember. This stays consistent with the rejection above: both use the public AddMember API, not a Gremlin side-channel.
+
+The shared `spi-ci-no-data-access` integration-test identity is the explicit
+exception: onboarding creates and federates it but never passes it to the
+entitlements seed Job. Its valid token must therefore authenticate through the
+same Lua path while remaining unauthorized by entitlements.
+
+Note on partition: `partition-azure` is internal. Its `isDomainAdminServiceAccount` check authorizes any AAD-issued service-principal token regardless of group membership, so the partition deploy-lane test passes with or without this projection change or the seed. The per-identity model is only observable on user-facing services (storage, legal, search).

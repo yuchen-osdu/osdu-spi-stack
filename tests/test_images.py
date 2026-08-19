@@ -26,6 +26,21 @@ from spi.images import (
     resolve_image,
 )
 
+WELLBORE_IMAGES = {
+    "wellbore-domain-services",
+    "wellbore-domain-services-worker",
+}
+
+
+def test_image_sets_are_profile_aware():
+    core = set(image_lock_names("core"))
+    graduated = set(image_lock_names("graduated"))
+
+    assert WELLBORE_IMAGES.isdisjoint(core)
+    assert graduated == core | WELLBORE_IMAGES
+    assert len(core) == 13
+    assert len(graduated) == 15
+
 
 def test_resolve_image_selects_newest_immutable_sha(monkeypatch):
     old_sha = "a" * 40
@@ -74,6 +89,45 @@ def test_resolve_image_selects_newest_immutable_sha(monkeypatch):
     assert resolved.digest == "sha256:new"
 
 
+def test_community_default_branch_can_differ_per_service(monkeypatch):
+    seen = {}
+
+    def fake_repositories(project_id, image_name):
+        seen["image_name"] = image_name
+        return [
+            {
+                "id": 123,
+                "name": image_name,
+                "location": f"community.opengroup.org:5555/example/{image_name}",
+            }
+        ]
+
+    monkeypatch.setattr(images, "_registry_repositories", fake_repositories)
+    monkeypatch.setattr(images, "_registry_tags", lambda project_id, repo_id: [{"name": "sha"}])
+    monkeypatch.setattr(
+        images,
+        "_newest_immutable_tag",
+        lambda project_id, repo_id, tags: {
+            "name": "a" * 40,
+            "digest": "sha256:worker",
+            "created_at": "",
+        },
+    )
+
+    resolve_image(
+        "wellbore-domain-services-worker",
+        ImageRegistryEntry(
+            1384,
+            "wellbore-domain-services-worker",
+            "worker.yaml",
+            community_default_branch="main",
+        ),
+        "master",
+    )
+
+    assert seen["image_name"] == "wellbore-domain-services-worker-main"
+
+
 def test_render_image_lock_contains_service_keys_without_schema_load():
     resolved = {
         name: ResolvedImage(
@@ -98,6 +152,7 @@ def test_render_image_lock_contains_service_keys_without_schema_load():
     assert 'IMAGE_SOURCE: "community"' in yaml
     assert 'IMAGE_TAG: ""' in yaml
     assert 'IMAGE_BRANCH: "master"' in yaml
+    assert 'IMAGE_PROFILE: "core"' in yaml
     assert "PARTITION_IMAGE_REPOSITORY" in yaml
     assert "PARTITION_IMAGE_DIGEST" in yaml
     assert "INDEXER_QUEUE_IMAGE_TAG" in yaml
@@ -113,11 +168,11 @@ def test_resolve_ghcr_tag_image_pins_manifest_digest(monkeypatch):
 
     resolved = resolve_ghcr_tag_image(
         service_name="partition",
-        org="Azure",
+        org="yuchen-osdu",
         tag="main-snapshot",
     )
 
-    assert resolved.repository == "ghcr.io/azure/partition"
+    assert resolved.repository == "ghcr.io/yuchen-osdu/partition"
     assert resolved.tag == "main-snapshot"
     assert resolved.digest == "sha256:" + ("b" * 64)
     assert resolved.image == f"{resolved.repository}@{resolved.digest}"
@@ -142,11 +197,11 @@ def test_resolve_ghcr_ref_image_uses_ref_commit_and_manifest_digest(monkeypatch)
 
     resolved = resolve_ghcr_ref_image(
         service_name="partition",
-        org="Azure",
+        org="yuchen-osdu",
         ref="fix/core-lib-azure-3.0.1",
     )
 
-    assert resolved.repository == "ghcr.io/azure/partition"
+    assert resolved.repository == "ghcr.io/yuchen-osdu/partition"
     assert resolved.tag == "sha-" + commit_sha[:12]
     assert resolved.digest == "sha256:" + ("b" * 64)
     assert resolved.image == f"{resolved.repository}@{resolved.digest}"
@@ -156,7 +211,7 @@ def test_render_ghcr_main_lock_records_tag_selector():
     resolved = {
         name: ResolvedImage(
             name=name,
-            repository=f"ghcr.io/azure/{name}",
+            repository=f"ghcr.io/yuchen-osdu/{name}",
             tag="main-snapshot",
             created_at="",
             digest=f"sha256:{name}",
@@ -167,7 +222,7 @@ def test_render_ghcr_main_lock_records_tag_selector():
     yaml = render_image_lock_configmap(
         resolved,
         source=ImageSource.GHCR,
-        org="Azure",
+        org="yuchen-osdu",
         resolved_at=datetime(2026, 7, 20, tzinfo=timezone.utc),
     )
 
@@ -176,43 +231,27 @@ def test_render_ghcr_main_lock_records_tag_selector():
     assert 'IMAGE_BRANCH: ""' in yaml
 
 
-def test_gitlab_get_retries_transient_timeouts(monkeypatch):
-    calls = {"count": 0}
+def test_render_graduated_lock_contains_only_selected_profile_images():
+    resolved = {
+        name: ResolvedImage(
+            name=name,
+            repository=f"ghcr.io/yuchen-osdu/{name}",
+            tag="main-snapshot",
+            created_at="",
+            digest=f"sha256:{name}",
+        )
+        for name in image_lock_names("graduated")
+    }
 
-    class FakeResponse:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-        def read(self):
-            return b'{"ok": true}'
-
-    def fake_urlopen(request, timeout=0):
-        calls["count"] += 1
-        if calls["count"] < 3:
-            raise TimeoutError("timed out")
-        return FakeResponse()
-
-    monkeypatch.setattr(images.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(images.time, "sleep", lambda seconds: None)
-
-    assert images.gitlab_get("https://example.invalid/api") == {"ok": True}
-    assert calls["count"] == 3
-
-
-def test_gitlab_get_raises_after_exhausting_retries(monkeypatch):
-    monkeypatch.setattr(
-        images.urllib.request,
-        "urlopen",
-        lambda request, timeout=0: (_ for _ in ()).throw(TimeoutError("timed out")),
+    yaml = render_image_lock_configmap(
+        resolved,
+        source=ImageSource.GHCR,
+        org="yuchen-osdu",
+        profile="graduated",
+        resolved_at=datetime(2026, 8, 19, tzinfo=timezone.utc),
     )
-    monkeypatch.setattr(images.time, "sleep", lambda seconds: None)
 
-    try:
-        images.gitlab_get("https://example.invalid/api", attempts=2)
-    except images.ImageResolutionError as exc:
-        assert "2 attempts" in str(exc)
-    else:
-        raise AssertionError("expected ImageResolutionError")
+    assert 'IMAGE_PROFILE: "graduated"' in yaml
+    assert 'IMAGE_COUNT: "15"' in yaml
+    assert "WELLBORE_DOMAIN_SERVICES_IMAGE_DIGEST" in yaml
+    assert "WELLBORE_DOMAIN_SERVICES_WORKER_IMAGE_DIGEST" in yaml

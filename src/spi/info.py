@@ -49,6 +49,19 @@ _OSDU_API_PATHS = [
     ("crs-catalog", "/api/crs/catalog/v2/"),
     ("crs-conversion", "/api/crs/converter/v2/"),
 ]
+_GRADUATED_API_PATHS = [
+    ("wellbore-domain-services", "/api/os-wellbore-ddms/"),
+]
+
+
+def _deployed_api_paths() -> list[tuple[str, str]]:
+    """Return public API paths selected by the live image profile."""
+
+    lock = kubectl_json(["get", "configmap", "osdu-image-lock", "-n", "osdu-flux"])
+    profile = (lock or {}).get("data", {}).get("IMAGE_PROFILE", "core")
+    if profile == "graduated":
+        return [*_OSDU_API_PATHS, *_GRADUATED_API_PATHS]
+    return list(_OSDU_API_PATHS)
 
 
 def _secret_value(namespace: str, name: str, key: str) -> str:
@@ -83,7 +96,7 @@ def _read_osdu_config() -> dict:
 
 def _read_flux_extension_values() -> dict:
     """Read Azure metadata injected by the AKS Flux extension."""
-    data = kubectl_json(["get", "configmap", "flux-extension-values", "-n", "flux-system"])
+    data = kubectl_json(["get", "configmap", "flux-extension-values", "-n", "osdu-flux"])
     if not data:
         return {}
     return data.get("data", {}) or {}
@@ -174,7 +187,7 @@ def _compute_endpoints(cfg: dict) -> tuple:
     if mode == "azure":
         fqdn = cfg.get("INGRESS_FQDN", "")
         base = f"https://{fqdn}" if fqdn else ""
-        endpoints = {svc: f"{base}{path}" for svc, path in _OSDU_API_PATHS} if base else {}
+        endpoints = {svc: f"{base}{path}" for svc, path in _deployed_api_paths()} if base else {}
         middleware = {"Kibana": f"{base}/kibana/", "Airflow": f"{base}/airflow/"} if base else {}
         return mode, base, endpoints, middleware
 
@@ -183,7 +196,7 @@ def _compute_endpoints(cfg: dict) -> tuple:
         kibana_host = cfg.get("INGRESS_HOST_KIBANA", "")
         airflow_host = cfg.get("INGRESS_HOST_AIRFLOW", "")
         base = f"https://{osdu_host}" if osdu_host else ""
-        endpoints = {svc: f"{base}{path}" for svc, path in _OSDU_API_PATHS} if base else {}
+        endpoints = {svc: f"{base}{path}" for svc, path in _deployed_api_paths()} if base else {}
         middleware = {}
         if kibana_host:
             middleware["Kibana"] = f"https://{kibana_host}/"
@@ -196,7 +209,7 @@ def _compute_endpoints(cfg: dict) -> tuple:
     # Fallback: ip mode or no ConfigMap yet.
     ip = cfg.get("GATEWAY_IP", "") or _discover_gateway_ip()
     base = f"http://{ip}" if ip else ""
-    endpoints = {svc: f"{base}{path}" for svc, path in _OSDU_API_PATHS} if base else {}
+    endpoints = {svc: f"{base}{path}" for svc, path in _deployed_api_paths()} if base else {}
     return "ip", base, endpoints, {}
 
 

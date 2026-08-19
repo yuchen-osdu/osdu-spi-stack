@@ -24,7 +24,7 @@ Three stores, each with a single job:
 
 Non-sensitive endpoint configuration (partition name, tenant ID, cluster ingress hostname, Redis and Elasticsearch FQDNs) lives in the `osdu-config` ConfigMap in the `osdu` namespace and is mounted into services via `envFrom`.
 
-Key Vault secret values are declared **in Bicep** (`infra/main.bicep`) where the source is Azure: endpoints, `listKeys()` on Cosmos accounts, identity IDs, tenant and subscription. The CLI writes only the handful of **runtime** secrets whose values originate in-cluster and are not available at infra-deploy time:
+Key Vault secret values are declared **in Bicep** (`infra/main.bicep`) where the source is Azure: endpoints, `listKeys()` on local-auth-enabled partition Cosmos accounts, identity IDs, tenant and subscription. The Gremlin account disables local auth and uses Workload Identity plus Gremlin RBAC instead of a stored graph key. The CLI writes only the handful of **runtime** secrets whose values originate in-cluster and are not available at infra-deploy time:
 
 - Per-partition Elasticsearch endpoint, username, password (ECK-issued credentials).
 - Redis hostname and password (Bitnami-chart-issued).

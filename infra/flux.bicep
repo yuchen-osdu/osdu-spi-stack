@@ -28,12 +28,7 @@ param repoBranch string = 'main'
 ])
 param profile string = 'core'
 
-@description('Ingress mode path segment under software/stacks/osdu/ingress (azure, dns, or ip).')
-@allowed([
-  'azure'
-  'dns'
-  'ip'
-])
+@description('Ingress profile path segment under software/stacks/osdu/ingress (for example azure or azure-graduated).')
 param ingressMode string = 'azure'
 
 @description('Name of the fluxConfigurations resource on the cluster.')
@@ -47,13 +42,6 @@ param gitopsNamespace string = 'osdu-flux'
 
 @description('Optional local Kubernetes Secret name for private Git repository auth.')
 param gitRepositoryLocalAuthRef string = ''
-
-// The minimal profile deploys no OSDU services, so it needs the ingress
-// tree that omits the OSDU HTTPRoute Kustomization; that one dependsOn
-// spi-osdu-services and would otherwise stall on DependencyNotReady.
-var ingressPath = profile == 'minimal'
-  ? './software/stacks/osdu/ingress/${ingressMode}-minimal'
-  : './software/stacks/osdu/ingress/${ingressMode}'
 
 var gitRepositoryBase = {
   url: repoUrl

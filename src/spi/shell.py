@@ -184,6 +184,22 @@ def resolve_command(cmd_list: List[str]) -> List[str]:
     return cmd_list
 
 
+def resolve_command(cmd_list: List[str]) -> List[str]:
+    """Resolve the executable path for direct subprocess calls.
+
+    Windows often exposes CLIs such as Azure CLI as ``az.cmd``. PowerShell can
+    resolve ``az`` through PATHEXT, but ``subprocess.run(["az", ...])`` with
+    ``shell=False`` cannot. Resolve the first argv element up front so callers
+    keep transparent argv lists without relying on shell execution.
+    """
+    if not cmd_list:
+        return cmd_list
+    executable = shutil.which(cmd_list[0])
+    if executable:
+        return [executable, *cmd_list[1:]]
+    return cmd_list
+
+
 def run_command(
     cmd_list: List[str],
     capture_output: bool = True,

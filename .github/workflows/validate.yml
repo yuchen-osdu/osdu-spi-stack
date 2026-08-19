@@ -149,7 +149,6 @@ jobs:
         run: |
           az bicep build --file infra/main.bicep
           az bicep build --file infra/aks.bicep
-          az bicep build --file infra/aks-base.bicep
           az bicep build --file infra/flux.bicep
       - name: Ensure what-if RG exists
         if: steps.gate.outputs.skip != 'true'

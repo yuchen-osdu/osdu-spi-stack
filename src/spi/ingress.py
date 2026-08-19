@@ -30,7 +30,7 @@ import typer
 
 from .config import Config, IngressMode
 from .console import console, display_result, display_yaml
-from .shell import kubectl_apply_yaml, kubectl_json, resolve_command, run_command
+from .shell import kubectl_apply_yaml, kubectl_json, resolve_command
 
 ISTIO_INGRESS_NAMESPACE = "aks-istio-ingress"
 # Istio with gatewayClassName=istio provisions a LoadBalancer Service

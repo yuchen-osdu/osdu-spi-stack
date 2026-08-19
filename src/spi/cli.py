@@ -23,7 +23,7 @@ from rich.table import Table
 
 from . import __version__
 from .checks import PREREQ_TOOLS, check_prerequisites
-from .config import BASE_NAME, AksMode, Config, IngressMode, Profile
+from .config import BASE_NAME, Config, IngressMode, Profile
 from .console import console, display_result, display_yaml
 from .guard import (
     DEFAULT_FLUX_NAMESPACE,
@@ -44,7 +44,7 @@ from .images import (
     render_image_lock_configmap,
     resolve_image_lock,
 )
-from .ingress import ensure_istio_revision_published, resolve_acme_email, resolve_ingress_mode
+from .ingress import resolve_acme_email, resolve_ingress_mode
 from .shell import kubectl_apply_yaml, kubectl_json, run_command
 
 app = typer.Typer(
@@ -130,10 +130,9 @@ def _show_next_steps(config: Config):
     table.add_column("Command", style="yellow")
 
     table.add_row("Watch progress", "kubectl get kustomizations -n osdu-flux --watch")
-    if config.profile is not Profile.BARE:
-        table.add_row("Check operators", "kubectl get pods -n foundation")
-        table.add_row("Check middleware", "kubectl get pods -n platform")
-        table.add_row("Check services", "kubectl get pods -n osdu")
+    table.add_row("Check operators", "kubectl get pods -n foundation")
+    table.add_row("Check middleware", "kubectl get pods -n platform")
+    table.add_row("Check services", "kubectl get pods -n osdu")
     table.add_row("View status", "uv run spi status")
     table.add_row("Cleanup", f"uv run spi down{config.env_flag}")
 
@@ -153,7 +152,6 @@ def _build_config(
     acme_email: str = "",
     creator_user_ids: Optional[List[str]] = None,
     name_suffix: str = "",
-    aks_mode: AksMode = AksMode.AUTOMATIC,
     application_insights: bool = False,
     image_source: ImageSource = ImageSource.GHCR,
     image_org: str = DEFAULT_GHCR_ORG,
@@ -181,7 +179,6 @@ def _build_config(
         ingress_prefix=ingress_prefix,
         acme_email=acme_email,
         creator_user_ids=creator_user_ids or [],
-        aks_mode=aks_mode,
         application_insights=application_insights,
         image_source=image_source,
         image_org=image_org,
@@ -312,8 +309,8 @@ def _resolve_image_selection(
     return source, org, tag, ref
 
 
-def _read_image_lock_selection() -> tuple[ImageSource, str, str, str]:
-    """Read the source, organization, and selector pinned in the live image lock."""
+def _read_image_lock_selection() -> tuple[ImageSource, str, str, str, str]:
+    """Read source, selector, and profile pinned in the live image lock."""
     configmap = kubectl_json(["get", "configmap", IMAGE_LOCK_CONFIGMAP, "-n", IMAGE_LOCK_NAMESPACE])
     if configmap is None:
         raise RuntimeError(
@@ -339,10 +336,10 @@ def _read_image_lock_selection() -> tuple[ImageSource, str, str, str]:
         if not tag and not ref:
             tag = DEFAULT_GHCR_TAG
         org = data.get("IMAGE_ORG", "") or DEFAULT_GHCR_ORG
-        return source, org, tag, ref
+        return source, org, tag, ref, data.get("IMAGE_PROFILE", "core")
 
     ref = data.get("IMAGE_REF") or data.get("IMAGE_BRANCH") or DEFAULT_IMAGE_BRANCH
-    return source, "", "", ref
+    return source, "", "", ref, data.get("IMAGE_PROFILE", "core")
 
 
 def _resolve_name_suffix(env: str, for_up: bool) -> str:
@@ -445,6 +442,7 @@ def _resolve_application_insights(
         if for_up:
             write_rg_application_insights_tag(rg, resolved)
         return resolved
+
     component_exists = detect_existing_application_insights(rg, env) if exists else False
     workspace_exists = (
         detect_existing_log_analytics(rg, env) if exists and not component_exists else False
@@ -466,61 +464,6 @@ def _resolve_application_insights(
     resolved = inferred if requested is None else requested
     if for_up and exists:
         write_rg_application_insights_tag(rg, resolved)
-    return resolved
-
-
-def _resolve_aks_mode(
-    env: str,
-    requested: "AksMode | None",
-    for_up: bool,
-) -> AksMode:
-    """Resolve, validate, and preserve the environment's AKS topology."""
-    from .azure_infra import (
-        detect_existing_aks_mode,
-        read_rg_aks_mode_tag,
-        write_rg_aks_mode_tag,
-    )
-
-    environment_label = env or "base"
-    rg = f"{BASE_NAME}-{env}" if env else BASE_NAME
-    cluster_name = rg
-    persisted = read_rg_aks_mode_tag(rg)
-
-    rg_exists = run_command(
-        ["az", "group", "exists", "--name", rg],
-        description=f"Check resource group exists: {rg}",
-        display=False,
-        check=False,
-    )
-    if rg_exists.returncode != 0:
-        raise RuntimeError(
-            f"Unable to determine whether resource group {rg} exists: "
-            f"{rg_exists.stderr.strip() or rg_exists.stdout.strip()}"
-        )
-    exists = rg_exists.stdout.strip().lower() == "true"
-    actual = detect_existing_aks_mode(rg, cluster_name) if exists else None
-
-    if persisted is not None and actual is not None and persisted != actual:
-        raise RuntimeError(
-            f"Environment {environment_label!r} is tagged for AKS {persisted.value}, "
-            f"but the live cluster is {actual.value}. Repair the tag or cluster before rerunning."
-        )
-
-    established = actual or persisted
-    if established is not None:
-        if requested is not None and requested != established:
-            raise RuntimeError(
-                f"Environment {environment_label!r} was created with AKS "
-                f"{established.value}. The mode cannot be changed in place; run "
-                "'spi down' and create a new environment."
-            )
-        if for_up and exists and persisted is None:
-            write_rg_aks_mode_tag(rg, established)
-        return established
-
-    resolved = requested or AksMode.AUTOMATIC
-    if for_up and exists:
-        write_rg_aks_mode_tag(rg, resolved)
     return resolved
 
 
@@ -700,7 +643,7 @@ def up(
     if dry_run:
         title += "\n[warning]DRY RUN: previewing Bicep changes only[/warning]"
     else:
-        title += "\nAKS + Azure PaaS + Flux CD GitOps"
+        title += "\nAKS (Base + Node Autoprovisioning) + Azure PaaS + Flux CD GitOps"
 
     console.print(Panel(title, border_style="cyan"))
     check_prerequisites(PREREQ_TOOLS)
@@ -709,20 +652,11 @@ def up(
     # derived resource names are stable across `spi up` re-runs and don't
     # collide with deployments in other subscriptions.
     name_suffix = _resolve_name_suffix(env, for_up=True)
-    try:
-        resolved_aks_mode = _resolve_aks_mode(
-            env,
-            requested=aks_mode,
-            for_up=not dry_run,
-        )
-        resolved_application_insights = _resolve_application_insights(
-            env,
-            requested=application_insights,
-            for_up=not dry_run,
-        )
-    except RuntimeError as exc:
-        console.print(f"[error]{exc}[/error]")
-        raise typer.Exit(code=2)
+    resolved_application_insights = _resolve_application_insights(
+        env,
+        requested=application_insights,
+        for_up=not dry_run,
+    )
     try:
         resolved_creator_user_ids = _resolve_creator_user_ids(seed_creator, creator_user_id)
         (
@@ -754,7 +688,6 @@ def up(
         acme_email=resolve_acme_email(acme_email),
         creator_user_ids=resolved_creator_user_ids,
         name_suffix=name_suffix,
-        aks_mode=resolved_aks_mode,
         application_insights=resolved_application_insights,
         image_source=resolved_image_source,
         image_org=resolved_image_org,
@@ -804,17 +737,9 @@ def down(
     check_prerequisites(["az"])
 
     name_suffix = _resolve_name_suffix(env, for_up=False)
-    # Teardown must stay available even when the recorded mode disagrees with
-    # the cluster, which is exactly the state an operator needs to clean up.
-    try:
-        aks_mode = _resolve_aks_mode(env, requested=None, for_up=False)
-    except RuntimeError as exc:
-        console.print(f"[warning]{exc}[/warning]")
-        aks_mode = AksMode.AUTOMATIC
     config = _build_config(
         env=env,
         name_suffix=name_suffix,
-        aks_mode=aks_mode,
     )
     _show_config(config, show_application_insights=False)
 
@@ -995,8 +920,11 @@ def reconcile(
         return
 
     if refresh_images:
+        image_profile = Profile.CORE.value
         try:
-            current_selection = _read_image_lock_selection()
+            current_lock = _read_image_lock_selection()
+            current_selection = current_lock[:4]
+            image_profile = current_lock[4]
         except RuntimeError as exc:
             if (
                 image_source is None
@@ -1031,6 +959,7 @@ def reconcile(
                 tag=resolved_tag,
                 ref=resolved_ref,
                 org=resolved_org,
+                profile=image_profile,
             )
         except ImageResolutionError as exc:
             console.print(f"[error]Unable to resolve OSDU service images: {exc}[/error]")
@@ -1047,6 +976,7 @@ def reconcile(
             tag=resolved_tag,
             ref=resolved_ref,
             org=resolved_org,
+            profile=image_profile,
         )
         display_yaml(image_lock_yaml, "ConfigMap: osdu-image-lock")
         kubectl_apply_yaml(image_lock_yaml, "apply osdu-image-lock ConfigMap")

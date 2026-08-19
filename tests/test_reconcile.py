@@ -120,7 +120,7 @@ def test_legacy_image_branch_selects_community_images():
 def test_image_refresh_preserves_current_selection_when_options_omitted():
     current = (
         ImageSource.GHCR,
-        "Azure",
+        "yuchen-osdu",
         "",
         "fix/core-lib-azure-3.0.1",
     )
@@ -145,7 +145,7 @@ def test_image_source_change_uses_new_source_defaults():
         image_tag=None,
         image_ref=None,
         image_branch=None,
-        current=(ImageSource.GHCR, "Azure", "", "feature/ref"),
+        current=(ImageSource.GHCR, "yuchen-osdu", "", "feature/ref"),
     ) == (ImageSource.COMMUNITY, "", "", "master")
 
 
@@ -156,7 +156,7 @@ def test_ghcr_defaults_to_main_snapshot():
         image_tag=None,
         image_ref=None,
         image_branch=None,
-    ) == (ImageSource.GHCR, "Azure", "main-snapshot", "")
+    ) == (ImageSource.GHCR, "yuchen-osdu", "main-snapshot", "")
 
 
 def test_explicit_tag_replaces_feature_ref():
@@ -166,8 +166,8 @@ def test_explicit_tag_replaces_feature_ref():
         image_tag="v1.2.3",
         image_ref=None,
         image_branch=None,
-        current=(ImageSource.GHCR, "Azure", "", "feature/ref"),
-    ) == (ImageSource.GHCR, "Azure", "v1.2.3", "")
+        current=(ImageSource.GHCR, "yuchen-osdu", "", "feature/ref"),
+    ) == (ImageSource.GHCR, "yuchen-osdu", "v1.2.3", "")
 
 
 @pytest.mark.parametrize(
@@ -201,6 +201,7 @@ def test_read_image_lock_selection_supports_legacy_community_lock():
             "",
             "",
             "master",
+            "core",
         )
 
 
@@ -211,6 +212,7 @@ def test_read_image_lock_selection_reads_ghcr_metadata():
             "IMAGE_ORG": "example",
             "IMAGE_TAG": "",
             "IMAGE_REF": "feature/ref",
+            "IMAGE_PROFILE": "graduated",
         }
     }
     with mock.patch.object(cli, "kubectl_json", return_value=configmap):
@@ -219,6 +221,7 @@ def test_read_image_lock_selection_reads_ghcr_metadata():
             "example",
             "",
             "feature/ref",
+            "graduated",
         )
 
 
@@ -229,6 +232,7 @@ def test_read_image_lock_selection_reads_ghcr_tag():
             "IMAGE_ORG": "example",
             "IMAGE_TAG": "main-snapshot",
             "IMAGE_REF": "",
+            "IMAGE_PROFILE": "core",
         }
     }
     with mock.patch.object(cli, "kubectl_json", return_value=configmap):
@@ -237,53 +241,5 @@ def test_read_image_lock_selection_reads_ghcr_tag():
             "example",
             "main-snapshot",
             "",
+            "core",
         )
-
-
-def _invoke_reconcile(**kwargs):
-    """Drive the reconcile command with every side effect stubbed out."""
-    from typer.testing import CliRunner
-
-    args = ["reconcile"]
-    if kwargs.get("suspend"):
-        args.append("--suspend")
-    if kwargs.get("resume"):
-        args.append("--resume")
-
-    with (
-        mock.patch.object(cli, "verify_spi_cluster", return_value="ctx"),
-        mock.patch.object(cli, "resolve_flux_namespace", return_value="osdu-flux"),
-        mock.patch.object(cli, "_set_flux_suspend"),
-        mock.patch.object(cli, "_flux_resource_names", return_value=[]),
-        mock.patch.object(cli, "run_command"),
-        mock.patch.object(cli, "kubectl_json", return_value={"items": []}),
-        mock.patch.object(cli, "ensure_istio_revision_published") as published,
-    ):
-        result = CliRunner().invoke(cli.app, args)
-    return result, published
-
-
-def test_plain_reconcile_backfills_the_istio_revision():
-    """Regression: plain reconcile pulls the new commit and annotates
-    spi-namespaces, so it must publish ISTIO_REVISION too. Skipping it lets
-    Flux render an empty istio.io/rev and silently drop sidecar injection."""
-    result, published = _invoke_reconcile()
-
-    assert result.exit_code == 0, result.output
-    published.assert_called_once()
-
-
-def test_resume_still_backfills_the_istio_revision():
-    result, published = _invoke_reconcile(resume=True)
-
-    assert result.exit_code == 0, result.output
-    published.assert_called_once()
-
-
-def test_suspend_does_not_need_the_istio_revision():
-    """Suspending only freezes reconciliation; it applies no manifests, so it
-    must not require the ConfigMap to be reachable."""
-    result, published = _invoke_reconcile(suspend=True)
-
-    assert result.exit_code == 0, result.output
-    published.assert_not_called()

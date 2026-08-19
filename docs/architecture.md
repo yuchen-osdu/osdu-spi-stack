@@ -51,16 +51,13 @@ The deployment pipeline has two phases: the CLI's Bicep-driven bootstrap (top) a
 | Phase | Mechanism | What |
 |-------|-----------|------|
 | 1. Resource Group | `az group create` | Resource group for the environment |
-| 2. AKS + managed Istio | Raw Bicep (`infra/aks.bicep` or `infra/aks-base.bicep`) | Automatic 1.36 by default; optional Base + NAP; BYO VNet + NAT gateway |
+| 2. AKS + managed Istio | Raw Bicep (`infra/aks.bicep`) | AKS Base SKU cluster with Node Autoprovisioning (NAP / Karpenter), BYO VNet + NAT gateway, managed Istio |
 | 3. Azure PaaS | Bicep (`infra/main.bicep`) | Managed Identity + federated credentials, Key Vault + static metadata secrets, ACR, Cosmos DB Gremlin + per-partition SQL, per-partition Service Bus (topics + subscriptions), common + per-partition Storage, RBAC role assignments |
 | 4. K8s bootstrap | `kubectl apply` | Namespaces, StorageClasses, `workload-identity-sa`, `osdu-config` ConfigMap, `spi-ingress-config` ConfigMap |
 | 5. Flux activation | Bicep (`infra/flux.bicep`) | AKS Flux extension + `fluxConfigurations` with two Kustomizations (stack profile, ingress mode) |
 | 6. Runtime KV secrets | `az keyvault secret set` | Per-partition Elasticsearch credentials, Redis hostname and password, written from the generated seed (no wait for middleware) |
 
-A full `spi up` typically takes ~45-50 minutes, dominated by AKS provisioning
-and the Flux extension. `spi up --dry-run` runs `az deployment group what-if`
-against the selected AKS template and `main.bicep`, then skips Kubernetes
-bootstrap and GitOps activation.
+A full `spi up` typically takes ~45-50 minutes, dominated by AKS provisioning (~30 min) with PaaS Bicep (~3 min), K8s bootstrap (~1 min), and the Flux extension Bicep (~10-15 min) filling the remainder. `spi up --dry-run` runs `az deployment group what-if` against both Bicep templates and skips everything after phase 1.
 
 ## Runtime Architecture
 
@@ -93,42 +90,40 @@ The core profile (`software/stacks/osdu/profiles/core/stack.yaml`) defines seven
 | 5a | Partition + entitlements bootstrap (per-partition Jobs) | 5 |
 | 5b | Schema load (one-shot Job) | 5a |
 | 6 | Reference services | 5, 5b |
+| 7 | Graduated services (Wellbore DDMS + worker) | 6 |
 
-The ingress profile (`software/stacks/osdu/ingress/<mode>/`) adds Kustomizations at Layer 1 (cert issuers, ExternalDNS in `dns` mode, TLS overlays) and Layer 6 (HTTPRoutes, split into `spi-middleware-routes` and `spi-osdu-routes`). See [ADR-007](decisions/007-layered-kustomization-ordering.md) and [ADR-012](decisions/012-ingress-profiles.md).
+The ingress profile (`software/stacks/osdu/ingress/<mode>/`) adds
+Kustomizations at Layer 1 (cert issuers, ExternalDNS in `dns` mode, TLS
+overlays) and Layer 6 (HTTPRoutes). A graduated deployment selects the
+corresponding `<mode>-graduated` overlay, which adds the public Wellbore route
+at Layer 7 while leaving the worker internal. See
+[ADR-007](decisions/007-layered-kustomization-ordering.md),
+[ADR-012](decisions/012-ingress-profiles.md), and
+[ADR-026](decisions/026-graduated-wellbore-profile.md).
 
-### Stack profiles
+## AKS Compute (Base SKU + Node Autoprovisioning)
 
-`spi up --profile <name>` selects which slice of the layer DAG Flux reconciles.
-
-| Profile | Layers | Deploys |
-|---------|--------|---------|
-| `minimal` | 0a-4b | Middleware only: operators, cert-manager, trust-manager, Gateway, Elasticsearch, Redis, PostgreSQL, Airflow, CA bundles. No OSDU services. |
-| `core` (default) | 0a-6 | Everything in `minimal`, plus the OSDU services, partition/entitlements bootstrap, schema load, and reference services. |
-| `bare` | none | Nothing. Infra plus activated GitOps only; Flux reconciles empty stack and ingress trees. |
-
-Layers 0a through 4b are byte-identical between the `minimal` and `core` profiles, so middleware validated under `minimal` behaves the same under `core`. Because `minimal` never creates `spi-osdu-services`, it pairs with the `<mode>-minimal` ingress trees, which omit the OSDU HTTPRoute Kustomization that would otherwise stall on that dependency. See [ADR-024](decisions/024-middleware-only-minimal-profile.md).
-
-## AKS Deployment Modes
-
-AKS Automatic 1.36 is the zero-flag default. `spi up --aks-mode base` preserves
-the Base SKU + Node Autoprovisioning topology. The choice is written to the
-resource group and cannot be changed in place. Both modes use the same
-Karpenter NodePools, `spi-pool` placement labels, managed Istio integration,
-Flux stack, and OSDU services.
-
-Automatic provides:
+SPI Stack runs the AKS Base SKU with Node Autoprovisioning. It previously used
+AKS Automatic; [ADR-021](decisions/021-aks-base-node-autoprovisioning.md)
+supersedes [ADR-002](decisions/002-aks-automatic.md) because Automatic began
+enforcing a non-bypassable guardrail that blocks the
+`MutatingWebhookConfiguration` objects cert-manager and CloudNativePG require.
+The Base SKU keeps the features the stack depends on, wired explicitly:
 
 | Feature | What it does |
 |---------|-------------|
-| **Karpenter** | Node Auto-Provisioning; user-declared NodePool CRs at Layer 0b |
+| **Karpenter (NAP)** | Node Auto-Provisioning; user-declared NodePool CRs at Layer 0b |
 | **Managed Istio** | Service mesh with mTLS, sidecar injection, ingress gateway |
-| **Deployment Safeguards** | Non-bypassable admission policies (non-root, seccomp, capability drop, probes, resource limits) |
-| **Key Vault CSI** | Secrets Provider driver available to workloads |
+| **Workload Identity** | OIDC issuer + federated credentials (explicit on Base) |
+| **Azure RBAC for Kubernetes** | Cluster authorization (explicit on Base) |
 | **Cilium CNI** | eBPF networking in overlay mode |
-| **Managed Prometheus** | Metrics to Azure Monitor |
-| **Container Insights** | Logs to Log Analytics |
+| **Managed Prometheus / Container Insights** | Cluster metrics and logs to Azure Monitor / Log Analytics |
+| **Application Insights** | Optional per-service request, dependency, and exception telemetry (`spi up --application-insights`; [ADR-023](decisions/023-application-insights-telemetry.md)) |
 
-Safeguards are non-bypassable, so every pod must comply:
+Deployment Safeguards were an Automatic-only feature and are no longer
+cluster-enforced. Compliance does not regress: the local `osdu-spi-service`
+Helm chart bakes the same pod hardening into its templates so services comply
+at authoring time:
 
 - `securityContext.runAsNonRoot: true`
 - `securityContext.seccompProfile.type: RuntimeDefault`
@@ -137,11 +132,8 @@ Safeguards are non-bypassable, so every pod must comply:
 - Resource requests and limits defined
 - Liveness and readiness probes defined
 
-The local `osdu-spi-service` Helm chart bakes these into its templates so
-services also retain the same posture on Base. See
-[ADR-002](decisions/002-aks-automatic.md),
-[ADR-004](decisions/004-local-helm-chart-safeguards.md), and
-[ADR-033](decisions/033-selectable-aks-deployment-modes.md).
+See [ADR-021](decisions/021-aks-base-node-autoprovisioning.md) and
+[ADR-004](decisions/004-local-helm-chart-safeguards.md).
 
 ## Ingress Profiles
 
@@ -184,7 +176,15 @@ The diagram shows simplified service-to-service dependencies for the core OSDU A
 | crs-conversion | CRS transformation; downloads SIS data in an init container |
 | crs-catalog | CRS reference catalog; standalone |
 
-All services use OCI Helm charts pinned to full Git SHAs, rendered through the local `osdu-spi-service` chart (ADR-004).
+### Graduated services (Layer 7)
+
+| Service | Role | Exposure |
+|---------|------|----------|
+| wellbore-domain-services | Wellbore metadata, ACL, schema, Storage/Search integration and public DDMS API | Public `/api/os-wellbore-ddms/` route |
+| wellbore-domain-services-worker | Parquet/JSON bulk I/O, sessions and statistics against partition Blob storage | ClusterIP only; NetworkPolicy permits labeled worker clients and Istio requires a JWT |
+
+All services use the local `osdu-spi-service` chart and immutable image
+digests from the profile-specific `osdu-image-lock` (ADRs 004, 025, and 026).
 
 ## Data Flow
 
@@ -227,8 +227,7 @@ A single User-Assigned Managed Identity (`osdu-identity`) is shared by all OSDU 
 | Key Vault Secrets User | Vault | Read secrets |
 | Storage Blob Data Contributor | Common + per-partition accounts | Blob operations |
 | Storage Table Data Contributor | Common + per-partition accounts | Table operations |
-| Service Bus Data Sender | Per-partition namespace | Publish events |
-| Service Bus Data Receiver | Per-partition namespace | Consume events |
+| Azure Service Bus Data Owner | Per-partition namespace | Publish/consume events and support Service Bus management clients |
 | AcrPull | ACR | Pull container images |
 
 A second UAMI (`external-dns-identity`, scoped `DNS Zone Contributor` on the zone's resource group) is provisioned conditionally when the ingress mode is `dns`. See [ADR-005](decisions/005-workload-identity.md) and [ADR-012](decisions/012-ingress-profiles.md).
@@ -243,9 +242,19 @@ Changes to this repository (middleware manifests, profile definitions, service Y
 
 ### Service update loop
 
-When an OSDU service merges to master, its GitLab CI pipeline builds a new container image and the community registry exposes a new immutable SHA tag. `spi up` resolves the current master tags and writes them to `osdu-flux/osdu-image-lock`; the service Kustomizations consume that ConfigMap through Flux post-build substitution. This keeps the deployed image set explicit while avoiding stale, pruned tags in long-lived test workflows.
+The default service baseline comes from each SPI service repository's latest
+successful `main` build. The engineering system publishes that build as
+`main-snapshot`; `spi up` resolves the tag once, pins its immutable OCI digest,
+and writes the resulting fleet to `osdu-flux/osdu-image-lock`. Service
+Kustomizations consume that ConfigMap through Flux post-build substitution.
 
-Run `spi reconcile --refresh-images` to resolve a fresh image lock for an existing cluster, then reconcile the service Kustomizations. `scripts/resolve-image-tags.py --update` remains available for static image references such as the schema-load Job.
+`--image-tag` selects an exact shared tag such as a coordinated release.
+`--image-ref` is an advanced path for resolving the same Git feature ref to each
+repository's `sha-<commit>` image. Run `spi reconcile --refresh-images` to
+refresh the configured selector. `--image-source community` retains the prior
+OSDU GitLab resolver as a fallback.
+`scripts/resolve-image-tags.py --update` remains available for static image
+references such as the schema-load Job.
 
 ### Suspend and resume
 
@@ -278,7 +287,7 @@ Created by the CLI during K8s bootstrap and mounted into every OSDU service via 
 | PaaS metadata and secret values | Azure Key Vault | SDK reads under Workload Identity (or CSI) |
 | In-cluster middleware passwords | Kubernetes Secrets in `platform`/`osdu` | CLI-generated once per environment |
 
-Most Key Vault secret values are declared in `infra/main.bicep` and resolved at deploy time. Local auth is disabled on the Cosmos and Service Bus accounts (ADR-027), so their key and connection secrets are written as `"DISABLED"` placeholders instead of real key material. A small set of runtime secrets that depend on in-cluster seed passwords (Elasticsearch and Redis credentials, `tbl-storage-endpoint`) are written post-handoff by the CLI. See [ADR-010](decisions/010-keyvault-secret-management.md).
+Most Key Vault secret values are declared in `infra/main.bicep` and resolved at deploy time (including `listKeys()` for local-auth-enabled partition Cosmos accounts). The Gremlin account disables local auth and uses Workload Identity plus a Gremlin Data Contributor assignment instead of a stored graph key. A small set of runtime secrets that depend on in-cluster seed passwords (Elasticsearch and Redis credentials, `tbl-storage-endpoint`) are written post-handoff by the CLI. See [ADR-010](decisions/010-keyvault-secret-management.md).
 
 ### CA distribution and Redis mTLS
 
@@ -290,10 +299,11 @@ Redis and Elasticsearch TLS CAs live as Secrets in `platform`. trust-manager (in
 
 | Resource | Purpose | Sizing |
 |----------|---------|--------|
-| AKS Automatic | Compute | Karpenter-managed |
+| AKS (Base SKU + NAP) | Compute | Karpenter-managed |
 | Cosmos DB Gremlin | Entitlements graph | 4000 RU/s autoscale |
 | Key Vault | Secret management | Standard, RBAC-enabled |
 | ACR | Container images | Basic SKU |
+| Application Insights + Log Analytics | Optional service telemetry and logs | Workspace-based, 30-day retention; disabled by default |
 | Managed Identity (`osdu-identity`) | Workload Identity | Single, shared |
 | Managed Identity (`external-dns-identity`) | DNS Zone Contributor | Conditional on `dns` ingress mode |
 
@@ -303,7 +313,7 @@ Redis and Elasticsearch TLS CAs live as Secrets in `platform`. trust-manager (in
 |----------|---------|--------|
 | Cosmos DB SQL | Operational data | 4000 RU/s autoscale, 24 containers |
 | Service Bus | Async messaging | Standard SKU, 14 topics, 14 subscriptions |
-| Storage account | Blob and table storage | Standard LRS, 5 containers |
+| Storage account | Blob and table storage | Standard LRS, 6 containers (5 service + 1 record) |
 
 ### In-cluster (per environment)
 

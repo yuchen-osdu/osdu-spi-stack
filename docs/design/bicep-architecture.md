@@ -18,7 +18,6 @@ shared:
 | Template | Style | What it lands |
 |---|---|---|
 | `infra/aks.bicep` | Raw `managedClusters` Bicep | AKS Automatic cluster, BYO VNet + NAT gateway, managed system node subnet, managed Istio, OIDC issuer |
-| `infra/aks-base.bicep` | Raw `managedClusters` Bicep | Optional Base SKU + Node Autoprovisioning cluster using the same network and output contract |
 | `infra/main.bicep` | Raw modules under `infra/modules/` | Every other PaaS resource: identity, RBAC, Key Vault (with secrets), ACR, Cosmos DB Gremlin, per-partition (Cosmos SQL + Service Bus + Storage), common Storage, optional `external-dns-*` for `dns` ingress |
 | `infra/flux.bicep` | Raw (small) | AKS Flux extension + `fluxConfigurations` with two Kustomizations (stack profile, ingress mode) |
 
@@ -38,11 +37,7 @@ selected AKS entrypoint and `main.bicep`, then skips Kubernetes and Flux work.
 
 ## Why raw Bicep for AKS and PaaS
 
-AKS Automatic has a non-trivial parameter shape: system-pool VM size,
-Ephemeral OS disk, NAT gateway for egress, `hostedSystemProfile` for managed
-system nodes, `serviceMeshProfile` for Istio, and Workload Identity flags. Base
-+ NAP needs a different set of Azure RBAC, Cilium overlay, and workload
-identity properties. Raw separate entrypoints keep those shapes explicit.
+AKS Automatic has a non-trivial parameter shape: system-pool VM size, Ephemeral OS disk, NAT gateway for egress, `hostedSystemProfile` for managed system nodes, `serviceMeshProfile` for Istio, and Workload Identity flags. Raw Bicep is used because the pinned AVM module did not expose `hostedSystemProfile`, which is required for AKS Automatic custom networking with user-assigned NAT Gateway.
 
 The PaaS modules (Key Vault, ACR, Storage, Cosmos, Service Bus, Managed Identity) also use raw Bicep. They are stable resources with well-known shape, so the raw modules under `infra/modules/` are small, readable, and reviewable.
 
@@ -58,8 +53,8 @@ The full rationale is in [ADR-008](../decisions/008-bicep-for-azure-provisioning
 | `cosmos-gremlin.bicep` | Cosmos DB Gremlin account + graph DB | Entitlements graph; shared across partitions |
 | `partition.bicep` | Per-partition: Cosmos SQL account + 24 containers, local-auth-disabled Service Bus namespace + 14 topics + 14 subscriptions, Storage account + 5 containers, per-partition KV secrets (`{p}-storage-account-blob-endpoint`, `{p}-cosmos-primary-key`, `{p}-sb-connection` placeholder, etc.) | Looped from `main.bicep` over `dataPartitions` |
 | `storage-common.bicep` | Common Storage account (legal tags, cross-partition data) | One per environment, not per partition |
-| `rbac.bicep` | RBAC role assignments scoped per resource | Key Vault Secrets User, Storage Blob/Table Data Contributor, Service Bus Data Sender + Receiver, AcrPull |
-| `vnet.bicep` | VNet + user-node, managed-system-node and API-server subnets + NAT gateway | Shared by both AKS entrypoints; Base leaves the managed-system subnet unused |
+| `rbac.bicep` | RBAC role assignments scoped per resource | Key Vault Secrets User, Storage Blob/Table Data Contributor, Azure Service Bus Data Owner, AcrPull |
+| `vnet.bicep` | VNet + private subnet + NAT gateway | Consumed by `aks.bicep` (BYO VNet for AKS egress), not `main.bicep` |
 | `external-dns-identity.bicep` | Second UAMI (`<cluster>-external-dns`) + federated credential to ExternalDNS SA | Conditional on `--ingress-mode dns` |
 | `external-dns-role.bicep` | `DNS Zone Contributor` role on the DNS zone | Deploys into the zone's RG; the role binds to the zone. Conditional on `--ingress-mode dns` |
 

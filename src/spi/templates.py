@@ -105,6 +105,11 @@ def osdu_config_configmap(
         if not app_insights_connection_string
         else ""
     )
+    python_ai_config = (
+        f'  AZ_AI_CONNECTION_STR: "{app_insights_connection_string}"\n'
+        if app_insights_connection_string
+        else ""
+    )
     return f"""\
 apiVersion: v1
 kind: ConfigMap
@@ -132,6 +137,7 @@ data:
   APPLICATIONINSIGHTS_CONNECTION_STRING: "{ai_conn}"
   APPLICATIONINSIGHTS_SELF_DIAGNOSTICS_LEVEL: "OFF"
 {ai_disabled_config}\
+{python_ai_config}\
   ELASTICSEARCH_HOST: "elasticsearch-es-http.platform.svc"
 """
 

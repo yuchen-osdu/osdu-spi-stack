@@ -27,13 +27,11 @@ def test_existing_aks_outputs_includes_kubelet_identity_object_id():
     cluster = {
         "name": cfg.cluster_name,
         "id": "/subscriptions/s/resourceGroups/rg/providers/x/managedClusters/c",
-        "location": cfg.location,
+        "location": "eastus2",
         "provisioningState": "Succeeded",
-        "sku": {"name": "Automatic"},
         "oidcIssuerProfile": {"issuerUrl": "https://oidc"},
         "identity": {"userAssignedIdentities": {"/id": {"principalId": "cluster-pid"}}},
         "identityProfile": {"kubeletidentity": {"objectId": "kubelet-oid"}},
-        "serviceMeshProfile": {"istio": {"revisions": ["asm-1-30"]}},
     }
     with mock.patch.object(azure_infra, "run_command", return_value=_fake_result(cluster)):
         out = azure_infra._existing_aks_outputs(cfg)
@@ -43,16 +41,14 @@ def test_existing_aks_outputs_includes_kubelet_identity_object_id():
     # not silently skipped against an already-existing cluster.
     assert out["kubeletIdentityObjectId"] == "kubelet-oid"
     assert out["clusterPrincipalId"] == "cluster-pid"
-    assert out["istioRevision"] == "asm-1-30"
 
 
 def test_existing_aks_outputs_kubelet_id_empty_when_absent():
     cfg = Config(env="dev1")
     cluster = {
         "name": cfg.cluster_name,
-        "location": cfg.location,
+        "location": "eastus2",
         "provisioningState": "Succeeded",
-        "sku": {"name": "Automatic"},
     }
     with mock.patch.object(azure_infra, "run_command", return_value=_fake_result(cluster)):
         out = azure_infra._existing_aks_outputs(cfg)

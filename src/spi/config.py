@@ -44,7 +44,6 @@ _NAME_SUFFIX_LEN = 5
 # stay unsuffixed to keep matching the resources already in Azure.
 RG_SUFFIX_TAG = "spi-name-suffix"
 RG_APPLICATION_INSIGHTS_TAG = "spi-application-insights"
-RG_AKS_MODE_TAG = "spi-aks-mode"
 
 
 def generate_name_suffix() -> str:
@@ -64,11 +63,8 @@ class Profile(str, Enum):
     # Middleware plus the OSDU services, bootstrap Jobs, schema load, and
     # reference services. Default.
     CORE = "core"
-
-
-class AksMode(str, Enum):
-    AUTOMATIC = "automatic"
-    BASE = "base"
+    GRADUATED = "graduated"
+    FULL = "full"
 
 
 class IngressMode(str, Enum):
@@ -93,17 +89,14 @@ class Config(BaseModel):
     cluster_name: str = BASE_NAME
     # Azure
     resource_group: str = BASE_NAME
-    location: str = "westus3"
-    # Automatic is the upstream/default topology. Base preserves the proven
-    # Base SKU + Node Autoprovisioning alternative for explicit deployments.
-    aks_mode: AksMode = AksMode.AUTOMATIC
+    location: str = "eastus2"
     # Application Insights is opt-in for new environments. The resolved value
     # is persisted on the resource group so idempotent reruns preserve the
     # environment's original observability mode.
     application_insights: bool = False
-    # Service image baseline. The stack defaults to images produced by the SPI
-    # service forks in the configured GitHub organization; community GitLab
-    # remains an explicit compatibility fallback.
+    # Service image baseline. The yuchen SPI Stack defaults to images produced
+    # by the yuchen-osdu service forks; community GitLab remains an explicit
+    # compatibility fallback.
     image_source: ImageSource = ImageSource.GHCR
     image_org: str = DEFAULT_GHCR_ORG
     image_tag: str = DEFAULT_GHCR_TAG
@@ -171,6 +164,18 @@ class Config(BaseModel):
     def primary_partition(self) -> str:
         """First data partition hosts the system database."""
         return self.data_partitions[0]
+
+    @property
+    def gitops_profile(self) -> str:
+        """Repository profile path; full currently aliases the 13-service core stack."""
+        return Profile.CORE.value if self.profile == Profile.FULL else self.profile.value
+
+    @property
+    def gitops_ingress_profile(self) -> str:
+        """Ingress path, including profile-specific routes when required."""
+        if self.profile == Profile.GRADUATED:
+            return f"{self.ingress_mode.value}-graduated"
+        return self.ingress_mode.value
 
     @model_validator(mode="after")
     def _validate_data_partitions(self) -> "Config":

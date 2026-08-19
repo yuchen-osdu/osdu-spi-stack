@@ -64,6 +64,9 @@ resources:
 # -- Extra environment variables (list of {name, value} objects)
 env: []
 
+# -- Additional labels applied to the workload Pod.
+podLabels: {}
+
 # -- Extra init containers (for data download, etc.)
 initContainers: []
 

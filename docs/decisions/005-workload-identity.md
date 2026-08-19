@@ -12,7 +12,7 @@ AKS Automatic enables the OIDC issuer by default, which is the precondition for 
 
 Use a single UAMI (`<cluster>-osdu-identity`) federated with the `workload-identity-sa` ServiceAccount name across the fixed OSDU namespace set (`default`, `osdu-core`, `airflow`, `osdu-system`, `osdu-auth`, `osdu-reference`, `osdu`, `platform`). All OSDU services run under that ServiceAccount.
 
-- The UAMI is declared in `infra/modules/identity.bicep` and receives RBAC role assignments via `infra/modules/rbac.bicep`: Key Vault Secrets User, Storage Blob Data Contributor, Storage Table Data Contributor, Service Bus Data Sender, Service Bus Data Receiver, AcrPull.
+- The UAMI is declared in `infra/modules/identity.bicep` and receives RBAC role assignments via `infra/modules/rbac.bicep`: Key Vault Secrets User, Storage Blob Data Contributor, Storage Table Data Contributor, Azure Service Bus Data Owner, AcrPull.
 - The ServiceAccount carries `azure.workload.identity/client-id` and `tenant-id` annotations.
 - Pods opt in with the `azure.workload.identity/use: "true"` label; the AKS webhook projects the federated token file and injects `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_FEDERATED_TOKEN_FILE`.
 
@@ -26,4 +26,5 @@ Rejected: per-service UAMIs with least-privilege scoping. The role surface (the 
 - One identity, one set of RBAC bindings. Provisioning is deterministic and re-runs are idempotent.
 - All OSDU services share the same access envelope; there is no per-service blast-radius containment at the Azure layer. Containment is at the Kubernetes RBAC and mesh layer instead.
 - The schema-load Job (ADR-013) and any future workloads in the `osdu` namespace reuse this ServiceAccount without any new Azure-side provisioning.
-- One per-partition carve-out remains: indexer-queue's subscription client builds a Service Bus connection string regardless of the Workload Identity flag, so `${partition}-sb-connection` holds a real SAS key in Key Vault. The key is gated by the same UAMI's `Key Vault Secrets User` role and never lands in a pod env var. See [secret lifecycle](../design/secret-lifecycle.md) for the full mechanics.
+- Service Bus local authentication is disabled and `${partition}-sb-connection` is a `"DISABLED"` placeholder. Services that use Service Bus must set both `AZURE_MSI_ISENABLED=true` and `AZURE_PAAS_WORKLOADIDENTITY_ISENABLED=true` so `core-lib-azure` chooses the token path.
+- `indexer-queue` remains the compatibility risk: current upstream pins `core-lib-azure` 2.0.6, whose subscription client can use legacy MSI but does not have the newer Workload Identity-aware client path. It must move to a Workload Identity-aware core-lib version before local-auth-disabled Service Bus can work end to end.

@@ -168,7 +168,7 @@ resource osduDb 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2023-11-15' 
 // only (AZURE_PAAS_WORKLOADIDENTITY_ISENABLED, not AZURE_MSI_ISENABLED) and still
 // connects to Cosmos with the primary key it reads from Key Vault, so the
 // "<partition>-cosmos-primary-key" secret written below is required. Disabling
-// local auth here (the ADR-033 end state) is a follow-up gated on the partition
+// local auth here (the ADR-022 end state) is a follow-up gated on the partition
 // service supporting the Cosmos data-plane MSI path.
 var sqlDataContributorRoleId = '00000000-0000-0000-0000-000000000002'
 
@@ -382,7 +382,7 @@ resource systemCosmosPrimaryKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07
   name: 'system-cosmos-primary-key'
   parent: keyVault
   properties: {
-    value: 'DISABLED'
+    value: cosmosAccount.listKeys().primaryMasterKey
   }
 }
 

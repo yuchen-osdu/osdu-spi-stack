@@ -1,7 +1,6 @@
 # OSDU SPI Stack -- Deep Reference
 
-Azure-native OSDU deployment using AKS Automatic by default, with an optional
-Base SKU + Node Autoprovisioning mode, plus Azure PaaS and Flux CD GitOps.
+Azure-native OSDU deployment using AKS (Base SKU + Node Autoprovisioning) + Azure PaaS + Flux CD GitOps.
 Repository: `Azure/osdu-spi-stack`
 
 ## Project Layout
@@ -46,14 +45,15 @@ software/
     gateway/               Istio Gateway API
   stacks/osdu/
     profiles/core/         7-layer Kustomization stack
-    profiles/minimal/      Middleware-only stack (layers 0-4b)
+    profiles/graduated/    Core plus Wellbore DDMS and worker
     services/              10 core OSDU service HelmReleases
     services-reference/    3 reference service HelmReleases
+    services-graduated/    Wellbore service pair and worker policies
     secrets/               ConfigMap placeholder docs
 
 docs/
   architecture.md          System architecture document
-  decisions/               37 ADRs
+  decisions/               24 ADRs
   diagrams/                Excalidraw architecture diagram
 ```
 
@@ -62,7 +62,7 @@ docs/
 ```bash
 uv run spi check                            # Validate prerequisites
 uv run spi up --env dev1                     # Deploy everything
-uv run spi up --env dev1 --profile minimal   # Middleware only, no OSDU services
+uv run spi up --env dev1 --profile graduated # Deploy core + Wellbore
 uv run spi up --env dev1 --partition p1 --partition p2  # Multi-partition
 uv run spi up --env dev1 --dry-run           # Preview Bicep changes (what-if)
 uv run spi down --env dev1                   # Delete all Azure resources
@@ -91,8 +91,7 @@ must themselves comply with the guide; do not propose wording the guide bans.
 ## Key Design Decisions
 
 - Azure-only (no KinD/AWS/GCP); SPI services depend on Azure PaaS (ADR-001)
-- AKS Automatic 1.36 by default; Base + Node Autoprovisioning is selected with
-  `--aks-mode base` and preserved per environment (ADR-033)
+- AKS Base SKU with Node Autoprovisioning + managed Istio (ADR-021, supersedes ADR-002)
 - Imperative CLI bootstrap, then Flux CD + AKS GitOps Extension for K8s workloads (ADR-009)
 - Local Helm chart bakes Safeguards compliance into templates (ADR-004)
 - Workload Identity for all Azure PaaS access; no stored credentials (ADR-005)
@@ -101,16 +100,11 @@ must themselves comply with the guide; do not propose wording the guide bans.
 - In-cluster only for ES, Redis, PG (Airflow); everything else is Azure PaaS (ADR-003)
 - Azure PaaS provisioning declared in Bicep (`infra/`); RG + AKS + soft-delete
   recovery + post-deploy Key Vault writes remain imperative (ADR-008)
-- Local auth disabled on Gremlin and Service Bus; Cosmos SQL keeps its key path
-  until Partition supports the Cosmos MSI client (ADR-035)
-- Application Insights is optional/default-off, persisted per environment, and
-  wired to all services in both modes (ADR-023, ADR-030)
+- Local auth disabled on Cosmos (Gremlin + SQL) and Service Bus for Microsoft-tenant
+  CloudGov policy; Workload Identity + data-plane RBAC instead (ADR-022)
+- Application Insights is optional/default-off and wired to all services when enabled (ADR-023)
 - Record-ingestion data plane enabled: system-cosmos secrets, per-partition record
-  blob container, Elasticsearch TLS (ADR-031)
-- Identity is projected per caller; access requires explicit Entitlements
-  membership seeding (ADR-036)
-- Managed Istio revision is resolved at deploy time, never hardcoded (ADR-034)
-- Service images default to the public GHCR SPI fleet, pinned by digest (ADR-032)
+  blob container, Elasticsearch TLS (ADR-024)
 
 ## OSDU Service Provider Context
 
@@ -142,15 +136,15 @@ in an SPI Stack deployment.
 
 ## OSDU Service Images
 
-Services default to public images built by the SPI service forks:
-- Baseline: `ghcr.io/<image-org>/<service>:main-snapshot`, resolved once and
-  pinned by immutable digest. `--image-org` selects the organization and
-  defaults to `Azure`.
+Services default to public images built by the yuchen-osdu SPI service forks:
+- Baseline: `ghcr.io/yuchen-osdu/<service>:main-snapshot`, resolved once and
+  pinned by immutable digest.
 - `--image-tag` selects a coordinated release tag.
 - `--image-ref` is the advanced feature-ref path and resolves to each
   repository's `sha-<commit>` image.
-- `spi up` writes the resolved fleet to `osdu-flux/osdu-image-lock`; service
-  manifests use Flux post-build substitution from that ConfigMap.
+- `spi up` resolves only the selected profile's fleet and writes it to
+  `osdu-flux/osdu-image-lock`; service manifests use Flux post-build
+  substitution from that ConfigMap.
 - `--image-source community` retains the OSDU GitLab registry as a fallback.
 - Refresh a live cluster with `uv run spi reconcile --refresh-images`.
 - To refresh static checked-in image references, run

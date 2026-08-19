@@ -20,8 +20,7 @@ Each mode is a self-contained Flux Kustomization tree under `software/stacks/osd
 
 Some pieces are in every mode and live under `software/components/`:
 
-- **Managed Istio** from the selected AKS mode (ADR-033). Provides the Gateway
-  API implementation and the ingress LoadBalancer service.
+- **Managed Istio** from AKS Automatic (ADR-002). Provides the Gateway API implementation and the ingress LoadBalancer service.
 - **`Gateway` resource** in the `aks-istio-ingress` namespace. The selected ingress profile is its sole Flux owner. `ip` renders HTTP:80 only; `azure` and `dns` render HTTP:80 plus their HTTPS listeners in the same Kustomization.
 - **cert-manager** for any mode that issues TLS (`azure`, `dns`).
 - **`spi-ingress-config` ConfigMap** in `osdu-flux`, written by the CLI during K8s bootstrap. Carries `GATEWAY_HOSTNAME`, `GATEWAY_LABEL`, `DNS_ZONE`, and similar values consumed by Flux `postBuild.substituteFrom`.
@@ -127,9 +126,7 @@ Same drill, plus one: **ExternalDNS wrote the A record.** `kubectl logs deploy/e
 - `software/stacks/osdu/ingress/azure/` -- the default mode
 - `software/stacks/osdu/ingress/dns/` -- the multi-host mode
 - `software/stacks/osdu/ingress/ip/` -- the debug mode
-- `software/stacks/osdu/ingress/<mode>-minimal/` -- the same trees minus `spi-osdu-routes`, used by the `minimal` stack profile (ADR-024)
-- `software/stacks/osdu/routes/<tree>/middleware/` -- Kibana + Airflow HTTPRoutes and ReferenceGrants
-- `software/stacks/osdu/routes/<tree>/osdu/` -- OSDU API HTTPRoutes
+- `software/stacks/osdu/routes/single-host/`, `routes/multi-host/`, `routes/ip-only/` -- HTTPRoute overlays
 - `software/components/gateway/` -- the shared Gateway base rendered by exactly one ingress profile
 - `infra/modules/external-dns-identity.bicep`, `infra/modules/external-dns-role.bicep` -- the conditional UAMI + role
 - `src/spi/ingress.py` -- CLI logic for `--ingress-mode`
