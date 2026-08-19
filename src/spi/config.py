@@ -54,6 +54,7 @@ def generate_name_suffix() -> str:
 
 class Profile(str, Enum):
     CORE = "core"
+    GRADUATED = "graduated"
     FULL = "full"
 
 
@@ -159,6 +160,13 @@ class Config(BaseModel):
     def gitops_profile(self) -> str:
         """Repository profile path; full currently aliases the 13-service core stack."""
         return Profile.CORE.value if self.profile == Profile.FULL else self.profile.value
+
+    @property
+    def gitops_ingress_profile(self) -> str:
+        """Ingress path, including profile-specific routes when required."""
+        if self.profile == Profile.GRADUATED:
+            return f"{self.ingress_mode.value}-graduated"
+        return self.ingress_mode.value
 
     @model_validator(mode="after")
     def _validate_data_partitions(self) -> "Config":

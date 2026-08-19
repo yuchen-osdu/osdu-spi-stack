@@ -1,0 +1,85 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: wellbore-domain-services
+  namespace: osdu-flux
+spec:
+  targetNamespace: osdu
+  interval: 30m
+  install:
+    timeout: 15m
+    remediation:
+      retries: 3
+  upgrade:
+    timeout: 15m
+    remediation:
+      retries: 3
+  chart:
+    spec:
+      chart: ./software/charts/osdu-spi-service
+      sourceRef:
+        kind: GitRepository
+        name: osdu-spi-stack-system
+  values:
+    image:
+      repository: ${WELLBORE_DOMAIN_SERVICES_IMAGE_REPOSITORY}
+      tag: "${WELLBORE_DOMAIN_SERVICES_IMAGE_TAG}"
+      digest: "${WELLBORE_DOMAIN_SERVICES_IMAGE_DIGEST}"
+    nodeSelector:
+      agentpool: osdu
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: "osdu"
+        effect: NoSchedule
+    podLabels:
+      spi.osdu/worker-client: "true"
+    probes:
+      liveness:
+        path: /healthz
+        port: 8080
+        initialDelaySeconds: 30
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+      readiness:
+        path: /readiness
+        port: 8080
+        initialDelaySeconds: 10
+        periodSeconds: 15
+        timeoutSeconds: 5
+        failureThreshold: 6
+    resources:
+      requests:
+        cpu: 370m
+        memory: 710Mi
+      limits:
+        cpu: "1"
+        memory: 3Gi
+    env:
+      - name: CLOUD_PROVIDER
+        value: az
+      - name: SERVICE_NAME
+        value: wellbore-ddms
+      - name: OPENAPI_PREFIX
+        value: /api/os-wellbore-ddms
+      - name: SERVICE_HOST_STORAGE
+        value: http://storage/api/storage
+      - name: SERVICE_HOST_SEARCH
+        value: http://search/api/search
+      - name: SERVICE_HOST_SCHEMA
+        value: http://schema/api/schema-service/v1
+      - name: SERVICE_HOST_PARTITION
+        value: http://partition/api/partition
+      - name: SERVICE_HOST_WDMS_WORKER
+        value: http://wellbore-domain-services-worker/api/wdms-worker
+      - name: USE_PARTITION_SERVICE
+        value: enabled
+      - name: AZ_LOGGER_LEVEL
+        value: INFO
+      - name: ENVIRONMENT_NAME
+        value: spi
+      - name: SWAGGER_FULL_URL_ENABLED
+        value: "true"
+      - name: DE_CLIENT_CFG_TIMEOUT
+        value: "30"

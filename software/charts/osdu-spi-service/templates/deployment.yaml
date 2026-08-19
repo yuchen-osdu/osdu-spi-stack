@@ -26,6 +26,9 @@ spec:
         {{- if .Values.workloadIdentity }}
         azure.workload.identity/use: "true"
         {{- end }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- if .Values.istioProxyPin.enabled }}
       annotations:
         sidecar.istio.io/proxyImage: {{ .Values.istioProxyPin.image }}

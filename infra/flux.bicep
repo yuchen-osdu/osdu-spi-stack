@@ -23,7 +23,7 @@ param repoBranch string = 'main'
 @description('Profile path segment under software/stacks/osdu/profiles (e.g., "core").')
 param profile string = 'core'
 
-@description('Ingress mode path segment under software/stacks/osdu/ingress (azure, dns, or ip).')
+@description('Ingress profile path segment under software/stacks/osdu/ingress (for example azure or azure-graduated).')
 param ingressMode string = 'azure'
 
 @description('Name of the fluxConfigurations resource on the cluster.')

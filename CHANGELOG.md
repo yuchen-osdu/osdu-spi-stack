@@ -5,6 +5,14 @@ All notable changes to the `spi` CLI are documented here. Versions follow
 also auto-generated from conventional commits and attached to the
 corresponding [GitHub Release](https://github.com/Azure/osdu-spi-stack/releases).
 
+## [Unreleased]
+
+### Added
+- `graduated` deployment profile with Wellbore DDMS, its internal bulk worker,
+  profile-specific ingress routes, and worker network/auth policies.
+- Profile-aware atomic image resolution; core resolves 13 images and
+  graduated resolves the same core set plus the two Wellbore images.
+
 ## [0.1.0] - 2026-05-27
 
 ### Added

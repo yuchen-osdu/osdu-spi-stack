@@ -201,6 +201,7 @@ def test_read_image_lock_selection_supports_legacy_community_lock():
             "",
             "",
             "master",
+            "core",
         )
 
 
@@ -211,6 +212,7 @@ def test_read_image_lock_selection_reads_ghcr_metadata():
             "IMAGE_ORG": "example",
             "IMAGE_TAG": "",
             "IMAGE_REF": "feature/ref",
+            "IMAGE_PROFILE": "graduated",
         }
     }
     with mock.patch.object(cli, "kubectl_json", return_value=configmap):
@@ -219,6 +221,7 @@ def test_read_image_lock_selection_reads_ghcr_metadata():
             "example",
             "",
             "feature/ref",
+            "graduated",
         )
 
 
@@ -229,6 +232,7 @@ def test_read_image_lock_selection_reads_ghcr_tag():
             "IMAGE_ORG": "example",
             "IMAGE_TAG": "main-snapshot",
             "IMAGE_REF": "",
+            "IMAGE_PROFILE": "core",
         }
     }
     with mock.patch.object(cli, "kubectl_json", return_value=configmap):
@@ -237,4 +241,5 @@ def test_read_image_lock_selection_reads_ghcr_tag():
             "example",
             "main-snapshot",
             "",
+            "core",
         )

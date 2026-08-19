@@ -57,6 +57,7 @@ class ImageRegistryEntry:
     image: str
     file: str
     image_lock: bool = True
+    community_default_branch: str = ""
 
 
 @dataclass(frozen=True)
@@ -112,13 +113,55 @@ IMAGE_REGISTRY: dict[str, ImageRegistryEntry] = {
         "services-reference/crs-catalog.yaml",
     ),
     "unit": ImageRegistryEntry(5, "unit-service", "services-reference/unit.yaml"),
+    # Graduated services (software/stacks/osdu/services-graduated/)
+    "wellbore-domain-services": ImageRegistryEntry(
+        98,
+        "wellbore-domain-services",
+        "services-graduated/wellbore-domain-services.yaml",
+    ),
+    "wellbore-domain-services-worker": ImageRegistryEntry(
+        1384,
+        "wellbore-domain-services-worker",
+        "services-graduated/wellbore-domain-services-worker.yaml",
+        community_default_branch="main",
+    ),
+}
+
+CORE_IMAGE_NAMES = (
+    "partition",
+    "entitlements",
+    "legal",
+    "schema",
+    "storage",
+    "search",
+    "indexer",
+    "indexer-queue",
+    "file",
+    "workflow",
+    "crs-conversion",
+    "crs-catalog",
+    "unit",
+)
+PROFILE_IMAGE_NAMES = {
+    "core": CORE_IMAGE_NAMES,
+    # Full remains the backward-compatible alias for the implemented core stack.
+    "full": CORE_IMAGE_NAMES,
+    "graduated": CORE_IMAGE_NAMES
+    + (
+        "wellbore-domain-services",
+        "wellbore-domain-services-worker",
+    ),
 }
 
 
-def image_lock_names() -> tuple[str, ...]:
-    """Return service names controlled by the generated image lock."""
+def image_lock_names(profile: str = "core") -> tuple[str, ...]:
+    """Return the live image set required by one deployment profile."""
 
-    return tuple(name for name, entry in IMAGE_REGISTRY.items() if entry.image_lock)
+    try:
+        names = PROFILE_IMAGE_NAMES[profile]
+    except KeyError as exc:
+        raise ImageResolutionError(f"Unknown image profile: {profile!r}") from exc
+    return tuple(name for name in names if IMAGE_REGISTRY[name].image_lock)
 
 
 def image_lock_key(service_name: str) -> str:
@@ -287,7 +330,12 @@ def _newest_immutable_tag(project_id: int, repo_id: int, tags: Iterable[dict]) -
 def resolve_image(service_name: str, entry: ImageRegistryEntry, branch: str) -> ResolvedImage:
     """Resolve the newest immutable image tag for a service."""
 
-    image_name = f"{entry.image}-{branch}"
+    effective_branch = (
+        entry.community_default_branch
+        if branch == DEFAULT_IMAGE_BRANCH and entry.community_default_branch
+        else branch
+    )
+    image_name = f"{entry.image}-{effective_branch}"
     repos = _registry_repositories(entry.project_id, image_name)
     repo = next((r for r in repos if r.get("name") == image_name), None)
     if not repo:
@@ -399,10 +447,17 @@ def resolve_image_lock(
     tag: str | None = None,
     ref: str | None = None,
     org: str = DEFAULT_GHCR_ORG,
+    profile: str = "core",
 ) -> dict[str, ResolvedImage]:
     """Resolve the images controlled by the live Flux image lock."""
 
-    return resolve_images(source=source, tag=tag, ref=ref, org=org, names=image_lock_names())
+    return resolve_images(
+        source=source,
+        tag=tag,
+        ref=ref,
+        org=org,
+        names=image_lock_names(profile),
+    )
 
 
 def _yaml_string(value: str) -> str:
@@ -415,6 +470,7 @@ def render_image_lock_configmap(
     tag: str | None = None,
     ref: str | None = None,
     org: str = DEFAULT_GHCR_ORG,
+    profile: str = "core",
     resolved_at: datetime | None = None,
 ) -> str:
     """Render the Flux substitution ConfigMap for service image pins."""
@@ -438,10 +494,11 @@ def render_image_lock_configmap(
         "IMAGE_TAG": resolved_tag,
         "IMAGE_REF": resolved_ref,
         "IMAGE_BRANCH": resolved_ref if source == ImageSource.COMMUNITY else "",
+        "IMAGE_PROFILE": profile,
         "IMAGE_RESOLVED_AT": timestamp,
         "IMAGE_COUNT": str(len(resolved)),
     }
-    for name in image_lock_names():
+    for name in resolved:
         image = resolved[name]
         key = image_lock_key(name)
         data[f"{key}_IMAGE"] = image.image

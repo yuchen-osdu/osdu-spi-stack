@@ -228,6 +228,7 @@ def _resolve_image_lock(config: Config) -> str:
             tag=config.image_tag,
             ref=config.image_ref,
             org=config.image_org,
+            profile=config.gitops_profile,
         )
     except ImageResolutionError as exc:
         console.print(f"[error]Unable to resolve OSDU service images: {exc}[/error]")
@@ -244,6 +245,7 @@ def _resolve_image_lock(config: Config) -> str:
         tag=config.image_tag,
         ref=config.image_ref,
         org=config.image_org,
+        profile=config.gitops_profile,
     )
 
 
@@ -294,7 +296,7 @@ def _deploy_flux_config(config: Config, activate_gitops: bool) -> None:
             "repoUrl": config.repo_url,
             "repoBranch": config.repo_branch,
             "profile": config.gitops_profile,
-            "ingressMode": config.ingress_mode.value,
+            "ingressMode": config.gitops_ingress_profile,
             "activateGitOps": activate_gitops,
             "gitRepositoryLocalAuthRef": (
                 "osdu-spi-stack-system-auth" if config.repo_url.startswith("ssh://") else ""
@@ -311,6 +313,7 @@ def _write_keyvault_bootstrap_secrets(
     config: Config,
     keyvault_name: str,
     storage_account_name: str,
+    aad_client_id: str,
     elastic_password: str,
     redis_password: str,
 ) -> None:
@@ -336,6 +339,9 @@ def _write_keyvault_bootstrap_secrets(
 
     secrets_to_write: list[tuple[str, str]] = [
         ("tbl-storage-endpoint", tbl_endpoint),
+        # Python Wellbore services turn this app/resource id into the OAuth
+        # `<resource>/.default` scope consumed by DefaultAzureCredential.
+        ("aad-client-id", aad_client_id),
         ("redis-hostname", redis_hostname),
         ("redis-password", redis_password),
     ]
@@ -525,6 +531,7 @@ def deploy_azure(
         config=config,
         keyvault_name=config.keyvault_name,
         storage_account_name=infra_outputs.get("common_storage_name", ""),
+        aad_client_id=_resolve_aad_client_id(infra_outputs.get("identity_client_id", "")),
         elastic_password=seed["elastic_password"],
         redis_password=seed["redis_password"],
     )

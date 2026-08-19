@@ -90,8 +90,16 @@ The core profile (`software/stacks/osdu/profiles/core/stack.yaml`) defines seven
 | 5a | Partition + entitlements bootstrap (per-partition Jobs) | 5 |
 | 5b | Schema load (one-shot Job) | 5a |
 | 6 | Reference services | 5, 5b |
+| 7 | Graduated services (Wellbore DDMS + worker) | 6 |
 
-The ingress profile (`software/stacks/osdu/ingress/<mode>/`) adds Kustomizations at Layer 1 (cert issuers, ExternalDNS in `dns` mode, TLS overlays) and Layer 6 (HTTPRoutes). See [ADR-007](decisions/007-layered-kustomization-ordering.md) and [ADR-012](decisions/012-ingress-profiles.md).
+The ingress profile (`software/stacks/osdu/ingress/<mode>/`) adds
+Kustomizations at Layer 1 (cert issuers, ExternalDNS in `dns` mode, TLS
+overlays) and Layer 6 (HTTPRoutes). A graduated deployment selects the
+corresponding `<mode>-graduated` overlay, which adds the public Wellbore route
+at Layer 7 while leaving the worker internal. See
+[ADR-007](decisions/007-layered-kustomization-ordering.md),
+[ADR-012](decisions/012-ingress-profiles.md), and
+[ADR-026](decisions/026-graduated-wellbore-profile.md).
 
 ## AKS Compute (Base SKU + Node Autoprovisioning)
 
@@ -168,7 +176,15 @@ The diagram shows simplified service-to-service dependencies for the core OSDU A
 | crs-conversion | CRS transformation; downloads SIS data in an init container |
 | crs-catalog | CRS reference catalog; standalone |
 
-All services use OCI Helm charts pinned to full Git SHAs, rendered through the local `osdu-spi-service` chart (ADR-004).
+### Graduated services (Layer 7)
+
+| Service | Role | Exposure |
+|---------|------|----------|
+| wellbore-domain-services | Wellbore metadata, ACL, schema, Storage/Search integration and public DDMS API | Public `/api/os-wellbore-ddms/` route |
+| wellbore-domain-services-worker | Parquet/JSON bulk I/O, sessions and statistics against partition Blob storage | ClusterIP only; NetworkPolicy permits labeled worker clients and Istio requires a JWT |
+
+All services use the local `osdu-spi-service` chart and immutable image
+digests from the profile-specific `osdu-image-lock` (ADRs 004, 025, and 026).
 
 ## Data Flow
 

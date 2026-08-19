@@ -22,7 +22,7 @@ exceeds the 24-char Storage account limit.
 import pytest
 from pydantic import ValidationError
 
-from spi.config import Config, Profile
+from spi.config import Config, IngressMode, Profile
 from spi.images import ImageSource
 
 
@@ -59,6 +59,15 @@ class TestValidPartitions:
     def test_full_profile_uses_the_implemented_thirteen_service_stack(self):
         cfg = Config(env="dev1", profile=Profile.FULL)
         assert cfg.gitops_profile == "core"
+
+    def test_graduated_profile_selects_wellbore_stack_and_ingress(self):
+        cfg = Config(
+            env="dev1",
+            profile=Profile.GRADUATED,
+            ingress_mode=IngressMode.AZURE,
+        )
+        assert cfg.gitops_profile == "graduated"
+        assert cfg.gitops_ingress_profile == "azure-graduated"
 
     def test_empty_env_still_valid(self):
         cfg = Config(env="", data_partitions=["p1"])

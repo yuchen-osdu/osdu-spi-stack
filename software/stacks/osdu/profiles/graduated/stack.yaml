@@ -1,0 +1,27 @@
+# SPI Stack - Graduated Profile
+#
+# Cumulative over core. The first graduated slice contains the public
+# Wellbore DDMS and its internal bulk worker.
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: spi-wellbore-services
+  namespace: osdu-flux
+  labels:
+    spi-stack.layer: "7"
+spec:
+  interval: 10m
+  dependsOn:
+    - name: spi-osdu-reference
+  sourceRef:
+    kind: GitRepository
+    name: osdu-spi-stack-system
+  path: ./software/stacks/osdu/services-graduated
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: osdu-image-lock
+  prune: true
+  wait: true
+  timeout: 30m
