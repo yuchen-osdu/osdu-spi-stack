@@ -398,6 +398,7 @@ def test_osdu_config_uses_consistent_dummy_application_insights_values():
     assert '"diskPersistenceMaxSizeMb":0' in yaml
     assert '"disabledAll":true' in yaml
     assert '"preAggregatedStandardMetrics":{"enabled":false}' in yaml
+    assert "AZ_AI_CONNECTION_STR" not in yaml
 
 
 def test_osdu_config_omits_disabled_agent_config_with_real_application_insights():
@@ -417,6 +418,7 @@ def test_osdu_config_omits_disabled_agent_config_with_real_application_insights(
     )
 
     assert "APPLICATIONINSIGHTS_CONFIGURATION_CONTENT" not in yaml
+    assert 'AZ_AI_CONNECTION_STR: "InstrumentationKey=real-key"' in yaml
 
 
 def test_changed_osdu_config_restarts_existing_deployments():

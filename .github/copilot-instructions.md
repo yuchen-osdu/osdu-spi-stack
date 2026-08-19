@@ -45,8 +45,10 @@ software/
     gateway/               Istio Gateway API
   stacks/osdu/
     profiles/core/         7-layer Kustomization stack
+    profiles/graduated/    Core plus Wellbore DDMS and worker
     services/              10 core OSDU service HelmReleases
     services-reference/    3 reference service HelmReleases
+    services-graduated/    Wellbore service pair and worker policies
     secrets/               ConfigMap placeholder docs
 
 docs/
@@ -60,7 +62,7 @@ docs/
 ```bash
 uv run spi check                            # Validate prerequisites
 uv run spi up --env dev1                     # Deploy everything
-uv run spi up --env dev1 --profile full      # Deploy with all services
+uv run spi up --env dev1 --profile graduated # Deploy core + Wellbore
 uv run spi up --env dev1 --partition p1 --partition p2  # Multi-partition
 uv run spi up --env dev1 --dry-run           # Preview Bicep changes (what-if)
 uv run spi down --env dev1                   # Delete all Azure resources
@@ -133,8 +135,9 @@ Services default to public images built by the yuchen-osdu SPI service forks:
 - `--image-tag` selects a coordinated release tag.
 - `--image-ref` is the advanced feature-ref path and resolves to each
   repository's `sha-<commit>` image.
-- `spi up` writes the resolved fleet to `osdu-flux/osdu-image-lock`; service
-  manifests use Flux post-build substitution from that ConfigMap.
+- `spi up` resolves only the selected profile's fleet and writes it to
+  `osdu-flux/osdu-image-lock`; service manifests use Flux post-build
+  substitution from that ConfigMap.
 - `--image-source community` retains the OSDU GitLab registry as a fallback.
 - Refresh a live cluster with `uv run spi reconcile --refresh-images`.
 - To refresh static checked-in image references, run

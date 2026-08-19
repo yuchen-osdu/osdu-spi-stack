@@ -64,6 +64,9 @@ spi check
 # Deploy (provisions Azure resources + activates GitOps)
 spi up --env dev1
 
+# Deploy core plus the Wellbore DDMS and its internal bulk worker
+spi up --env dev1 --profile graduated
+
 # Creator access is seeded into Entitlements by default.
 # Disable it for workload-only automation:
 spi up --env dev1 --no-seed-creator
@@ -84,6 +87,19 @@ spi up --env dev1 --partition opendes --partition tenant1
 spi up --env dev1 --ingress-mode dns --dns-zone example.com
 spi up --env dev1 --ingress-mode ip       # debug / smoke
 ```
+
+### Deployment profiles
+
+| Profile | Services | Intended use |
+|---------|----------|--------------|
+| `core` (default) | 10 core + 3 reference services | General Azure SPI development |
+| `graduated` | Core + Wellbore DDMS + internal Wellbore worker | Wellbore domain workflows |
+| `full` | Backward-compatible alias for the implemented core stack | Reserved for future expansion |
+
+Image resolution is profile-aware and atomic. `spi up` verifies every image
+required by the selected profile before provisioning Azure resources. A
+missing graduated image fails the graduated deployment without changing the
+core image contract.
 
 ### After Deploy
 

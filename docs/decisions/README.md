@@ -68,3 +68,4 @@ Create an ADR for any decision that could plausibly have gone a different way an
 | [023](023-application-insights-telemetry.md) | Application Insights for Service Telemetry | Accepted |
 | [024](024-record-ingestion-data-plane.md) | Record-Ingestion Data-Plane Enablement | Accepted |
 | [025](025-spi-ghcr-service-images.md) | SPI-Built GHCR Images as the Service Baseline | Accepted |
+| [026](026-graduated-wellbore-profile.md) | Graduated Profile Starts with the Wellbore Service Pair | Accepted |

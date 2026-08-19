@@ -1,0 +1,50 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wellbore-domain-services-worker-ingress
+  namespace: osdu
+spec:
+  podSelector:
+    matchLabels:
+      # Flux composes the Helm release name as
+      # <targetNamespace>-<HelmRelease>, while the Service helper strips the
+      # osdu- prefix. Policies select the Pod label, not the Service name.
+      app.kubernetes.io/name: osdu-wellbore-domain-services-worker
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              spi.osdu/worker-client: "true"
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: wellbore-domain-services-worker
+  namespace: osdu
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: osdu-wellbore-domain-services-worker
+  action: ALLOW
+  rules:
+    # Kubernetes probes do not carry an OSDU bearer token.
+    - to:
+        - operation:
+            paths:
+              - /healthz
+              - /readiness
+              - /liveness
+              - /api/wdms-worker/healthz
+              - /api/wdms-worker/readiness
+              - /api/wdms-worker/liveness
+    # Bulk operations must carry a JWT validated by the namespace-wide
+    # RequestAuthentication. NetworkPolicy separately restricts the source Pod.
+    - from:
+        - source:
+            requestPrincipals:
+              - "*"

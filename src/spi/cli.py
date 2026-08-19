@@ -303,8 +303,8 @@ def _resolve_image_selection(
     return source, org, tag, ref
 
 
-def _read_image_lock_selection() -> tuple[ImageSource, str, str, str]:
-    """Read the source, organization, and selector pinned in the live image lock."""
+def _read_image_lock_selection() -> tuple[ImageSource, str, str, str, str]:
+    """Read source, selector, and profile pinned in the live image lock."""
     configmap = kubectl_json(["get", "configmap", IMAGE_LOCK_CONFIGMAP, "-n", IMAGE_LOCK_NAMESPACE])
     if configmap is None:
         raise RuntimeError(
@@ -330,10 +330,10 @@ def _read_image_lock_selection() -> tuple[ImageSource, str, str, str]:
         if not tag and not ref:
             tag = DEFAULT_GHCR_TAG
         org = data.get("IMAGE_ORG", "") or DEFAULT_GHCR_ORG
-        return source, org, tag, ref
+        return source, org, tag, ref, data.get("IMAGE_PROFILE", "core")
 
     ref = data.get("IMAGE_REF") or data.get("IMAGE_BRANCH") or DEFAULT_IMAGE_BRANCH
-    return source, "", "", ref
+    return source, "", "", ref, data.get("IMAGE_PROFILE", "core")
 
 
 def _resolve_name_suffix(env: str, for_up: bool) -> str:
@@ -873,8 +873,11 @@ def reconcile(
         return
 
     if refresh_images:
+        image_profile = Profile.CORE.value
         try:
-            current_selection = _read_image_lock_selection()
+            current_lock = _read_image_lock_selection()
+            current_selection = current_lock[:4]
+            image_profile = current_lock[4]
         except RuntimeError as exc:
             if (
                 image_source is None
@@ -909,6 +912,7 @@ def reconcile(
                 tag=resolved_tag,
                 ref=resolved_ref,
                 org=resolved_org,
+                profile=image_profile,
             )
         except ImageResolutionError as exc:
             console.print(f"[error]Unable to resolve OSDU service images: {exc}[/error]")
@@ -925,6 +929,7 @@ def reconcile(
             tag=resolved_tag,
             ref=resolved_ref,
             org=resolved_org,
+            profile=image_profile,
         )
         display_yaml(image_lock_yaml, "ConfigMap: osdu-image-lock")
         kubectl_apply_yaml(image_lock_yaml, "apply osdu-image-lock ConfigMap")
