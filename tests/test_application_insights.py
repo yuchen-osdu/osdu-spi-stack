@@ -223,15 +223,17 @@ def test_existing_resource_group_removes_retired_aks_mode_tag():
         "run_command",
         side_effect=[
             _result("true"),
-            _result("automatic"),
+            _result('{"id":"/subscriptions/s/resourceGroups/spi-stack-dev1","value":"automatic"}'),
             _result(""),
         ],
     ) as run:
         azure_infra.create_resource_group(cfg)
 
     remove_command = run.call_args_list[2].args[0]
-    assert remove_command[:4] == ["az", "group", "update", "--name"]
-    assert f"tags.{azure_infra.LEGACY_RG_AKS_MODE_TAG}" in remove_command
+    assert remove_command[:3] == ["az", "tag", "update"]
+    assert "--operation" in remove_command
+    assert "Delete" in remove_command
+    assert f"{azure_infra.LEGACY_RG_AKS_MODE_TAG}=automatic" in remove_command
 
 
 def test_detect_existing_application_insights_distinguishes_not_found():

@@ -169,25 +169,35 @@ def _remove_legacy_aks_mode_tag(resource_group: str) -> None:
             "--name",
             resource_group,
             "--query",
-            f'tags."{LEGACY_RG_AKS_MODE_TAG}"',
+            f'{{id:id,value:tags."{LEGACY_RG_AKS_MODE_TAG}"}}',
             "--output",
-            "tsv",
+            "json",
         ],
         description=f"Check retired {LEGACY_RG_AKS_MODE_TAG} tag",
         display=False,
         check=False,
     )
-    if result.returncode != 0 or not result.stdout.strip():
+    if result.returncode != 0:
+        return
+    try:
+        tag = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return
+    resource_id = str(tag.get("id") or "")
+    value = str(tag.get("value") or "")
+    if not resource_id or not value:
         return
     run_command(
         [
             "az",
-            "group",
+            "tag",
             "update",
-            "--name",
-            resource_group,
-            "--remove",
-            f"tags.{LEGACY_RG_AKS_MODE_TAG}",
+            "--resource-id",
+            resource_id,
+            "--operation",
+            "Delete",
+            "--tags",
+            f"{LEGACY_RG_AKS_MODE_TAG}={value}",
             "--output",
             "none",
         ],
