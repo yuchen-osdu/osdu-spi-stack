@@ -159,6 +159,20 @@ class TestFromEnv:
             Config.from_env(env="dev1", data_partitions=["BAD"])
 
 
+class TestBareProfile:
+    def test_default_ingress_is_valid(self):
+        config = Config(env="dev1", profile=Profile.BARE)
+        assert config.profile is Profile.BARE
+
+    def test_dns_zone_is_rejected(self):
+        with pytest.raises(ValidationError, match="bare"):
+            Config(env="dev1", profile=Profile.BARE, dns_zone="example.com")
+
+    def test_non_azure_ingress_mode_is_rejected(self):
+        with pytest.raises(ValidationError, match="ingress_mode 'dns' is not supported"):
+            Config(env="dev1", profile=Profile.BARE, ingress_mode=IngressMode.DNS)
+
+
 def test_deployer_principal_type_env_override(monkeypatch):
     """SPI_DEPLOYER_TYPE bypasses the az account lookup entirely."""
     from spi import azure_infra

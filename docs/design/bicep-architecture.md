@@ -134,7 +134,7 @@ Output snippet:
    ~ Modify: Microsoft.Storage/storageAccounts/spistackdev1common
 ```
 
-The dry-run does not touch the cluster. It does land the resource group (Bicep needs an RG target), but it skips soft-deleted Key Vault recovery — that runs only on a real deploy (`if not dry_run` in `azure_infra.py`).
+The dry-run does not touch the cluster. It does land the resource group (Bicep needs an RG target), but it skips soft-deleted Key Vault recovery; that runs only on a real deploy (`if not dry_run` in `azure_infra.py`).
 
 ## Related ADRs
 

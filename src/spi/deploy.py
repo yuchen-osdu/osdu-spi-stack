@@ -468,9 +468,9 @@ def deploy_azure(
     caller can inspect what would change without actually provisioning.
     """
     image_lock_yaml = ""
-    # The minimal profile deploys no OSDU services, so nothing consumes the
-    # lock ConfigMap; skip the community-registry roundtrip entirely.
-    if refresh_images and not dry_run and config.profile is not Profile.MINIMAL:
+    # Only core deploys OSDU services that consume the image lock. Minimal and
+    # bare skip the community-registry roundtrip entirely.
+    if refresh_images and not dry_run and config.profile is Profile.CORE:
         # Resolve before provisioning so registry/API failures stop quickly and
         # never leave a partially configured cluster with a mixed image set.
         image_lock_yaml = _resolve_image_lock(config)

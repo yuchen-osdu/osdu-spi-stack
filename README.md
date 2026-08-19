@@ -223,8 +223,11 @@ Three namespaces, deployed in dependency order via a 7-layer Kustomization stack
 |---------|---------|
 | `core` (default) | Everything above. |
 | `minimal` | `foundation` and `platform` only — operators, cert-manager, trust-manager, Gateway, Elasticsearch, Redis, PostgreSQL, Airflow. No OSDU services. |
+| `bare` | Nothing; infra plus activated GitOps only. Flux reconciles empty stack and ingress trees. The CLI bootstrap seeds namespaces, secrets, the `osdu-config` ConfigMap, and the Workload Identity ServiceAccount. |
 
 Use `minimal` when you are working on the middleware itself and the OSDU services would only add deploy time. The middleware layers are identical between profiles, so what you validate on `minimal` holds on `core`.
+
+Use `bare` for Bicep, Workload Identity, or RBAC iteration, or for bring-your-own workloads. Re-run `spi up` with `minimal` or `core` to add workloads later.
 
 ### Azure PaaS Resources
 

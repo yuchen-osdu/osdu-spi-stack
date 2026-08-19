@@ -7,7 +7,57 @@ corresponding [GitHub Release](https://github.com/Azure/osdu-spi-stack/releases)
 
 ## [Unreleased]
 
+### Added
+- `spi up --profile bare` deploys infrastructure and activates GitOps
+  only: Flux reconciles empty stack and ingress trees while the CLI
+  bootstrap seeds namespaces, secrets, the `osdu-config` ConfigMap, and
+  the Workload Identity ServiceAccount. `--ingress-mode` and `--dns-zone`
+  are rejected with `bare`. Use it for Bicep, Workload Identity, or RBAC
+  iteration, then re-run `spi up` with `minimal` or `core` to add
+  workloads (ADR-024, issue #42).
+
+### Changed
+- Local (key/SAS) authentication is now disabled on every Cosmos DB (Gremlin
+  and per-partition SQL) and Service Bus account: `disableLocalAuth: true` is
+  set in Bicep rather than left to a tenant policy (ADR-027, supersedes
+  ADR-021, issue #44). Because `listKeys()` is rejected once local auth is off,
+  `graph-db-primary-key` is no longer written, the per-partition key/connection
+  Key Vault secrets (`{p}-cosmos-primary-key`, `system-cosmos-primary-key`,
+  `{p}-cosmos-connection`, `{p}-sb-connection`) now carry the literal
+  `DISABLED`, and the `serviceBusDisableLocalAuth` parameter is removed.
+  Services reach these accounts through Workload Identity data-plane roles.
+  Community OSDU images that still read these keys/SAS require
+  Workload-Identity-capable custom images, tracked separately.
+- Airflow 2.10.5 → 3.2.2 (chart 1.16.x → 1.22.x, single-engine, ADR-026).
+  The webserver is replaced by `airflow-api-server` (UI + `/api/v2` + task
+  execution API) and DAG parsing moves to a standalone dag-processor;
+  routes and ReferenceGrants now target the new service. All Airflow
+  signing material (`api-secret-key`, `jwt-secret`, `fernet-key`) is
+  CLI-seeded in `airflow-api-credentials` so Flux reconciles never rotate
+  keys. Deploy fresh (`spi down` / `spi up`); pre-Airflow-3 environments
+  are not supported.
+
 ### Fixed
+- Native Windows can run `spi` when CLIs such as Azure CLI are installed as
+  `.cmd`/`.bat` batch shims (issue #49, ADR-028). Every process the CLI
+  launches goes through `spi.shell.run_process`: the program resolves
+  through `PATHEXT`, and a batch shim is launched via an explicit `cmd.exe`
+  command line with every argument escaped, so values containing CMD
+  metacharacters, `%NAME%` expansion syntax, quotes, or whitespace reach the
+  tool exactly as written. The guarantee covers standard `%*`-forwarding
+  shims; an argument containing a newline or NUL is reported as a normal
+  command failure (without echoing the value) instead of being silently
+  corrupted. `spi check` no longer needs `shell=True`, and the Bicep compile
+  harness uses the same launcher.
+- `spi info --show-secrets --json` no longer emits credential values
+  (CodeQL `py/clear-text-logging-sensitive-data`): JSON output carries
+  secret references (`namespace/name#key`) since it is the form most
+  likely to end up in logs or CI artifacts; the interactive table remains
+  the only place values render.
+- `OSDU_AIRFLOW_URL` on the workflow service pointed at a nonexistent
+  `airflow-web` service; it now targets `airflow-api-server`. (The
+  workflow service's Airflow 3 API client is still pending upstream in
+  the community `master` images — see ADR-026.)
 - HTTPS ingress never terminated on AKS Automatic: the gateway TLS overlays
   declared their cert-manager Certificates in `aks-istio-ingress`, where the
   AKS-managed protect-system-namespaces policy denies cert-manager's status

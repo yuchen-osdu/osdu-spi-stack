@@ -24,7 +24,6 @@ Owns every decision that depends on the ingress mode:
 
 import json
 import os
-import subprocess
 from typing import Optional
 
 import typer

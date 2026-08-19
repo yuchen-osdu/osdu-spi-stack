@@ -1,4 +1,4 @@
-# OSDU SPI Stack -- Agent Context
+# OSDU SPI Stack -- Deep Reference
 
 Azure-native OSDU deployment using AKS Automatic by default, with an optional
 Base SKU + Node Autoprovisioning mode, plus Azure PaaS and Flux CD GitOps.
@@ -75,11 +75,18 @@ uv run spi reconcile --suspend               # Freeze GitOps
 uv run spi reconcile --resume                # Unfreeze GitOps
 ```
 
-## Writing Conventions
+Azure resource names are derived from the `--env` flag for isolation.
 
-- No em dashes; use commas, periods, or semicolons.
-- Every az/kubectl command displayed transparently via Rich panels.
-- Azure resource names derived from --env flag for isolation.
+## Documentation Style (docs/)
+
+`docs/STYLE.md` fixes the prose for ADRs (`docs/decisions/`), design docs
+(`docs/design/`), and `docs/architecture.md`. When reviewing or writing
+changes under `docs/`, hold them to that guide: impersonal active voice,
+claims backed by a named artifact or exact number, the banned/rationed word
+list, and its per-genre rules. ADRs are closed records (no dateable status,
+no external-project narrative); design docs are living documents
+(status-marked present tense is correct). Review suggestions for these files
+must themselves comply with the guide; do not propose wording the guide bans.
 
 ## Key Design Decisions
 

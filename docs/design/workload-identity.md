@@ -1,6 +1,6 @@
 # Workload Identity
 
-**What this explains.** How one Managed Identity becomes a usable runtime credential inside an OSDU service pod, how the JWT projection in ADR-016 turns the resulting AAD bearer into a `x-app-id` header, and where the carve-out for indexer-queue lives.
+**What this explains.** How one Managed Identity becomes a usable runtime credential inside an OSDU service pod, how the JWT projection in ADR-016 turns the resulting AAD bearer into a `x-app-id` header, and why the indexer-queue Service Bus carve-out is now closed.
 
 **Why it matters.** "Workload Identity" sounds like one thing but is actually a federation chain across Entra ID, the AKS OIDC issuer, the AKS webhook, the Istio sidecar, and the service's Spring filter. Failures in any link surface as the same symptom: a 401 or 403 with an empty `app-id=`. This doc names each link so you can trace which one is broken.
 

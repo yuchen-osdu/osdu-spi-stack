@@ -43,7 +43,7 @@ The sequence inside `deploy.deploy_azure()` is:
    Istio JWT projection, and the immutable service image lock. GHCR is the
    default image source; community GitLab remains selectable.
 10. **`infra/flux.bicep` deploy.** Activates the AKS Flux extension and creates the `fluxConfigurations` resource with two top-level Kustomizations: `stack` (pointing at `./software/stacks/osdu/profiles/<profile>`) and `ingress` (pointing at `./software/stacks/osdu/ingress/<mode>`).
-11. **Runtime Key Vault secrets.** The CLI writes the in-cluster middleware secrets to Key Vault (per-partition Elasticsearch credentials, Redis hostname/password) directly from the generated seed passwords — no wait for middleware Ready, since the values are known once infra is up. See [ADR-010](../decisions/010-keyvault-secret-management.md).
+11. **Runtime Key Vault secrets.** The CLI writes the in-cluster middleware secrets to Key Vault (per-partition Elasticsearch credentials, Redis hostname/password) directly from the generated seed passwords, with no wait for middleware Ready, since the values are known once infra is up. See [ADR-010](../decisions/010-keyvault-secret-management.md).
 12. **Suspend pin.** `_pin_gitops_source()` waits up to 120s for `gitrepository/osdu-spi-stack-system` to reach `Ready=True`, then `kubectl patch spec.suspend: true`. See [ADR-014](../decisions/014-suspend-gitops-after-deploy.md).
 13. **Next-steps panel.** The CLI prints `spi status --watch`, `spi info`, and the matching `spi down` command with flags pre-filled.
 

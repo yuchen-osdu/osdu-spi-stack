@@ -128,6 +128,7 @@ resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2023-11-15' = {
   kind: 'GlobalDocumentDB'
   properties: {
     databaseAccountOfferType: 'Standard'
+    disableLocalAuth: true
     consistencyPolicy: {
       defaultConsistencyLevel: 'Session'
     }
@@ -301,13 +302,14 @@ resource storageContainerResources 'Microsoft.Storage/storageAccounts/blobServic
 }]
 
 // ──────────────────────────────────────────────────────────
-// Key Vault secret (same-module listKeys() for natural dependency)
+// Key Vault secrets (same-module for natural dependency)
 // ──────────────────────────────────────────────────────────
 //
-// Written inside this module so ``listKeys()`` has an implicit dependency
-// on the ``cosmosAccount`` resource above. An ``existing`` reference at
-// the parent scope does NOT carry a dependency on the creating module,
-// so attempting ``listKeys()`` there fails with ResourceNotFound.
+// Written inside this module so references to ``cosmosAccount`` and
+// ``storageAccount`` properties carry an implicit dependency on the
+// resources above. An ``existing`` reference at the parent scope does NOT
+// carry a dependency on the creating module, so it would fail with
+// ResourceNotFound.
 
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = if (!empty(keyVaultName)) {
   name: keyVaultName
@@ -317,7 +319,7 @@ resource cosmosPrimaryKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' =
   name: '${partition}-cosmos-primary-key'
   parent: keyVault
   properties: {
-    value: cosmosAccount.listKeys().primaryMasterKey
+    value: 'DISABLED'
   }
 }
 
@@ -380,7 +382,7 @@ resource systemCosmosPrimaryKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07
   name: 'system-cosmos-primary-key'
   parent: keyVault
   properties: {
-    value: cosmosAccount.listKeys().primaryMasterKey
+    value: 'DISABLED'
   }
 }
 

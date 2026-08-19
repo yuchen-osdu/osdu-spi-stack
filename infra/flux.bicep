@@ -22,6 +22,7 @@ param repoBranch string = 'main'
 
 @description('Profile path segment under software/stacks/osdu/profiles (e.g., "core").')
 @allowed([
+  'bare'
   'minimal'
   'core'
 ])

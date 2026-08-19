@@ -15,7 +15,7 @@
 """In-cluster bootstrap: namespaces, StorageClasses, Gateway API CRDs."""
 
 from .console import console, display_result, display_yaml
-from .shell import kubectl_apply_yaml, kubectl_json, run_command
+from .shell import kubectl_apply_yaml, kubectl_json, run_command, run_process
 from .templates import storage_class
 
 STORAGE_CLASSES = ["pg-storageclass", "redis-storageclass", "es-storageclass"]

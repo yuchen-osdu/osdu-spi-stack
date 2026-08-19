@@ -270,9 +270,9 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (enableAppl
 // Key Vault secret values (declarative; replaces post-deploy CLI writes)
 // ──────────────────────────────────────────────────────────
 //
-// ``existing`` references let us call ``listKeys()`` on Cosmos accounts
-// provisioned inside sub-modules and write the result directly as a KV
-// secret. Splitting the declarations by "pattern" (static vs per-partition
+// ``existing`` references resolve endpoints and other static metadata on
+// resources provisioned inside sub-modules and write them directly as KV
+// secrets. Splitting the declarations by "pattern" (static vs per-partition
 // cosmos/storage/sb) keeps Bicep's array-loop semantics simple and makes
 // the deployment history self-describing without a ``flatten()`` dance.
 //
