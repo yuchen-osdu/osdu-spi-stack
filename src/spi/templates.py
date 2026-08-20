@@ -80,12 +80,11 @@ def osdu_config_configmap(
     The keys exist for the schema-load Job (which targets osdu-system-db,
     primary-only by design — ADR-013) and for operator visibility.
 
-    aad_client_id is the Entra app id used by the Spring auth filters to
-    match the JWT appid claim, and by core-lib-azure to build the
-    `${{aadClientId}}/.default` scope inside `getWIToken`. Defaults to the
-    UAMI client id (single-resource scope, dodges AADSTS28000); override
-    with the AAD_CLIENT_ID host env var to point at a separate OSDU app
-    registration.
+    aad_client_id is the resource used by core-lib-azure to build the
+    `${{aadClientId}}/.default` scope inside `getWIToken`. It defaults to
+    the ARM service audience because a managed identity client ID cannot be
+    used as a token audience (AADSTS100040). Operators may override it with
+    a separate OSDU app registration.
 
     APPLICATIONINSIGHTS_CONNECTION_STRING / APPINSIGHTS_INSTRUMENTATIONKEY are
     consumed by the bundled App Insights Java agent and the core-lib-azure 2.x
@@ -184,15 +183,19 @@ def istio_auth_resources(
     access decision belongs to entitlements (the projected identity must be a
     member; ``spi onboard`` seeds CI identities via the AddMember API).
     Service-to-service calls inside the cluster mint tokens via core-lib-azure's
-    ``getWIToken`` with scope ``${{aadClientId}}/.default`` (i.e.
-    ``aud=aad_client_id``), so ``aad_client_id`` must also be a valid audience
-    for those calls to pass jwt_authn. When the operator does not override
-    AAD_CLIENT_ID, both values are equal and only one entry is emitted per
-    jwtRule.
+    ``getWIToken`` with scope ``${{aadClientId}}/.default``. The default ARM
+    audience is already listed explicitly; an operator-provided OSDU app
+    registration is added as an extra audience.
     """
     extra_aud = (
         f'\n        - "{aad_client_id}"'
-        if aad_client_id and aad_client_id != entra_client_id
+        if aad_client_id
+        and aad_client_id
+        not in {
+            entra_client_id,
+            "https://management.azure.com",
+            "https://management.azure.com/",
+        }
         else ""
     )
     return f"""\

@@ -66,19 +66,18 @@ GITREPO_NAME = "osdu-spi-stack-system"
 OSDU_CONFIG_ROLLOUT_ANNOTATION = "spi.osdu/config-rollout-hash"
 
 INFRA_FLUX_BICEP = INFRA_ROOT / "flux.bicep"
+DEFAULT_SERVICE_AUDIENCE = "https://management.azure.com"
 
 
-def _resolve_aad_client_id(identity_client_id: str) -> str:
-    """Return the appid services should mint service-to-service tokens for.
+def _resolve_aad_client_id(_identity_client_id: str) -> str:
+    """Return the audience services should mint service-to-service tokens for.
 
-    Defaults to the OSDU UAMI client id (single-resource scope, dodges
-    AADSTS28000); the AAD_CLIENT_ID host env var overrides this to point
-    at a separate OSDU AAD app registration. The Istio audience list and
-    the osdu-config ConfigMap must agree on this value, or service-to-
-    service calls fail jwt_authn and reach the Spring filter without an
-    x-app-id header (ADR-016).
+    Managed identities cannot themselves be token audiences (AADSTS100040).
+    SPI therefore defaults to the ARM resource, which every Workload Identity
+    can request and the mesh already accepts. Operators may override this with
+    a separate OSDU app registration through AAD_CLIENT_ID.
     """
-    return os.environ.get("AAD_CLIENT_ID", "").strip() or identity_client_id
+    return os.environ.get("AAD_CLIENT_ID", "").strip() or DEFAULT_SERVICE_AUDIENCE
 
 
 def _create_osdu_config(config: Config, infra_outputs: dict) -> None:

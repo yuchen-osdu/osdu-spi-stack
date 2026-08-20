@@ -108,7 +108,7 @@ def _show_config(config: Config, *, show_application_insights: bool = True):
     if aad_override:
         table.add_row("AAD Client ID", f"{aad_override} [dim](env override)[/dim]")
     else:
-        table.add_row("AAD Client ID", "[dim](default: UAMI client id)[/dim]")
+        table.add_row("AAD Client ID", "[dim](default: ARM service audience)[/dim]")
     table.add_row(
         "Creator Access",
         ", ".join(config.creator_user_ids) if config.creator_user_ids else "[dim]disabled[/dim]",

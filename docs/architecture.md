@@ -268,7 +268,7 @@ Created by the CLI during K8s bootstrap and mounted into every OSDU service via 
 | `DOMAIN` | Ingress hostname or IP (mode-dependent) |
 | `DATA_PARTITION` | Primary partition name |
 | `AZURE_TENANT_ID` | Entra ID tenant |
-| `AAD_CLIENT_ID` | Managed identity client ID |
+| `AAD_CLIENT_ID` | Service-to-service token audience (ARM by default) |
 | `KEYVAULT_URI` | Key Vault URI |
 | `COSMOSDB_ENDPOINT` | Cosmos DB SQL endpoint |
 | `STORAGE_ACCOUNT_NAME` | Common Storage account |

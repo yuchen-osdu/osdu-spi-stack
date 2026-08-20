@@ -56,7 +56,11 @@ Because the projection runs inside the sidecar, the same path serves bootstrap J
 ADR-016 calls this out as the most common failure mode. The `RequestAuthentication` audience list must include every value services use to mint service-to-service tokens.
 
 - The bootstrap Jobs use `aud=https://management.azure.com/`. That audience is in the default list.
-- `core-lib-azure.getWIToken` uses scope `${aadClientId}/.default`. By default `aadClientId` is the UAMI client_id, which is in the audience list. If the operator overrides `AAD_CLIENT_ID` to a separate OSDU AAD app registration, the appid of that registration must also be in the audience list.
+- `core-lib-azure.getWIToken` uses scope `${aadClientId}/.default`. SPI defaults
+  `aadClientId` to `https://management.azure.com`; managed identity client IDs
+  cannot be token audiences. If the operator overrides `AAD_CLIENT_ID` to a
+  separate OSDU app registration, that app ID is also added to the audience
+  list.
 
 `istio_auth_resources()` in `src/spi/templates.py` accepts both `entra_client_id` (UAMI) and `aad_client_id` and emits both, deduped when they match. When the override is in play, both end up in the audience list.
 

@@ -28,8 +28,9 @@ Add a cumulative `graduated` profile containing:
 
 The worker uses the same Workload Identity as the core services, resolves its
 partition storage through Partition and Key Vault, and writes to the existing
-`wdms-osdu` Blob container. Key Vault stores `aad-client-id`, which the fixed
-Azure Python library converts to an OAuth `/.default` scope.
+`wdms-osdu` Blob container. Key Vault stores the ARM resource as
+`aad-client-id`, which the Azure Python library converts to the valid
+`https://management.azure.com/.default` Workload Identity scope.
 
 `core` remains the default. There is no automatic fallback from missing SPI
 images to community images.
