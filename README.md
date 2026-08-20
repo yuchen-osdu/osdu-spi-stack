@@ -4,7 +4,7 @@
 
 ### Azure-Native Software for OSDU
 
-SPI Stack deploys the OSDU platform onto Azure using the AKS Base SKU with Node Autoprovisioning and Azure PaaS services with a bootstrap + [Flux CD](https://fluxcd.io/) GitOps model. Infrastructure is provisioned via `az` CLI commands, then Flux continuously reconciles Kubernetes workloads from this Git repository.
+SPI Stack deploys the OSDU platform onto Azure using AKS Automatic and Azure PaaS services with a bootstrap + [Flux CD](https://fluxcd.io/) GitOps model. Infrastructure is provisioned via `az` CLI commands, then Flux continuously reconciles Kubernetes workloads from this Git repository.
 
 This project is currently optimized for Azure dev/test environments and is still evolving.
 
@@ -17,7 +17,7 @@ This project is currently optimized for Azure dev/test environments and is still
 ## Why SPI Stack
 
 - **Azure-native**: leverages CosmosDB, Service Bus, Storage, Key Vault, and Entra ID
-- **AKS Base + NAP**: managed Istio and Karpenter Node Autoprovisioning; pod hardening baked into the local Helm chart
+- **AKS Automatic**: managed Istio, automatic node provisioning, and managed platform safeguards
 - **GitOps-driven**: Flux continuously reconciles desired state after bootstrap
 - **Transparent**: every `az` and `kubectl` command is shown before execution
 - **Workload Identity**: no stored credentials; all Azure access via federated identity
@@ -27,21 +27,51 @@ This project is currently optimized for Azure dev/test environments and is still
 
 The only tool you need is [`uv`](https://docs.astral.sh/uv/). Each
 [GitHub Release](https://github.com/Azure/osdu-spi-stack/releases) publishes a
-versioned `spi` wheel (`spi-X.Y.Z-py3-none-any.whl`). Install a specific version
-by its wheel URL (recommended for reproducibility):
+versioned `spi` wheel (`spi-X.Y.Z-py3-none-any.whl`); you install it directly
+from its GitHub Release URL.
+
+### Install the latest release
+
+These commands always resolve the newest release, so they never need updating
+between versions. Pick the one for your shell.
+
+**macOS / Linux (bash, zsh):**
 
 ```bash
-uv tool install https://github.com/Azure/osdu-spi-stack/releases/download/v0.1.0/spi-0.1.0-py3-none-any.whl
+uv tool install "$(curl -fsSL https://api.github.com/repos/Azure/osdu-spi-stack/releases/latest \
+  | grep -o 'https://github.com/Azure/osdu-spi-stack/releases/download/[^"]*-py3-none-any.whl')"
+```
+
+**Windows (PowerShell):**
+
+```powershell
+uv tool install (irm https://api.github.com/repos/Azure/osdu-spi-stack/releases/latest).assets.where({ $_.name -like '*-py3-none-any.whl' }).browser_download_url
+```
+
+Then verify:
+
+```bash
 spi --version
 ```
 
-To install the newest release, copy its wheel URL from the
-[latest release](https://github.com/Azure/osdu-spi-stack/releases/latest) and
-substitute it above.
-
 After install the `spi` binary is on PATH; no `uv run` prefix.
 
-To upgrade in place to the newest release:
+### Install a specific version (reproducibility)
+
+To pin an exact version — for CI, reproducible environments, or bug reports —
+install its wheel URL directly (same command on every platform):
+
+```bash
+uv tool install https://github.com/Azure/osdu-spi-stack/releases/download/v0.1.0/spi-0.1.0-py3-none-any.whl
+```
+
+Copy the wheel URL for any version from that release's page under
+[Releases](https://github.com/Azure/osdu-spi-stack/releases).
+
+### Upgrade
+
+After the first install, `spi` upgrades itself — no URL needed, same on every
+platform:
 
 ```bash
 spi update           # check for a newer version and install it
@@ -50,7 +80,7 @@ spi update --force   # reinstall even if already on the latest version
 ```
 
 > **Note:** `uv tool install git+https://github.com/...@vX.Y.Z` also works,
-> but the wheel-URL form above is preferred because it preserves the
+> but the wheel-URL forms above are preferred because they preserve the
 > tag-derived version in `spi --version` reliably.
 
 ## Quick Start
@@ -86,6 +116,9 @@ spi up --env dev1 --partition opendes --partition tenant1
 # Pick an ingress mode (default: azure)
 spi up --env dev1 --ingress-mode dns --dns-zone example.com
 spi up --env dev1 --ingress-mode ip       # debug / smoke
+
+# Middleware only, no OSDU services
+spi up --env dev1 --profile minimal
 ```
 
 ### Deployment profiles
@@ -94,7 +127,6 @@ spi up --env dev1 --ingress-mode ip       # debug / smoke
 |---------|----------|--------------|
 | `core` (default) | 10 core + 3 reference services | General Azure SPI development |
 | `graduated` | Core + Wellbore DDMS + internal Wellbore worker | Wellbore domain workflows |
-| `full` | Backward-compatible alias for the implemented core stack | Reserved for future expansion |
 
 Image resolution is profile-aware and atomic. `spi up` verifies every image
 required by the selected profile before provisioning Azure resources. A
@@ -136,7 +168,7 @@ SPI Stack is **GitOps + bootstrap**, not "pure GitOps from an empty cluster."
 The CLI performs a bootstrap phase:
 
 - Provision Azure PaaS resources (CosmosDB, Service Bus, Storage, Key Vault)
-- Create an AKS Base SKU cluster (Node Autoprovisioning) with Managed Identity
+- Create an AKS Automatic 1.36 cluster with Managed Identity
 - Configure Workload Identity and RBAC role assignments
 - Bootstrap the cluster with namespaces, secrets, ConfigMap, and ServiceAccount
 - Activate the AKS native Flux extension pointing to this repo
@@ -146,7 +178,7 @@ After that handoff, **Flux owns steady-state reconciliation** and continuously c
 <details>
 <summary>Deployment phases</summary>
 
-1. **Core Infra**: Resource Group, AKS (Base SKU + NAP), Managed Identity, Key Vault, ACR
+1. **Core Infra**: Resource Group, AKS Automatic, Managed Identity, Key Vault, ACR
 2. **Data Infra**: CosmosDB (Gremlin + SQL), Service Bus, Storage Accounts
 3. **IAM**: Federated credentials, RBAC role assignments, Key Vault secrets
 4. **K8s Bootstrap**: Namespaces, StorageClasses, secrets, ConfigMap, ServiceAccount
@@ -184,11 +216,26 @@ Three namespaces, deployed in dependency order via a 7-layer Kustomization stack
 | **platform** | Middleware | Elasticsearch, Redis (TLS), PostgreSQL (Airflow), Airflow, Istio Gateway |
 | **osdu** | Services | partition, entitlements, legal, schema, storage, search, indexer, file, workflow + 3 reference services |
 
+### Profiles
+
+`--profile` selects how much of that stack Flux reconciles:
+
+| Profile | Deploys |
+|---------|---------|
+| `core` (default) | Everything above. |
+| `graduated` | `core` plus the public Wellbore DDMS API and its internal worker. |
+| `minimal` | `foundation` and `platform` only — operators, cert-manager, trust-manager, Gateway, Elasticsearch, Redis, PostgreSQL, Airflow. No OSDU services. |
+| `bare` | Nothing; infra plus activated GitOps only. Flux reconciles empty stack and ingress trees. The CLI bootstrap seeds namespaces, secrets, the `osdu-config` ConfigMap, and the Workload Identity ServiceAccount. |
+
+Use `minimal` when you are working on the middleware itself and the OSDU services would only add deploy time. The middleware layers are identical between profiles, so what you validate on `minimal` holds on `core`.
+
+Use `bare` for Bicep, Workload Identity, or RBAC iteration, or for bring-your-own workloads. Re-run `spi up` with `minimal` or `core` to add workloads later.
+
 ### Azure PaaS Resources
 
 | Resource | Purpose |
 |----------|---------|
-| AKS (Base SKU + NAP) | Kubernetes with managed Istio and Karpenter Node Autoprovisioning |
+| AKS Automatic | Kubernetes 1.36 with managed Istio and automatic node provisioning |
 | CosmosDB Gremlin | Entitlements graph |
 | CosmosDB SQL | OSDU operational data (per partition) |
 | Service Bus | Async messaging (per partition, 14 topics) |
@@ -224,7 +271,12 @@ Commands:
   reconcile  Force Flux to re-sync from Git               [--suspend] [--resume] [--refresh-images]
 ```
 
-Use `--dry-run` on `spi up` to preview the Bicep changes (`az deployment group what-if`) before any Azure resources are created beyond the resource group. `--ingress-mode` defaults to `azure`; the other supported modes are `dns` (per-service hostnames on an owned Azure DNS zone) and `ip` (bare IP, debug only). Service images default to each public `yuchen-osdu` package's `main-snapshot`, which is immediately pinned to an immutable digest. Use `--image-tag` for a coordinated release tag, `--image-ref` for advanced multi-repository feature validation, or `--image-source community` for the OSDU GitLab fallback. `--refresh-images` re-resolves the configured selector and reconciles the service Kustomizations.
+Use `--dry-run` on `spi up` to preview the Bicep changes (`az deployment group what-if`) before any Azure resources are created beyond the resource group. `--ingress-mode` defaults to `azure`; the other supported modes are `dns` (per-service hostnames on an owned Azure DNS zone) and `ip` (bare IP, debug only). Service images default to each public `yuchen-osdu` package's `main-snapshot`, which is immediately pinned to an immutable digest. Use `--image-tag` for a coordinated release tag or `--image-ref` for advanced
+multi-repository feature validation. `--image-source community` is an explicit
+whole-fleet compatibility selection, not an automatic fallback; selected
+community builds must support the Entra-only Azure data plane.
+`--refresh-images` re-resolves the configured selector and reconciles the
+service Kustomizations.
 
 
 ## Documentation

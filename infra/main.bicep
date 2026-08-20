@@ -9,10 +9,9 @@
 // partition, common and per-partition Storage, and the scoped RBAC
 // role assignments that bind the identity to the above.
 //
-// Key Vault secret VALUES are also declared here: static metadata plus
-// ``listKeys()`` on local-auth-enabled partition Cosmos accounts is resolved at deploy time, so the CLI
-// no longer has to run ``az cosmosdb keys list`` + ``az keyvault secret set``
-// post-deploy.
+// Key Vault endpoint metadata and disabled compatibility placeholders are
+// declared here. Azure data-plane access uses Entra Workload Identity; the CLI
+// writes only the runtime middleware secrets after deployment.
 //
 // Not in scope of this template:
 //   - AKS Automatic cluster + managed Istio -- declared separately in
@@ -43,7 +42,7 @@ targetScope = 'resourceGroup'
 param envName string = ''
 
 @description('Azure region for all resources.')
-param location string = 'eastus2'
+param location string = 'westus3'
 
 @description('User-assigned managed identity name.')
 param identityName string
@@ -239,8 +238,7 @@ module externalDnsRoleModule 'modules/external-dns-role.bicep' = if (!empty(dnsZ
 // 2.x web SDK. core-lib-azure >= 2.5.6 ships LogCustomDimensionFilter, which
 // reads the App Insights request-telemetry context on every request with no
 // null guard -- if App Insights is not initialized the service returns HTTP 500
-// on every request. AKS Automatic enabled App Insights by default; AKS Base
-// does not. Operators can provision it here with `spi up
+// on every request. Operators can provision it here with `spi up
 // --application-insights`; the CLI otherwise writes disabled/dummy agent
 // configuration into the osdu-config ConfigMap that every service reads.
 
@@ -270,9 +268,9 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (enableAppl
 // Key Vault secret values (declarative; replaces post-deploy CLI writes)
 // ──────────────────────────────────────────────────────────
 //
-// ``existing`` references let us call ``listKeys()`` on Cosmos accounts
-// provisioned inside sub-modules and write the result directly as a KV
-// secret. Splitting the declarations by "pattern" (static vs per-partition
+// ``existing`` references resolve endpoints and other static metadata on
+// resources provisioned inside sub-modules and write them directly as KV
+// secrets. Splitting the declarations by "pattern" (static vs per-partition
 // cosmos/storage/sb) keeps Bicep's array-loop semantics simple and makes
 // the deployment history self-describing without a ``flatten()`` dance.
 //

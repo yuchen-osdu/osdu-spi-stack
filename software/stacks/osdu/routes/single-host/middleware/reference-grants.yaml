@@ -1,0 +1,29 @@
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: osdu-to-kibana
+  namespace: platform
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: osdu
+  to:
+    - group: ""
+      kind: Service
+      name: kibana-kb-http
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: osdu-to-airflow
+  namespace: platform
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: osdu
+  to:
+    - group: ""
+      kind: Service
+      name: airflow-api-server

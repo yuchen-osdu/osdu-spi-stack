@@ -34,7 +34,7 @@ The sequence inside `deploy.deploy_azure()` is:
 8. **`infra/main.bicep` deploy.** Identity, RBAC, Key Vault (with Bicep-resolved secrets), ACR, Cosmos DB Gremlin, per-partition (Cosmos SQL + Service Bus + Storage), common Storage, optional `external-dns-*` for `dns` ingress. (The VNet is provisioned by `aks.bicep`, not here.)
 9. **K8s bootstrap.** `kubectl apply` for namespaces, StorageClasses, the middleware secret seed (`spi-secrets`) plus the `platform`/`osdu` credential Secrets, `workload-identity-sa` (in `platform` and `osdu`), the `osdu-config` ConfigMap, the `spi-ingress-config` ConfigMap, the `osdu-image-lock` ConfigMap (resolved live from the OSDU community registry per [ADR-017](../decisions/017-osdu-image-lock.md)), the `spi-init-values` ConfigMap (partitions plus creator identity), and the Istio JWT projection resources from [ADR-016](../decisions/016-istio-jwt-projection.md).
 10. **`infra/flux.bicep` deploy.** Activates the AKS Flux extension and creates the `fluxConfigurations` resource with two top-level Kustomizations: `stack` (pointing at `./software/stacks/osdu/profiles/<profile>`) and `ingress` (pointing at `./software/stacks/osdu/ingress/<mode>`).
-11. **Runtime Key Vault secrets.** The CLI writes the in-cluster middleware secrets to Key Vault (per-partition Elasticsearch credentials, Redis hostname/password) directly from the generated seed passwords — no wait for middleware Ready, since the values are known once infra is up. See [ADR-010](../decisions/010-keyvault-secret-management.md).
+11. **Runtime Key Vault secrets.** The CLI writes the in-cluster middleware secrets to Key Vault (per-partition Elasticsearch credentials, Redis hostname/password) directly from the generated seed passwords, with no wait for middleware Ready, since the values are known once infra is up. See [ADR-010](../decisions/010-keyvault-secret-management.md).
 12. **Suspend pin.** `_pin_gitops_source()` waits up to 120s for `gitrepository/osdu-spi-stack-system` to reach `Ready=True`, then `kubectl patch spec.suspend: true`. See [ADR-014](../decisions/014-suspend-gitops-after-deploy.md).
 13. **Next-steps panel.** The CLI prints `spi status --watch`, `spi info`, and the matching `spi down` command with flags pre-filled.
 
@@ -97,7 +97,7 @@ spi status --watch
 The dashboard groups Kustomizations by layer, shows HelmRelease status, the schema-load Job, and the per-partition init Jobs. Anything stuck at `False` for more than a few minutes points to the layer where the chain is blocked.
 
 ```bash
-kubectl get kustomizations -n flux-system --watch
+kubectl get kustomizations -n osdu-flux --watch
 ```
 
 The raw Flux view if you need to confirm exact condition messages.
@@ -136,7 +136,7 @@ Milestones to watch for in the CLI output:
 1. **"Resource group spi-stack-dev1 ready"** -- Phase 1 step 3.
 2. **"AKS deployment complete"** -- Phase 1 step 5. The cluster exists.
 3. **"PaaS deployment complete"** -- Phase 1 step 8. Cosmos, Service Bus, Storage, Key Vault, ACR are live.
-4. **"Flux extension activated"** -- Phase 1 step 10. Flux is running in `flux-system`.
+4. **"Flux extension activated"** -- Phase 1 step 10. Flux is running in `flux-system`; SPI GitOps objects reconcile in `osdu-flux`.
 5. **"Writing runtime KV secrets"** -- Phase 1 step 11. Redis/Elasticsearch credentials are written to Key Vault from the seed.
 6. **"GitRepository suspended"** -- Phase 1 step 12. CLI is about to exit.
 

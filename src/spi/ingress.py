@@ -24,14 +24,13 @@ Owns every decision that depends on the ingress mode:
 
 import json
 import os
-import subprocess
 from typing import Optional
 
 import typer
 
 from .config import Config, IngressMode
 from .console import console, display_result, display_yaml
-from .shell import kubectl_apply_yaml, kubectl_json, resolve_command
+from .shell import kubectl_apply_yaml, kubectl_json, run_command, run_process
 
 ISTIO_INGRESS_NAMESPACE = "aks-istio-ingress"
 # Istio with gatewayClassName=istio provisions a LoadBalancer Service
@@ -64,8 +63,8 @@ def discover_dns_zone() -> tuple:
     Lists zones; returns the single one if exactly one exists. Raises
     typer.Exit on zero or multiple (with an instructive message).
     """
-    result = subprocess.run(
-        resolve_command(["az", "network", "dns", "zone", "list", "-o", "json"]),
+    result = run_process(
+        ["az", "network", "dns", "zone", "list", "-o", "json"],
         capture_output=True,
         text=True,
     )
@@ -142,7 +141,11 @@ def resolve_post_deploy_inputs(config: Config) -> None:
 
 
 def create_ingress_config(
-    config: Config, external_dns_client_id: str, tenant_id: str, gateway_ip: str
+    config: Config,
+    external_dns_client_id: str,
+    tenant_id: str,
+    gateway_ip: str,
+    istio_revision: str,
 ) -> None:
     """Write the spi-ingress-config ConfigMap in osdu-flux.
 
@@ -157,6 +160,7 @@ def create_ingress_config(
         "GATEWAY_IP": gateway_ip or "",
         "TXT_OWNER_ID": config.cluster_name,
         "AZURE_TENANT_ID": tenant_id or "",
+        "ISTIO_REVISION": istio_revision,
     }
 
     if config.ingress_mode == IngressMode.AZURE:
@@ -192,3 +196,41 @@ def create_ingress_config(
     display_yaml(yaml_content, "ConfigMap: spi-ingress-config")
     kubectl_apply_yaml(yaml_content, "apply spi-ingress-config ConfigMap")
     display_result("spi-ingress-config ConfigMap created")
+
+
+def ensure_istio_revision_published() -> str:
+    """Guarantee spi-ingress-config carries the live managed Istio revision.
+
+    Flux substitutes an undefined variable with an empty string, so a
+    ConfigMap written before the revision was published would make Flux apply
+    an empty ``istio.io/rev`` label and silently drop sidecar injection.
+    """
+    from .bootstrap import detect_istio_revision
+
+    data = kubectl_json(["get", "configmap", "spi-ingress-config", "-n", "osdu-flux"])
+    if not data:
+        raise RuntimeError(
+            "spi-ingress-config was not found in osdu-flux. Run 'spi up' before reconciling."
+        )
+
+    existing = (data.get("data") or {}).get("ISTIO_REVISION", "")
+    if existing:
+        return existing
+
+    revision = detect_istio_revision()
+    console.print(f"  [info]Publishing managed Istio revision: {revision}[/info]")
+    run_command(
+        [
+            "kubectl",
+            "patch",
+            "configmap",
+            "spi-ingress-config",
+            "-n",
+            "osdu-flux",
+            "--type=merge",
+            "-p",
+            json.dumps({"data": {"ISTIO_REVISION": revision}}),
+        ],
+        description="Publish ISTIO_REVISION in spi-ingress-config",
+    )
+    return revision

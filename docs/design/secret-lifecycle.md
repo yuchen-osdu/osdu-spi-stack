@@ -12,7 +12,7 @@
 |---|---|---|---|
 | Azure PaaS credentials | Cosmos DB, Service Bus, Storage, Key Vault | Entra ID (token broker) | Workload Identity; no stored material |
 | PaaS metadata + secret values | Cosmos endpoints, Storage account names, Service Bus namespace, tenant ID | Azure Key Vault | SDK reads via Workload Identity (or CSI) |
-| In-cluster middleware passwords | Redis, Elasticsearch, PostgreSQL (Airflow) | Kubernetes Secrets in `platform` / `osdu` | CLI-generated seed (`spi-secrets`), consumed by the operators |
+| In-cluster middleware secrets | Redis, Elasticsearch, PostgreSQL (Airflow), Airflow signing keys | Kubernetes Secrets in `platform` / `osdu` | CLI-generated seed (`spi-secrets`), consumed by the operators |
 
 This split is the decision in [ADR-010](../decisions/010-keyvault-secret-management.md). The next sections walk each class.
 
@@ -35,16 +35,18 @@ Most KV secrets are declared in Bicep, where the source value is Azure itself. T
 | `tenant-id`, `subscription-id`, `osdu-identity-id`, `keyvault-uri`, `system-storage` | `tenant()` / `subscription()` / resource outputs | `main.bicep` |
 | `graph-db-endpoint` | Cosmos Gremlin endpoint | `main.bicep` |
 | `{p}-cosmos-endpoint`, `{p}-storage`, `{p}-sb-namespace` | Resource outputs | `main.bicep` |
-| `{p}-cosmos-primary-key`, `{p}-storage-account-blob-endpoint` | `listKeys()` / resource `.properties` | `partition.bicep` |
-| `{p}-cosmos-connection`, `{p}-storage-account-key`, `{p}-sb-connection` | `"DISABLED"` placeholder | `partition.bicep` |
+| `{p}-storage-account-blob-endpoint` | Resource `.properties` | `partition.bicep` |
+| `{p}-cosmos-primary-key`, `{p}-cosmos-connection`, `{p}-storage-account-key`, `{p}-sb-connection` | `"DISABLED"` compatibility placeholder | `partition.bicep` |
 
 Bicep writes are atomic with the rest of the deploy: the KV secret either lands with the resource or the whole deploy fails. ARM is idempotent on secret writes (a re-deploy with the same value is a no-op).
 
-The Gremlin account intentionally has local authentication disabled. SPI Stack does not write `graph-db-primary-key`; Entitlements must use a Microsoft Entra token with the Gremlin Data Contributor assignment declared in `cosmos-gremlin.bicep`.
+Cosmos and Service Bus local authentication is disabled. SPI Stack does not
+write usable data-plane keys; services authenticate with Microsoft Entra
+Workload Identity and the data-plane assignments declared in Bicep.
 
 ### Writer B: the CLI (post-handoff)
 
-A small set of KV secrets covers the in-cluster middleware. The CLI knows all of these as soon as infra is up: the passwords come from the generated seed (`spi-secrets`, see Class 3) and the endpoints are the fixed in-cluster service DNS names.
+A small set of KV secrets covers the in-cluster middleware. The CLI knows all of these as soon as infra is up: the values come from the generated seed (`spi-secrets`, see Class 3) and the endpoints are the fixed in-cluster service DNS names.
 
 | Secret | Source |
 |---|---|
@@ -59,13 +61,14 @@ Re-running `spi up` against a live cluster re-runs these writes idempotently; KV
 
 Services read their KV secrets via the Azure SDK using Workload Identity. The OSDU `partition-azure` provider auto-prefixes the partition id onto every `sensitive: true` value at read time, so the partition record's `partition.json` template holds **bare** suffixes (`cosmos-endpoint`, not `opendes-cosmos-endpoint`). The ADR-015 amendment that originally got this wrong is now folded into the ADR body; the chart template uses bare values.
 
-## Class 3: In-cluster middleware passwords
+## Class 3: In-cluster middleware secrets
 
-The CLI generates all three middleware passwords (`src/spi/secrets.py`, `_generate_password`), stores them in a seed Secret `spi-secrets` in `flux-system`, and pre-creates the Kubernetes Secrets the operators consume. The operators read these pre-created Secrets rather than minting their own:
+The CLI generates the middleware passwords and Airflow signing keys (`src/spi/secrets.py`), stores them in a seed Secret `spi-secrets` in `osdu-flux`, and pre-creates the Kubernetes Secrets the operators consume. The operators read these pre-created Secrets rather than minting their own:
 
 - **Elasticsearch.** The CLI creates `elasticsearch-es-elastic-user` in `platform`; ECK adopts it as the elastic-user credential.
 - **Redis.** The CLI creates `redis-credentials` in `platform`; the Bitnami chart consumes it via `existingSecret` (`software/components/redis/release.yaml`).
 - **PostgreSQL (Airflow).** The CLI creates `postgresql-superuser-credentials` and `postgresql-airflow-credentials` in `platform`; CNPG consumes them via `superuserSecret` / the owner secret.
+- **Airflow.** The CLI creates `airflow-metadata-secret` (the SQLAlchemy connection string) and `airflow-api-credentials` (admin password plus the `api-secret-key`, `jwt-secret`, and `fernet-key` signing material) in `platform`. The chart consumes the signing keys via `apiSecretKeySecretName` / `jwtSecretName` / `fernetKeySecretName`; seeding them keeps every key stable across Flux reconciles and inside CLI ownership (ADR-026).
 
 The same generated passwords are mirrored into Key Vault by the CLI (Writer B above), so OSDU services in `osdu` read Elasticsearch and Redis credentials through the same Workload Identity path as everything else.
 
@@ -137,7 +140,7 @@ The fact that the partition record value is the bare suffix and the KV secret na
 - `infra/main.bicep` -- account-wide static KV secrets
 - `infra/modules/keyvault.bicep` -- KV resource only
 - `infra/modules/partition.bicep` -- per-partition KV secrets
-- `src/spi/secrets.py` -- generates middleware passwords (seed + `platform`/`osdu` K8s Secrets)
+- `src/spi/secrets.py` -- generates middleware secrets (seed + `platform`/`osdu` K8s Secrets)
 - `src/spi/deploy.py` -- runtime KV writes (`_write_keyvault_bootstrap_secrets`), `osdu-config` ConfigMap, and workload-identity ServiceAccounts
 - `software/stacks/osdu/bootstrap/ca-bundles.yaml` -- trust-manager Bundles + Redis DestinationRule
 - `software/charts/osdu-spi-service/templates/deployment.yaml` -- `import-ca-certs` init container

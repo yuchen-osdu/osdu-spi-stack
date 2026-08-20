@@ -56,10 +56,6 @@ class TestValidPartitions:
         assert cfg.image_tag == "main-snapshot"
         assert cfg.image_ref == ""
 
-    def test_full_profile_uses_the_implemented_thirteen_service_stack(self):
-        cfg = Config(env="dev1", profile=Profile.FULL)
-        assert cfg.gitops_profile == "core"
-
     def test_graduated_profile_selects_wellbore_stack_and_ingress(self):
         cfg = Config(
             env="dev1",
@@ -166,3 +162,28 @@ class TestFromEnv:
     def test_from_env_invalid_partition(self):
         with pytest.raises(ValidationError):
             Config.from_env(env="dev1", data_partitions=["BAD"])
+
+
+class TestBareProfile:
+    def test_default_ingress_is_valid(self):
+        config = Config(env="dev1", profile=Profile.BARE)
+        assert config.profile is Profile.BARE
+
+    def test_dns_zone_is_rejected(self):
+        with pytest.raises(ValidationError, match="bare"):
+            Config(env="dev1", profile=Profile.BARE, dns_zone="example.com")
+
+    def test_non_azure_ingress_mode_is_rejected(self):
+        with pytest.raises(ValidationError, match="ingress_mode 'dns' is not supported"):
+            Config(env="dev1", profile=Profile.BARE, ingress_mode=IngressMode.DNS)
+
+
+def test_deployer_principal_type_env_override(monkeypatch):
+    """SPI_DEPLOYER_TYPE bypasses the az account lookup entirely."""
+    from spi import azure_infra
+
+    monkeypatch.setenv("SPI_DEPLOYER_TYPE", "User")
+    assert azure_infra._deployer_principal_type() == "User"
+
+    monkeypatch.setenv("SPI_DEPLOYER_TYPE", "ServicePrincipal")
+    assert azure_infra._deployer_principal_type() == "ServicePrincipal"

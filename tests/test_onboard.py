@@ -307,8 +307,8 @@ def test_disabling_profile_removes_repo_federated_credentials(monkeypatch):
 
 def test_repo_variable_lookup_treats_only_404_as_missing(monkeypatch):
     monkeypatch.setattr(
-        onboard_module.subprocess,
-        "run",
+        onboard_module,
+        "run_process",
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=1, stdout="", stderr="gh: variable not found (HTTP 404)"
         ),
@@ -318,8 +318,8 @@ def test_repo_variable_lookup_treats_only_404_as_missing(monkeypatch):
 
 def test_repo_variable_lookup_surfaces_non_404_errors(monkeypatch):
     monkeypatch.setattr(
-        onboard_module.subprocess,
-        "run",
+        onboard_module,
+        "run_process",
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=1, stdout="", stderr="gh: service unavailable (HTTP 503)"
         ),
@@ -341,8 +341,8 @@ def test_repo_variable_delete_attempts_empty_values_and_ignores_404(monkeypatch)
         ]
     )
     monkeypatch.setattr(
-        onboard_module.subprocess,
-        "run",
+        onboard_module,
+        "run_process",
         lambda *args, **_kwargs: calls.append(args[0]) or next(responses),
     )
 

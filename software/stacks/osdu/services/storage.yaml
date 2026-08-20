@@ -29,7 +29,7 @@ spec:
       digest: "${STORAGE_IMAGE_DIGEST}"
     redisTls: true
     nodeSelector:
-      agentpool: osdu
+      spi-pool: osdu
     tolerations:
       - key: workload
         operator: Equal

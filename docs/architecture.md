@@ -13,7 +13,7 @@ SPI Stack deploys the OSDU platform on Azure with a hybrid provisioning model: B
 
 SPI Stack has three control planes working together:
 
-1. **The `spi` CLI** bootstraps the environment. It creates the resource group, submits Bicep deployments for the cluster (`infra/aks.bicep`) and the rest of the Azure PaaS surface (`infra/main.bicep`), bootstraps the cluster (namespaces, StorageClasses, ServiceAccount, `osdu-config` ConfigMap), submits a third Bicep deployment (`infra/flux.bicep`) that activates the AKS Flux extension, then writes a small set of runtime Key Vault secrets once in-cluster middleware is Ready.
+1. **The `spi` CLI** bootstraps the environment. It creates the resource group, submits the AKS Automatic cluster deployment (`infra/aks.bicep`) and the Azure PaaS surface (`infra/main.bicep`), bootstraps the cluster (namespaces, StorageClasses, ServiceAccount, `osdu-config` ConfigMap), submits `infra/flux.bicep` to activate the AKS Flux extension, then writes the runtime Key Vault secrets.
 2. **Flux CD** manages desired-state reconciliation. It watches this Git repository and the OCI chart registry, and continuously converges the cluster to match.
 3. **Kubernetes operators** (ECK, CNPG, cert-manager, trust-manager) manage the lifecycle of individual middleware systems beneath the Flux layer.
 
@@ -51,7 +51,7 @@ The deployment pipeline has two phases: the CLI's Bicep-driven bootstrap (top) a
 | Phase | Mechanism | What |
 |-------|-----------|------|
 | 1. Resource Group | `az group create` | Resource group for the environment |
-| 2. AKS + managed Istio | Raw Bicep (`infra/aks.bicep`) | AKS Base SKU cluster with Node Autoprovisioning (NAP / Karpenter), BYO VNet + NAT gateway, managed Istio |
+| 2. AKS + managed Istio | Raw Bicep (`infra/aks.bicep`) | AKS Automatic 1.36, BYO VNet + NAT gateway, managed system pools, automatic node provisioning, managed Istio |
 | 3. Azure PaaS | Bicep (`infra/main.bicep`) | Managed Identity + federated credentials, Key Vault + static metadata secrets, ACR, Cosmos DB Gremlin + per-partition SQL, per-partition Service Bus (topics + subscriptions), common + per-partition Storage, RBAC role assignments |
 | 4. K8s bootstrap | `kubectl apply` | Namespaces, StorageClasses, `workload-identity-sa`, `osdu-config` ConfigMap, `spi-ingress-config` ConfigMap |
 | 5. Flux activation | Bicep (`infra/flux.bicep`) | AKS Flux extension + `fluxConfigurations` with two Kustomizations (stack profile, ingress mode) |
@@ -71,7 +71,7 @@ Three application namespaces:
 | **platform** | Middleware and Gateway | No | Elasticsearch, Redis, PostgreSQL (Airflow), Airflow, Istio Gateway |
 | **osdu** | OSDU services | Yes | OSDU service deployments, schema-load Job, `osdu-config`, `workload-identity-sa` |
 
-The `flux-system` namespace is managed by the AKS Flux extension and hosts Flux controllers, the `GitRepository`, and the two top-level Kustomizations. `aks-istio-system` and `aks-istio-ingress` are owned by AKS. See [ADR-006](decisions/006-three-namespace-model.md).
+The `flux-system` namespace is managed by the AKS Flux extension and hosts the Flux controllers. SPI-owned GitOps objects (the `GitRepository`, Kustomizations, and bootstrap ConfigMaps/Secrets) live in the dedicated `osdu-flux` namespace (see [ADR-020](decisions/020-osdu-flux-gitops-namespace.md)). `aks-istio-system` and `aks-istio-ingress` are owned by AKS. See [ADR-006](decisions/006-three-namespace-model.md).
 
 ### Layered dependency model
 
@@ -81,7 +81,7 @@ The core profile (`software/stacks/osdu/profiles/core/stack.yaml`) defines seven
 |-------|------|------------|
 | 0a | Namespaces | none |
 | 0b | Karpenter NodePools | 0a |
-| 1 | Operators (ECK, CNPG), cert-manager, trust-manager, Gateway | 0a (trust-manager on cert-manager) |
+| 1 | Operators (ECK, CNPG), cert-manager, trust-manager | 0a (trust-manager on cert-manager) |
 | 2 | Middleware (Elasticsearch, Redis, PostgreSQL) | 1 + 0b |
 | 3 | Airflow | 2 (PostgreSQL) |
 | 4a | OSDU configuration placeholder | 0a |
@@ -93,37 +93,33 @@ The core profile (`software/stacks/osdu/profiles/core/stack.yaml`) defines seven
 | 7 | Graduated services (Wellbore DDMS + worker) | 6 |
 
 The ingress profile (`software/stacks/osdu/ingress/<mode>/`) adds
-Kustomizations at Layer 1 (cert issuers, ExternalDNS in `dns` mode, TLS
-overlays) and Layer 6 (HTTPRoutes). A graduated deployment selects the
+Kustomizations at Layer 1 (Gateway, cert issuers, ExternalDNS in `dns` mode)
+and Layer 6 (HTTPRoutes). A graduated deployment selects the
 corresponding `<mode>-graduated` overlay, which adds the public Wellbore route
 at Layer 7 while leaving the worker internal. See
 [ADR-007](decisions/007-layered-kustomization-ordering.md),
 [ADR-012](decisions/012-ingress-profiles.md), and
-[ADR-026](decisions/026-graduated-wellbore-profile.md).
+[ADR-039](decisions/039-graduated-wellbore-profile.md).
 
-## AKS Compute (Base SKU + Node Autoprovisioning)
+## AKS Compute (Automatic)
 
-SPI Stack runs the AKS Base SKU with Node Autoprovisioning. It previously used
-AKS Automatic; [ADR-021](decisions/021-aks-base-node-autoprovisioning.md)
-supersedes [ADR-002](decisions/002-aks-automatic.md) because Automatic began
-enforcing a non-bypassable guardrail that blocks the
-`MutatingWebhookConfiguration` objects cert-manager and CloudNativePG require.
-The Base SKU keeps the features the stack depends on, wired explicitly:
+SPI Stack runs AKS Automatic on Kubernetes 1.36. That version supports the
+mutating webhooks required by cert-manager and CloudNativePG while retaining
+the managed platform features the stack depends on:
 
 | Feature | What it does |
 |---------|-------------|
 | **Karpenter (NAP)** | Node Auto-Provisioning; user-declared NodePool CRs at Layer 0b |
 | **Managed Istio** | Service mesh with mTLS, sidecar injection, ingress gateway |
-| **Workload Identity** | OIDC issuer + federated credentials (explicit on Base) |
-| **Azure RBAC for Kubernetes** | Cluster authorization (explicit on Base) |
+| **Workload Identity** | OIDC issuer + federated credentials |
+| **Azure RBAC for Kubernetes** | Cluster authorization |
 | **Cilium CNI** | eBPF networking in overlay mode |
 | **Managed Prometheus / Container Insights** | Cluster metrics and logs to Azure Monitor / Log Analytics |
-| **Application Insights** | Optional per-service request, dependency, and exception telemetry (`spi up --application-insights`; [ADR-023](decisions/023-application-insights-telemetry.md)) |
+| **Application Insights** | Optional per-service request, dependency, and exception telemetry (`spi up --application-insights`; [ADR-023](decisions/023-optional-application-insights.md)) |
 
-Deployment Safeguards were an Automatic-only feature and are no longer
-cluster-enforced. Compliance does not regress: the local `osdu-spi-service`
-Helm chart bakes the same pod hardening into its templates so services comply
-at authoring time:
+AKS Deployment Safeguards enforce the platform baseline, and the local
+`osdu-spi-service` Helm chart also bakes the same pod hardening into its
+templates:
 
 - `securityContext.runAsNonRoot: true`
 - `securityContext.seccompProfile.type: RuntimeDefault`
@@ -132,7 +128,8 @@ at authoring time:
 - Resource requests and limits defined
 - Liveness and readiness probes defined
 
-See [ADR-021](decisions/021-aks-base-node-autoprovisioning.md) and
+See [ADR-019](decisions/019-kubernetes-136-minimum.md),
+[ADR-040](decisions/040-aks-automatic-only.md), and
 [ADR-004](decisions/004-local-helm-chart-safeguards.md).
 
 ## Ingress Profiles
@@ -271,7 +268,7 @@ Created by the CLI during K8s bootstrap and mounted into every OSDU service via 
 | `DOMAIN` | Ingress hostname or IP (mode-dependent) |
 | `DATA_PARTITION` | Primary partition name |
 | `AZURE_TENANT_ID` | Entra ID tenant |
-| `AAD_CLIENT_ID` | Managed identity client ID |
+| `AAD_CLIENT_ID` | Service-to-service token audience (ARM by default) |
 | `KEYVAULT_URI` | Key Vault URI |
 | `COSMOSDB_ENDPOINT` | Cosmos DB SQL endpoint |
 | `STORAGE_ACCOUNT_NAME` | Common Storage account |
@@ -287,7 +284,14 @@ Created by the CLI during K8s bootstrap and mounted into every OSDU service via 
 | PaaS metadata and secret values | Azure Key Vault | SDK reads under Workload Identity (or CSI) |
 | In-cluster middleware passwords | Kubernetes Secrets in `platform`/`osdu` | CLI-generated once per environment |
 
-Most Key Vault secret values are declared in `infra/main.bicep` and resolved at deploy time (including `listKeys()` for local-auth-enabled partition Cosmos accounts). The Gremlin account disables local auth and uses Workload Identity plus a Gremlin Data Contributor assignment instead of a stored graph key. A small set of runtime secrets that depend on in-cluster seed passwords (Elasticsearch and Redis credentials, `tbl-storage-endpoint`) are written post-handoff by the CLI. See [ADR-010](decisions/010-keyvault-secret-management.md).
+Key Vault endpoint metadata and compatibility placeholders are declared in
+`infra/main.bicep` and its modules. Cosmos and Service Bus local authentication
+is disabled, so their key-shaped secrets contain `DISABLED` rather than
+credential material. Runtime secrets that depend on in-cluster seed passwords
+(Elasticsearch and Redis credentials, `tbl-storage-endpoint`) are written
+post-handoff by the CLI. See
+[ADR-010](decisions/010-keyvault-secret-management.md) and
+[ADR-027](decisions/027-entra-only-data-plane.md).
 
 ### CA distribution and Redis mTLS
 
@@ -299,7 +303,7 @@ Redis and Elasticsearch TLS CAs live as Secrets in `platform`. trust-manager (in
 
 | Resource | Purpose | Sizing |
 |----------|---------|--------|
-| AKS (Base SKU + NAP) | Compute | Karpenter-managed |
+| AKS Automatic | Compute | Managed platform + Karpenter |
 | Cosmos DB Gremlin | Entitlements graph | 4000 RU/s autoscale |
 | Key Vault | Secret management | Standard, RBAC-enabled |
 | ACR | Container images | Basic SKU |
@@ -322,4 +326,4 @@ Redis and Elasticsearch TLS CAs live as Secrets in `platform`. trust-manager (in
 | Elasticsearch | 3 nodes | 128 GiB each | Search and indexing |
 | Redis | 1 master + 2 replicas | 8 GiB each | Caching (TLS) |
 | PostgreSQL | 3 instances (CNPG) | 10 GiB + 4 GiB WAL | Airflow metadata |
-| Airflow | Webserver + Scheduler + Triggerer | n/a | Workflow orchestration |
+| Airflow | API server + Scheduler + DAG processor + Triggerer | n/a | Workflow orchestration |

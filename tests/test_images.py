@@ -13,8 +13,12 @@
 # limitations under the License.
 
 from datetime import datetime, timezone
+from pathlib import Path
 
-from spi import images
+import pytest
+
+from spi import deploy, images
+from spi.config import Profile
 from spi.images import (
     ImageRegistryEntry,
     ImageSource,
@@ -30,6 +34,11 @@ WELLBORE_IMAGES = {
     "wellbore-domain-services",
     "wellbore-domain-services-worker",
 }
+SCHEMA_LOAD_IMAGE = (
+    "community.opengroup.org:5555/osdu/platform/system/schema-service/"
+    "schema-service-schema-load-master"
+    "@sha256:c4596cdfc5510116c2777d575fad661a397b2fce09132af4980c3d99a461c66c"
+)
 
 
 def test_image_sets_are_profile_aware():
@@ -40,6 +49,45 @@ def test_image_sets_are_profile_aware():
     assert graduated == core | WELLBORE_IMAGES
     assert len(core) == 13
     assert len(graduated) == 15
+
+
+def test_schema_load_uses_available_immutable_digest():
+    job = (
+        Path(__file__).parents[1] / "software" / "stacks" / "osdu" / "schema-load" / "job.yaml"
+    ).read_text(encoding="utf-8")
+
+    assert f"image: {SCHEMA_LOAD_IMAGE}" in job
+
+
+def _image_lock_data(profile: str) -> dict[str, str]:
+    data: dict[str, str] = {"IMAGE_PROFILE": profile}
+    for name in image_lock_names(profile):
+        key = images.image_lock_key(name)
+        data[f"{key}_IMAGE_REPOSITORY"] = f"ghcr.io/yuchen-osdu/{name}"
+        data[f"{key}_IMAGE_TAG"] = "main-snapshot"
+        data[f"{key}_IMAGE_DIGEST"] = "sha256:" + ("a" * 64)
+    return data
+
+
+def test_no_refresh_rejects_core_lock_for_graduated_profile(monkeypatch):
+    monkeypatch.setattr(
+        deploy,
+        "kubectl_json",
+        lambda _args: {"data": _image_lock_data("core")},
+    )
+
+    with pytest.raises(RuntimeError, match="does not cover profile 'graduated'"):
+        deploy._validate_existing_image_lock(Profile.GRADUATED)
+
+
+def test_no_refresh_accepts_complete_graduated_lock(monkeypatch):
+    monkeypatch.setattr(
+        deploy,
+        "kubectl_json",
+        lambda _args: {"data": _image_lock_data("graduated")},
+    )
+
+    deploy._validate_existing_image_lock(Profile.GRADUATED)
 
 
 def test_resolve_image_selects_newest_immutable_sha(monkeypatch):

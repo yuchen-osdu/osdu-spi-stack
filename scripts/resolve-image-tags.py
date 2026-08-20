@@ -45,7 +45,7 @@ from spi.images import (  # noqa: E402
 )
 
 
-def update_yaml_file(filepath: Path, repository: str, tag: str) -> bool:
+def update_yaml_file(filepath: Path, repository: str, tag: str, digest: str = "") -> bool:
     """Update the image reference in a YAML file.
 
     Handles two formats:
@@ -54,7 +54,7 @@ def update_yaml_file(filepath: Path, repository: str, tag: str) -> bool:
              tag: "sha"
          (used by software/stacks/osdu/services/*.yaml)
       2. Kubernetes core Pod spec combined form:
-             image: "foo/bar:sha"
+             image: "foo/bar@sha256:digest"
          (used by the schema-load Job at software/stacks/osdu/schema-load/job.yaml)
     """
     content = filepath.read_text()
@@ -81,9 +81,10 @@ def update_yaml_file(filepath: Path, repository: str, tag: str) -> bool:
     # same repository we are updating, so this does not accidentally touch
     # unrelated image fields (istio-proxy, init containers, etc).
     repo_escaped = re.escape(repository)
+    immutable_reference = f"{repository}@{digest}" if digest else f"{repository}:{tag}"
     new_content = re.sub(
-        rf'(^\s*image:\s*)(["\']?){repo_escaped}:[^\s"\']+(["\']?)(\s*)$',
-        rf"\g<1>\g<2>{repository}:{tag}\g<3>\g<4>",
+        rf'(^\s*image:\s*)(["\']?){repo_escaped}(?::|@)[^\s"\']+(["\']?)(\s*)$',
+        rf"\g<1>\g<2>{immutable_reference}\g<3>\g<4>",
         new_content,
         count=1,
         flags=re.MULTILINE,
@@ -140,7 +141,12 @@ def main():
             entry = IMAGE_REGISTRY[svc_name]
             filepath = stacks_dir / entry.file
             if filepath.exists():
-                changed = update_yaml_file(filepath, result.repository, result.tag)
+                changed = update_yaml_file(
+                    filepath,
+                    result.repository,
+                    result.tag,
+                    result.digest,
+                )
                 status = "updated" if changed else "unchanged"
                 print(f"  {filepath.name:<25} {status}")
             else:

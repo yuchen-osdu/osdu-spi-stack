@@ -1,0 +1,139 @@
+# SPI Stack - Ingress profile: DNS, minimal variant
+#
+# Identical to ingress/dns/ minus spi-osdu-routes. The minimal stack
+# profile deploys no OSDU services, so a Kustomization that dependsOn
+# spi-osdu-services would stall on DependencyNotReady forever.
+#
+# gateway-tls-multi-host still provisions all three HTTPS:443 listeners
+# (osdu / kibana / airflow); the osdu listener simply has no route
+# attached until the profile is switched to core.
+#
+# Required variables in spi-ingress-config ConfigMap (osdu-flux):
+#   ACME_EMAIL, TXT_OWNER_ID, DNS_ZONE, DNS_ZONE_RG, AZURE_TENANT_ID,
+#   EXTERNAL_DNS_CLIENT_ID, INGRESS_HOST_OSDU, INGRESS_HOST_KIBANA,
+#   INGRESS_HOST_AIRFLOW.
+
+---
+# Cert issuers (Let's Encrypt staging + prod).
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: spi-cert-manager-issuers
+  namespace: osdu-flux
+  labels:
+    spi-stack.layer: "1"
+spec:
+  interval: 10m
+  dependsOn:
+    - name: spi-cert-manager
+  sourceRef:
+    kind: GitRepository
+    name: osdu-spi-stack-system
+  path: ./software/components/cert-manager-issuers
+  prune: true
+  wait: true
+  timeout: 5m
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: spi-ingress-config
+
+---
+# ExternalDNS, reading HTTPRoute hostnames and syncing A records to
+# the Azure DNS zone via Workload Identity.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: spi-external-dns
+  namespace: osdu-flux
+  labels:
+    spi-stack.layer: "1"
+spec:
+  interval: 10m
+  dependsOn:
+    - name: spi-namespaces
+  sourceRef:
+    kind: GitRepository
+    name: osdu-spi-stack-system
+  path: ./software/components/external-dns
+  prune: true
+  wait: true
+  timeout: 10m
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: spi-ingress-config
+
+---
+# Kibana serving at root on its own subdomain (no server.basePath).
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: spi-kibana
+  namespace: osdu-flux
+  labels:
+    spi-stack.layer: "3"
+spec:
+  interval: 10m
+  dependsOn:
+    - name: spi-elasticsearch
+  sourceRef:
+    kind: GitRepository
+    name: osdu-spi-stack-system
+  path: ./software/components/kibana
+  prune: true
+  wait: true
+  timeout: 10m
+
+---
+# Three HTTPS:443 listeners, one per hostname, each with its own cert.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: spi-gateway
+  namespace: osdu-flux
+  labels:
+    spi-stack.layer: "1"
+spec:
+  interval: 10m
+  dependsOn:
+    - name: spi-cert-manager-issuers
+  sourceRef:
+    kind: GitRepository
+    name: osdu-spi-stack-system
+  path: ./software/overlays/gateway-tls-multi-host
+  prune: true
+  wait: true
+  timeout: 10m
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: spi-ingress-config
+
+---
+# HTTPRoutes for the middleware UIs on their own subdomains.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: spi-middleware-routes
+  namespace: osdu-flux
+  labels:
+    spi-stack.layer: "6"
+spec:
+  interval: 10m
+  dependsOn:
+    - name: spi-airflow
+    - name: spi-kibana
+    - name: spi-gateway
+    - name: spi-external-dns
+  sourceRef:
+    kind: GitRepository
+    name: osdu-spi-stack-system
+  path: ./software/stacks/osdu/routes/multi-host/middleware
+  prune: true
+  wait: true
+  timeout: 5m
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: spi-ingress-config

@@ -24,7 +24,12 @@ Three stores, each with a single job:
 
 Non-sensitive endpoint configuration (partition name, tenant ID, cluster ingress hostname, Redis and Elasticsearch FQDNs) lives in the `osdu-config` ConfigMap in the `osdu` namespace and is mounted into services via `envFrom`.
 
-Key Vault secret values are declared **in Bicep** (`infra/main.bicep`) where the source is Azure: endpoints, `listKeys()` on local-auth-enabled partition Cosmos accounts, identity IDs, tenant and subscription. The Gremlin account disables local auth and uses Workload Identity plus Gremlin RBAC instead of a stored graph key. The CLI writes only the handful of **runtime** secrets whose values originate in-cluster and are not available at infra-deploy time:
+Key Vault metadata and compatibility placeholders are declared **in Bicep**
+(`infra/main.bicep`) where the source is Azure: endpoints, identity IDs, tenant
+and subscription. Cosmos and Service Bus local authentication is disabled
+(ADR-027), so key-shaped compatibility fields hold `DISABLED` rather than
+credentials. The CLI writes only the handful of **runtime** secrets whose
+values originate in-cluster and are not available at infra-deploy time:
 
 - Per-partition Elasticsearch endpoint, username, password (ECK-issued credentials).
 - Redis hostname and password (Bitnami-chart-issued).
@@ -34,7 +39,7 @@ These runtime writes happen after Flux reconciles the middleware layer, using th
 
 Rejected:
 - **Kubernetes Secrets for PaaS credentials.** Visible to anyone with cluster read access; defeats the point of Workload Identity.
-- **CSI mount for every secret.** CSI is available (AKS Automatic provides the driver) and is used for a few values today, but SDK reads under Workload Identity keep the secret path in code, which matches what OSDU's upstream Azure provider modules already do.
+- **CSI mount for every secret.** CSI is available (AKS Automatic provides the driver) and is used for a few values, but SDK reads under Workload Identity keep the secret path in code, which matches what OSDU's upstream Azure provider modules already do.
 - **Write every Key Vault secret post-deploy from Python.** Loses Bicep's deploy-time guarantees (correct keys, correct access policies) for values that are knowable at infra time.
 
 ## Consequences

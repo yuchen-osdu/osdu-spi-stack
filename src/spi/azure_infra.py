@@ -25,11 +25,10 @@ Hybrid model:
   - Key Vault soft-delete recovery is imperative pre-check (ARM cannot
     branch on a list-deleted query).
   - Everything else (Managed Identity, federated credentials, Key Vault
-    creation + metadata secrets + local-auth-enabled partition Cosmos
-    primary keys via ``listKeys()``,
-    ACR, CosmosDB Gremlin + SQL, Service Bus + topics/subs, Storage +
-    containers/tables, RBAC role assignments) is declared in Bicep at
-    ``infra/main.bicep`` and deployed with ``az deployment group create``.
+    creation + metadata and compatibility-placeholder secrets, ACR,
+    local-auth-disabled CosmosDB Gremlin + SQL, Service Bus + topics/subs,
+    Storage + containers/tables, RBAC role assignments) is declared in Bicep
+    at ``infra/main.bicep`` and deployed with ``az deployment group create``.
   - Runtime-only Key Vault secrets that depend on in-cluster seed
     passwords (tbl-storage-endpoint, redis-*, {partition}-elastic-*)
     are still written by the CLI from ``runtime_bootstrap.py`` after
@@ -43,6 +42,7 @@ against both ``aks.bicep`` and ``main.bicep`` run; all post-deploy steps
 are skipped and an empty outputs dict is returned.
 """
 
+import base64
 import json
 import os
 import time
@@ -56,6 +56,12 @@ from .shell import run_command
 
 INFRA_MAIN_BICEP = INFRA_ROOT / "main.bicep"
 INFRA_AKS_BICEP = INFRA_ROOT / "aks.bicep"
+MINIMUM_KUBERNETES_MINOR = (1, 36)
+LEGACY_RG_AKS_MODE_TAG = "spi-aks-mode"
+
+# System pool VM size. Kept here rather than only in Bicep so the CLI can
+# resolve the zones this exact size can actually use in the target region.
+SYSTEM_POOL_VM_SIZE = "Standard_D4lds_v5"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -124,6 +130,8 @@ def create_resource_group(
         check=False,
     )
     if exists.returncode == 0 and exists.stdout.strip().lower() == "true":
+        if persist_application_insights:
+            _remove_legacy_aks_mode_tag(config.resource_group)
         display_result(f"Resource group {config.resource_group} ready")
         return
 
@@ -149,6 +157,52 @@ def create_resource_group(
         cmd.extend(["--tags", *tags])
     run_command(cmd, description=f"Create resource group: {config.resource_group}")
     display_result(f"Resource group {config.resource_group} ready")
+
+
+def _remove_legacy_aks_mode_tag(resource_group: str) -> None:
+    """Remove the retired selectable-topology tag from existing environments."""
+    result = run_command(
+        [
+            "az",
+            "group",
+            "show",
+            "--name",
+            resource_group,
+            "--query",
+            f'{{id:id,value:tags."{LEGACY_RG_AKS_MODE_TAG}"}}',
+            "--output",
+            "json",
+        ],
+        description=f"Check retired {LEGACY_RG_AKS_MODE_TAG} tag",
+        display=False,
+        check=False,
+    )
+    if result.returncode != 0:
+        return
+    try:
+        tag = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return
+    resource_id = str(tag.get("id") or "")
+    value = str(tag.get("value") or "")
+    if not resource_id or not value:
+        return
+    run_command(
+        [
+            "az",
+            "tag",
+            "update",
+            "--resource-id",
+            resource_id,
+            "--operation",
+            "Delete",
+            "--tags",
+            f"{LEGACY_RG_AKS_MODE_TAG}={value}",
+            "--output",
+            "none",
+        ],
+        description=f"Remove retired {LEGACY_RG_AKS_MODE_TAG} tag",
+    )
 
 
 def read_rg_suffix_tag(resource_group: str) -> "str | None":
@@ -433,11 +487,10 @@ def detect_legacy_keyvault(resource_group: str, env: str) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def create_aks_automatic(config: Config, dry_run: bool = False) -> Dict[str, Any]:
-    """Create the AKS cluster (Base SKU + Node Autoprovisioning) + managed Istio via Bicep.
+def create_aks(config: Config, dry_run: bool = False) -> Dict[str, Any]:
+    """Create AKS Automatic plus managed Istio via Bicep.
 
-    The cluster is declared in ``infra/aks.bicep``. Two imperative post-
-    deploy steps remain:
+    Two imperative post-deploy steps remain:
     kubeconfig merge (``az aks get-credentials``, not a resource) and
     Istio CNI chaining (``proxyRedirectionMechanism`` is rejected by the
     resource provider at create time).
@@ -447,19 +500,23 @@ def create_aks_automatic(config: Config, dry_run: bool = False) -> Dict[str, Any
     Returns an empty dict when ``dry_run`` is True.
     """
     header = "Previewing" if dry_run else "Deploying"
-    console.print(f"\n[bold]{header} AKS cluster via Bicep...[/bold]")
+    console.print(f"\n[bold]{header} AKS Automatic 1.36 cluster via Bicep...[/bold]")
     console.print(
-        "  [info]Cluster is declared in infra/aks.bicep as a managedClusters resource.[/info]"
+        "  [info]Cluster is declared in infra/aks.bicep as an Automatic managedClusters "
+        "resource.[/info]"
     )
     aks_outputs = None if dry_run else _existing_aks_outputs(config)
     if aks_outputs:
         display_result(f"AKS cluster {config.cluster_name} already exists")
     else:
+        zones = _resolve_system_pool_zones(config)
         aks_outputs = run_bicep_deployment(
             template_path=str(INFRA_AKS_BICEP),
             parameters={
                 "clusterName": config.cluster_name,
                 "location": config.location,
+                "systemPoolVmSize": SYSTEM_POOL_VM_SIZE,
+                "availabilityZones": zones,
             },
             resource_group=config.resource_group,
             deployment_name=f"spi-aks-{config.env or 'base'}",
@@ -471,6 +528,24 @@ def create_aks_automatic(config: Config, dry_run: bool = False) -> Dict[str, Any
             return {}
 
         display_result(f"AKS cluster {config.cluster_name} ready")
+        # Some identityProfile values can be absent from the deployment output
+        # until the resource provider finishes population. Read the live cluster
+        # before PaaS RBAC so kubelet AcrPull is never silently skipped.
+        live_outputs = _existing_aks_outputs(config)
+        if live_outputs:
+            aks_outputs.update(live_outputs)
+
+    if not aks_outputs.get("istioRevision"):
+        raise RuntimeError(
+            f"AKS cluster {config.cluster_name} did not report its managed Istio revision."
+        )
+    if not aks_outputs.get("kubeletIdentityObjectId"):
+        raise RuntimeError(
+            f"AKS cluster {config.cluster_name} did not report its kubelet identity. "
+            "Refusing to continue because the required AcrPull grant would be skipped."
+        )
+
+    _ensure_cluster_identity_network_contributor(config, aks_outputs)
 
     console.print("\n[bold]Fetching cluster credentials...[/bold]")
     run_command(
@@ -496,6 +571,7 @@ def create_aks_automatic(config: Config, dry_run: bool = False) -> Dict[str, Any
         ["kubelogin", "convert-kubeconfig", "-l", "azurecli"],
         description="Convert kubeconfig to azurecli auth",
     )
+    _pin_kubeconfig_tenant()
 
     # The resource provider rejects proxyRedirectionMechanism at create
     # time; enable CNI chaining imperatively. Idempotent. CNI chaining
@@ -510,13 +586,203 @@ def create_aks_automatic(config: Config, dry_run: bool = False) -> Dict[str, Any
     # AKS typically takes 2-3 minutes; this step blocks until active.
     _grant_deployer_cluster_admin(config, aks_outputs.get("clusterResourceId", ""))
 
-    # The Base SKU does NOT enable Deployment Safeguards by default (unlike
-    # AKS Automatic, where they were enforced and non-bypassable). The local
-    # Helm chart (software/charts/osdu-spi-service) is still written to be
-    # safeguards-friendly, so the stack stays portable to a safeguards-on
-    # cluster.
-
     return aks_outputs
+
+
+def _pin_kubeconfig_tenant() -> None:
+    """Prevent inherited shell settings from selecting the wrong Azure tenant."""
+    account_tenant = run_command(
+        ["az", "account", "show", "--query", "tenantId", "--output", "tsv"],
+        description="Get deployment tenant id",
+        display=False,
+        check=False,
+    ).stdout.strip()
+    kubeconfig_user = run_command(
+        ["kubectl", "config", "view", "--minify", "-o", "jsonpath={.contexts[0].context.user}"],
+        description="Get kubeconfig user entry",
+        display=False,
+        check=False,
+    ).stdout.strip()
+    if not account_tenant or not kubeconfig_user:
+        return
+    run_command(
+        [
+            "kubectl",
+            "config",
+            "set-credentials",
+            kubeconfig_user,
+            "--exec-command=kubelogin",
+            "--exec-arg=get-token",
+            "--exec-arg=--login",
+            "--exec-arg=azurecli",
+            "--exec-arg=--server-id",
+            "--exec-arg=6dae42f8-4368-4678-94ff-3960e28e3630",
+            f"--exec-env=AZURE_TENANT_ID={account_tenant}",
+            "--exec-api-version=client.authentication.k8s.io/v1beta1",
+        ],
+        description="Pin tenant in kubeconfig exec environment",
+        display=False,
+    )
+
+
+NETWORK_CONTRIBUTOR_ROLE_ID = "4d97b98b-1d4f-4787-a291-c67834d212e7"
+
+
+def _ensure_cluster_identity_network_contributor(
+    config: Config,
+    aks_outputs: Dict[str, Any],
+) -> None:
+    """Guarantee the cluster identity can read and join the BYO VNet.
+
+    Node autoprovisioning resolves the node subnet as the cluster's
+    control-plane identity. Bicep declares the grant, but a role assignment
+    created against a just-created managed identity can be dropped after the
+    deployment reports success, and the only symptom is every AKSNodeClass
+    reporting SubnetsReady=False with a 403, long after `spi up` exits. ARM is
+    the source of truth, so verify and repair here.
+    """
+    principal_id = aks_outputs.get("clusterPrincipalId", "")
+    if not principal_id:
+        raise RuntimeError(
+            f"AKS cluster {config.cluster_name} did not report its control-plane identity, "
+            "so the VNet role assignment node autoprovisioning needs cannot be verified."
+        )
+
+    vnet_id = (
+        f"/subscriptions/{_subscription_id()}/resourceGroups/{config.resource_group}"
+        f"/providers/Microsoft.Network/virtualNetworks/{config.cluster_name}-vnet"
+    )
+    result = run_command(
+        [
+            "az",
+            "rest",
+            "--method",
+            "get",
+            "--url",
+            (
+                f"https://management.azure.com{vnet_id}"
+                "/providers/Microsoft.Authorization/roleAssignments"
+                "?api-version=2022-04-01"
+            ),
+            "--query",
+            (
+                f"length(value[?properties.principalId=='{principal_id}' && "
+                f"contains(properties.roleDefinitionId, '{NETWORK_CONTRIBUTOR_ROLE_ID}')])"
+            ),
+            "--output",
+            "tsv",
+        ],
+        description="Verify cluster identity can read the node subnet",
+        display=False,
+        check=False,
+    )
+    try:
+        recorded = int((result.stdout or "0").strip())
+    except ValueError:
+        recorded = 0
+    if result.returncode == 0 and recorded > 0:
+        return
+
+    console.print(
+        "[warning]Cluster identity is missing Network Contributor on the VNet; "
+        "node autoprovisioning cannot resolve the subnet. Reapplying.[/warning]"
+    )
+    run_command(
+        [
+            "az",
+            "role",
+            "assignment",
+            "create",
+            "--role",
+            "Network Contributor",
+            "--assignee-object-id",
+            principal_id,
+            "--assignee-principal-type",
+            "ServicePrincipal",
+            "--scope",
+            vnet_id,
+            "--output",
+            "none",
+        ],
+        description="Grant cluster identity Network Contributor on the VNet",
+        check=False,
+    )
+    display_result("Cluster identity can resolve the node subnet")
+
+
+def _subscription_id() -> str:
+    """Return the subscription the CLI is currently signed in to."""
+    return run_command(
+        ["az", "account", "show", "--query", "id", "--output", "tsv"],
+        description="Resolve subscription id",
+        display=False,
+    ).stdout.strip()
+
+
+def _resolve_system_pool_zones(config: Config) -> list:
+    """Return the availability zones the system pool can actually use.
+
+    Zone availability is per subscription, not just per region: a size can be
+    published in three zones while one of them is restricted for this
+    subscription. Passing a restricted zone fails with
+    AvailabilityZoneNotSupported, and the Automatic SKU separately rejects a
+    reduced zone set, so the usable set has to be resolved before deploying.
+    """
+    result = run_command(
+        [
+            "az",
+            "vm",
+            "list-skus",
+            "--location",
+            config.location,
+            "--size",
+            SYSTEM_POOL_VM_SIZE,
+            "--resource-type",
+            "virtualMachines",
+            "--output",
+            "json",
+        ],
+        description=f"Resolve system pool zones in {config.location}",
+        display=False,
+        check=False,
+    )
+    published: list = []
+    restricted: set = set()
+    if result.returncode == 0:
+        for sku in json.loads(result.stdout or "[]"):
+            if sku.get("name") != SYSTEM_POOL_VM_SIZE:
+                continue
+            for info in sku.get("locationInfo") or []:
+                published.extend(info.get("zones") or [])
+            for restriction in sku.get("restrictions") or []:
+                if restriction.get("type") == "Zone":
+                    restricted.update((restriction.get("restrictionInfo") or {}).get("zones") or [])
+
+    if not published:
+        raise RuntimeError(
+            f"{SYSTEM_POOL_VM_SIZE} is not offered in {config.location}. "
+            "Choose a region that offers it."
+        )
+
+    usable = sorted(set(published) - restricted)
+    if not usable:
+        raise RuntimeError(
+            f"{SYSTEM_POOL_VM_SIZE} has no usable availability zone in {config.location} "
+            "for this subscription."
+        )
+
+    # Automatic validates the system pool against the region's recommended zone
+    # set and refuses a reduced list, so any subscription-level restriction is
+    # fatal for this region.
+    if len(usable) < len(set(published)):
+        raise RuntimeError(
+            f"AKS Automatic requires every availability zone in {config.location}, but "
+            f"zone(s) {', '.join(sorted(restricted))} are restricted for "
+            f"{SYSTEM_POOL_VM_SIZE} in this subscription. Deploy in another region."
+        )
+
+    console.print(f"  [info]System pool availability zones: {', '.join(usable)}[/info]")
+    return usable
 
 
 def _existing_aks_outputs(config: Config) -> "Dict[str, Any] | None":
@@ -557,6 +823,30 @@ def _existing_aks_outputs(config: Config) -> "Dict[str, Any] | None":
         )
         return None
 
+    sku_name = str((cluster.get("sku") or {}).get("name", "")).lower()
+    if sku_name != "automatic":
+        raise RuntimeError(
+            f"AKS cluster {config.cluster_name} uses unsupported SKU "
+            f"{sku_name or '<missing>'!r}. This Stack supports AKS Automatic only."
+        )
+
+    kubernetes_version = str(
+        cluster.get("currentKubernetesVersion") or cluster.get("kubernetesVersion") or ""
+    )
+    try:
+        kubernetes_minor = tuple(int(part) for part in kubernetes_version.split(".")[:2])
+    except ValueError as exc:
+        raise RuntimeError(
+            f"AKS cluster {config.cluster_name} returned invalid Kubernetes version "
+            f"{kubernetes_version or '<missing>'!r}."
+        ) from exc
+    if len(kubernetes_minor) != 2 or kubernetes_minor < MINIMUM_KUBERNETES_MINOR:
+        minimum = ".".join(str(part) for part in MINIMUM_KUBERNETES_MINOR)
+        raise RuntimeError(
+            f"AKS cluster {config.cluster_name} runs Kubernetes "
+            f"{kubernetes_version or '<missing>'}; this Stack requires {minimum} or newer."
+        )
+
     identities = cluster.get("identity", {}).get("userAssignedIdentities", {}) or {}
     principal_id = ""
     if identities:
@@ -569,6 +859,9 @@ def _existing_aks_outputs(config: Config) -> "Dict[str, Any] | None":
     # skipped, so nodes cannot pull images from the SPI ACR on re-runs.
     identity_profile = cluster.get("identityProfile") or {}
     kubelet_identity = identity_profile.get("kubeletidentity") or {}
+    istio_revisions = ((cluster.get("serviceMeshProfile") or {}).get("istio") or {}).get(
+        "revisions"
+    ) or []
 
     return {
         "clusterName": cluster.get("name", config.cluster_name),
@@ -576,6 +869,8 @@ def _existing_aks_outputs(config: Config) -> "Dict[str, Any] | None":
         "oidcIssuerUrl": cluster.get("oidcIssuerProfile", {}).get("issuerUrl", ""),
         "clusterPrincipalId": principal_id,
         "kubeletIdentityObjectId": kubelet_identity.get("objectId", ""),
+        "istioRevision": istio_revisions[0] if istio_revisions else "",
+        "kubernetesVersion": kubernetes_version,
     }
 
 
@@ -603,6 +898,13 @@ def _grant_deployer_cluster_admin(config: Config, cluster_resource_id: str):
     # `az ad` commands bypass the MSAL access-token cache and re-do the
     # federated exchange, which fails ~20 min into spi up with AADSTS700024.
     user_oid = os.environ.get("SPI_DEPLOYER_OID", "").strip()
+    if not user_oid:
+        # Prefer decoding `oid` from the cached ARM access token: it is the
+        # principal's object ID for users and service principals alike, and
+        # needs no Microsoft Graph token, which Conditional Access token
+        # protection can refuse to issue (AADSTS530084) even when ARM access
+        # is fine. Graph lookups below are the fallback.
+        user_oid = _deployer_oid_from_arm_token()
     if not user_oid:
         if principal_type == "ServicePrincipal":
             # `az ad signed-in-user show` calls Graph `/me`, which is
@@ -650,6 +952,50 @@ def _grant_deployer_cluster_admin(config: Config, cluster_resource_id: str):
     _wait_for_cluster_rbac()
 
 
+def _decode_jwt_claim(token: str, claim: str) -> str:
+    """Extract a claim from a JWT payload without signature verification.
+
+    Safe here because the token comes straight from the local az token
+    cache and is only mined for the caller's own object ID; it is never
+    used to make an authorization decision.
+    """
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        value = claims.get(claim, "")
+        return value if isinstance(value, str) else ""
+    except (IndexError, ValueError):
+        return ""
+
+
+def _deployer_oid_from_arm_token() -> str:
+    """Read the signed-in principal's object ID from a cached ARM access token.
+
+    Returns an empty string on any failure so callers can fall back to the
+    Graph-based lookups.
+    """
+    result = run_command(
+        [
+            "az",
+            "account",
+            "get-access-token",
+            "--resource",
+            "https://management.azure.com/",
+            "--query",
+            "accessToken",
+            "--output",
+            "tsv",
+        ],
+        description="Get deployer object ID from ARM token",
+        display=False,
+        check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    return _decode_jwt_claim(result.stdout.strip(), "oid")
+
+
 def _verify_role_assignment_recorded(user_oid: str, cluster_resource_id: str):
     """Confirm the cluster-admin assignment is visible in ARM before polling propagation.
 
@@ -658,32 +1004,39 @@ def _verify_role_assignment_recorded(user_oid: str, cluster_resource_id: str):
     authorization-plane propagation. ARM listings respond within seconds and
     are independent of AKS-plane caching.
     """
+    aks_rbac_cluster_admin_role_id = "b1ff04bb-8a4e-4dc4-8eb5-8693973ce19b"
     result = run_command(
         [
             "az",
-            "role",
-            "assignment",
-            "list",
-            "--assignee",
-            user_oid,
-            "--scope",
-            cluster_resource_id,
-            "--role",
-            "Azure Kubernetes Service RBAC Cluster Admin",
+            "rest",
+            "--method",
+            "get",
+            "--url",
+            (
+                f"https://management.azure.com{cluster_resource_id}"
+                "/providers/Microsoft.Authorization/roleAssignments"
+                "?api-version=2022-04-01"
+            ),
+            "--query",
+            (
+                f"length(value[?properties.principalId=='{user_oid}' && "
+                f"contains(properties.roleDefinitionId, "
+                f"'{aks_rbac_cluster_admin_role_id}')])"
+            ),
             "--output",
-            "json",
+            "tsv",
         ],
         description="Verify cluster-admin assignment exists",
         check=False,
         display=False,
     )
-    assignments = []
+    assignment_count = 0
     if result.returncode == 0:
         try:
-            assignments = json.loads(result.stdout or "[]")
-        except json.JSONDecodeError:
-            assignments = []
-    if result.returncode != 0 or not assignments:
+            assignment_count = int((result.stdout or "0").strip())
+        except ValueError:
+            assignment_count = 0
+    if result.returncode != 0 or assignment_count < 1:
         stderr = (result.stderr or "").strip()
         raise RuntimeError(
             f"Cluster-admin role assignment for {user_oid[:8]}... is not recorded on "
@@ -876,7 +1229,7 @@ def _resolve_deployer_principal() -> "tuple[str, str]":
     """Resolve the current Azure principal for deployer-side RBAC."""
     env_oid = os.environ.get("SPI_DEPLOYER_OID", "").strip()
     if env_oid:
-        return env_oid, os.environ.get("SPI_DEPLOYER_PRINCIPAL_TYPE", "ServicePrincipal")
+        return env_oid, _deployer_principal_type()
 
     account_result = run_command(
         ["az", "account", "show", "--output", "json"],
@@ -885,6 +1238,16 @@ def _resolve_deployer_principal() -> "tuple[str, str]":
     )
     account = json.loads(account_result.stdout)
     principal_type = "User" if account.get("user", {}).get("type") == "user" else "ServicePrincipal"
+
+    # Prefer the ARM access token: `oid` is the principal's object ID for users
+    # and service principals alike and needs no Microsoft Graph token, which
+    # Conditional Access token protection can refuse to issue (AADSTS530084)
+    # even when ARM access is fine. This mirrors _grant_deployer_cluster_admin;
+    # the Graph lookups below remain as fallbacks.
+    oid = _deployer_oid_from_arm_token()
+    if oid:
+        return oid, principal_type
+
     if principal_type == "User":
         oid = run_command(
             ["az", "ad", "signed-in-user", "show", "--query", "id", "--output", "tsv"],
@@ -893,7 +1256,44 @@ def _resolve_deployer_principal() -> "tuple[str, str]":
         ).stdout.strip()
         return oid, principal_type
 
+    # Service principals authenticate by appId, so the object ID needed for the
+    # Key Vault Secrets Officer grant has to be looked up. Without it the grant
+    # is skipped and the Phase 6 secret writes fail against an RBAC vault.
+    # Graph can be blocked by Conditional Access, so a failed lookup degrades to
+    # the previous behavior rather than aborting the deployment.
+    app_id = account.get("user", {}).get("name", "")
+    if app_id:
+        result = run_command(
+            ["az", "ad", "sp", "show", "--id", app_id, "--query", "id", "--output", "tsv"],
+            description="Get deployer object ID (service principal)",
+            display=False,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip(), principal_type
+        console.print(
+            "[warning]Unable to resolve the service principal object ID. "
+            "Set SPI_DEPLOYER_OID if Key Vault writes fail.[/warning]"
+        )
+
     return "", principal_type
+
+
+def _deployer_principal_type() -> str:
+    """Resolve a caller-provided deployer type, accepting both historical names."""
+    override = (
+        os.environ.get("SPI_DEPLOYER_PRINCIPAL_TYPE", "").strip()
+        or os.environ.get("SPI_DEPLOYER_TYPE", "").strip()
+    )
+    if override in {"User", "ServicePrincipal"}:
+        return override
+    result = run_command(
+        ["az", "account", "show", "--query", "user.type", "--output", "tsv"],
+        description="Get deployer principal type",
+        check=False,
+        display=False,
+    )
+    return "User" if (result.stdout or "").strip() == "user" else "ServicePrincipal"
 
 
 def _reshape_bicep_outputs(bicep_outputs: Dict[str, Any]) -> Dict[str, Any]:
@@ -967,8 +1367,8 @@ def provision_azure_infra(config: Config, dry_run: bool = False) -> Dict[str, An
       4. Recover soft-deleted Key Vault if present (skipped in dry-run).
       5. Deploy the main Bicep template (or run what-if preview if
          ``dry_run`` is True). This deploys all PaaS resources AND
-         populates Key Vault metadata secrets (tenant-id, endpoints,
-         partition Cosmos primary keys via ``listKeys()``) declaratively.
+         populates Key Vault metadata and disabled compatibility-placeholder
+         secrets declaratively.
     """
     outputs: Dict[str, Any] = {}
 
@@ -986,15 +1386,19 @@ def provision_azure_infra(config: Config, dry_run: bool = False) -> Dict[str, An
 
     # What-if requires an RG but must not freeze an observability choice before
     # anything is deployed. A later real run can choose either mode.
-    create_resource_group(config, persist_application_insights=not dry_run)
+    create_resource_group(
+        config,
+        persist_application_insights=not dry_run,
+    )
 
     # AKS Bicep deploy returns the OIDC issuer URL directly. In dry-run
     # we run what-if on aks.bicep (returning an empty dict) and pass an
     # empty issuer so identity.bicep omits federated credentials from
     # the main.bicep preview.
-    aks_outputs = create_aks_automatic(config, dry_run=dry_run)
+    aks_outputs = create_aks(config, dry_run=dry_run)
     oidc_issuer = aks_outputs.get("oidcIssuerUrl", "")
     kubelet_identity_object_id = aks_outputs.get("kubeletIdentityObjectId", "")
+    outputs["istio_revision"] = aks_outputs.get("istioRevision", "")
 
     if not dry_run:
         _recover_soft_deleted_keyvault(config)

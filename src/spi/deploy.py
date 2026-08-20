@@ -35,10 +35,14 @@ from .bootstrap import (
     ensure_namespaces,
     install_gateway_api_crds,
 )
-from .config import Config, IngressMode
+from .config import Config, IngressMode, Profile
 from .console import console, display_result, display_yaml
 from .images import (
+    IMAGE_LOCK_CONFIGMAP,
+    IMAGE_LOCK_NAMESPACE,
     ImageResolutionError,
+    image_lock_key,
+    image_lock_names,
     render_image_lock_configmap,
     resolve_image_lock,
 )
@@ -50,7 +54,7 @@ from .ingress import (
 )
 from .paths import INFRA_ROOT
 from .secrets import ensure_secrets, get_or_create_seed
-from .shell import kubectl_apply_yaml, resolve_command, run_command
+from .shell import kubectl_apply_yaml, kubectl_json, run_command, run_process
 from .templates import (
     istio_auth_resources,
     osdu_config_configmap,
@@ -62,19 +66,18 @@ GITREPO_NAME = "osdu-spi-stack-system"
 OSDU_CONFIG_ROLLOUT_ANNOTATION = "spi.osdu/config-rollout-hash"
 
 INFRA_FLUX_BICEP = INFRA_ROOT / "flux.bicep"
+DEFAULT_SERVICE_AUDIENCE = "https://management.azure.com"
 
 
-def _resolve_aad_client_id(identity_client_id: str) -> str:
-    """Return the appid services should mint service-to-service tokens for.
+def _resolve_aad_client_id(_identity_client_id: str) -> str:
+    """Return the audience services should mint service-to-service tokens for.
 
-    Defaults to the OSDU UAMI client id (single-resource scope, dodges
-    AADSTS28000); the AAD_CLIENT_ID host env var overrides this to point
-    at a separate OSDU AAD app registration. The Istio audience list and
-    the osdu-config ConfigMap must agree on this value, or service-to-
-    service calls fail jwt_authn and reach the Spring filter without an
-    x-app-id header (ADR-016).
+    Managed identities cannot themselves be token audiences (AADSTS100040).
+    SPI therefore defaults to the ARM resource, which every Workload Identity
+    can request and the mesh already accepts. Operators may override this with
+    a separate OSDU app registration through AAD_CLIENT_ID.
     """
-    return os.environ.get("AAD_CLIENT_ID", "").strip() or identity_client_id
+    return os.environ.get("AAD_CLIENT_ID", "").strip() or DEFAULT_SERVICE_AUDIENCE
 
 
 def _create_osdu_config(config: Config, infra_outputs: dict) -> None:
@@ -258,14 +261,37 @@ def _create_image_lock(image_lock_yaml: str) -> None:
     display_result("osdu-image-lock ConfigMap created")
 
 
+def _validate_existing_image_lock(profile: Profile) -> None:
+    """Require a complete live image lock when image refresh is disabled."""
+    configmap = kubectl_json(["get", "configmap", IMAGE_LOCK_CONFIGMAP, "-n", IMAGE_LOCK_NAMESPACE])
+    data = configmap.get("data") if configmap else None
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"--no-refresh-images requires an existing "
+            f"{IMAGE_LOCK_NAMESPACE}/{IMAGE_LOCK_CONFIGMAP} ConfigMap"
+        )
+
+    required_keys = {
+        f"{image_lock_key(name)}_{suffix}"
+        for name in image_lock_names(profile.value)
+        for suffix in ("IMAGE_REPOSITORY", "IMAGE_TAG", "IMAGE_DIGEST")
+    }
+    missing = sorted(key for key in required_keys if not data.get(key))
+    if missing:
+        raise RuntimeError(
+            f"The existing image lock does not cover profile {profile.value!r}; "
+            f"missing keys: {', '.join(missing)}. Re-run without --no-refresh-images."
+        )
+
+
 def _wait_for_namespace(namespace: str, timeout_seconds: int = 300) -> None:
     """Wait until a namespace exists."""
     deadline = time.time() + timeout_seconds
     last_error = ""
     with console.status(f"[bold]Waiting for namespace {namespace}...[/bold]"):
         while time.time() < deadline:
-            result = subprocess.run(
-                resolve_command(["kubectl", "get", "namespace", namespace]),
+            result = run_process(
+                ["kubectl", "get", "namespace", namespace],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -306,7 +332,12 @@ def _deploy_flux_config(config: Config, activate_gitops: bool) -> None:
         deployment_name=deployment_name,
     )
     if not activate_gitops:
-        _wait_for_namespace("osdu-flux")
+        # The extension-only pass installs the Flux controllers into flux-system.
+        # Waiting on osdu-flux would prove nothing: ensure_namespaces() already
+        # created it earlier in Phase 4, so that check passes instantly whether or
+        # not the extension is ready. Wait for the namespace the extension itself
+        # creates, so Phase 5 cannot race controller installation.
+        _wait_for_namespace("flux-system")
 
 
 def _write_keyvault_bootstrap_secrets(
@@ -339,8 +370,6 @@ def _write_keyvault_bootstrap_secrets(
 
     secrets_to_write: list[tuple[str, str]] = [
         ("tbl-storage-endpoint", tbl_endpoint),
-        # Python Wellbore services turn this app/resource id into the OAuth
-        # `<resource>/.default` scope consumed by DefaultAzureCredential.
         ("aad-client-id", aad_client_id),
         ("redis-hostname", redis_hostname),
         ("redis-password", redis_password),
@@ -362,23 +391,21 @@ def _write_keyvault_bootstrap_secrets(
     first = True
     for name, value in secrets_to_write:
         while True:
-            result = subprocess.run(
-                resolve_command(
-                    [
-                        "az",
-                        "keyvault",
-                        "secret",
-                        "set",
-                        "--vault-name",
-                        keyvault_name,
-                        "--name",
-                        name,
-                        "--value",
-                        value,
-                        "--output",
-                        "none",
-                    ]
-                ),
+            result = run_process(
+                [
+                    "az",
+                    "keyvault",
+                    "secret",
+                    "set",
+                    "--vault-name",
+                    keyvault_name,
+                    "--name",
+                    name,
+                    "--value",
+                    value,
+                    "--output",
+                    "none",
+                ],
                 capture_output=True,
                 text=True,
             )
@@ -412,18 +439,16 @@ def _pin_gitops_source() -> None:
     """
     console.print("\n[bold]Pinning environment to deploy commit...[/bold]")
 
-    wait_result = subprocess.run(
-        resolve_command(
-            [
-                "kubectl",
-                "wait",
-                "--for=condition=Ready",
-                f"gitrepository/{GITREPO_NAME}",
-                "-n",
-                "osdu-flux",
-                "--timeout=120s",
-            ]
-        ),
+    wait_result = run_process(
+        [
+            "kubectl",
+            "wait",
+            "--for=condition=Ready",
+            f"gitrepository/{GITREPO_NAME}",
+            "-n",
+            "osdu-flux",
+            "--timeout=120s",
+        ],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -469,7 +494,17 @@ def deploy_azure(
     caller can inspect what would change without actually provisioning.
     """
     image_lock_yaml = ""
-    if refresh_images and not dry_run:
+    # Core and graduated deploy OSDU services that consume the image lock.
+    # Minimal and bare skip registry resolution entirely.
+    if (
+        refresh_images
+        and not dry_run
+        and config.profile
+        in {
+            Profile.CORE,
+            Profile.GRADUATED,
+        }
+    ):
         # Resolve before provisioning so registry/API failures stop quickly and
         # never leave a partially configured cluster with a mixed image set.
         image_lock_yaml = _resolve_image_lock(config)
@@ -489,7 +524,7 @@ def deploy_azure(
         return
 
     # Phase 4: Kubernetes bootstrap
-    ensure_namespaces()
+    ensure_namespaces(infra_outputs.get("istio_revision", ""))
     create_storage_classes()
     install_gateway_api_crds()
 
@@ -501,6 +536,8 @@ def deploy_azure(
     ensure_secrets()
     if image_lock_yaml:
         _create_image_lock(image_lock_yaml)
+    elif config.profile in {Profile.CORE, Profile.GRADUATED}:
+        _validate_existing_image_lock(config.profile)
     _create_osdu_config(config, infra_outputs)
     _create_istio_auth(config, infra_outputs)
     _create_spi_init_values(config)
@@ -512,6 +549,7 @@ def deploy_azure(
         external_dns_client_id=infra_outputs.get("external_dns_client_id", ""),
         tenant_id=infra_outputs.get("tenant_id", ""),
         gateway_ip=get_ingress_ip(),
+        istio_revision=infra_outputs.get("istio_revision", ""),
     )
 
     # Phase 5: GitOps activation (Kustomization via Bicep)

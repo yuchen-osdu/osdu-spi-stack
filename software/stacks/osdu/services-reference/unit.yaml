@@ -26,7 +26,7 @@ spec:
       tag: "${UNIT_IMAGE_TAG}"
       digest: "${UNIT_IMAGE_DIGEST}"
     nodeSelector:
-      agentpool: osdu
+      spi-pool: osdu
     tolerations:
       - key: workload
         operator: Equal

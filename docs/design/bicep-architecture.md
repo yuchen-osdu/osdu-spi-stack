@@ -1,16 +1,18 @@
 # Bicep Architecture
 
-**What this explains.** How `infra/` is organised, why three top-level Bicep templates, what the `infra/modules/` are responsible for, and which seams the CLI handles imperatively because Bicep cannot.
+**What this explains.** How `infra/` is organised, why the deployment has
+three Bicep stages with one AKS Automatic entrypoint, what `infra/modules/`
+owns, and which seams the CLI handles imperatively.
 
 **Why it matters.** Most of `spi up` is Bicep, and most failures look like `az` errors that are actually Bicep errors. Knowing which template owns which resource makes the difference between "where do I edit the schema" and "where does the error point me."
 
 > **Companion docs.** [Deployment lifecycle](deployment-lifecycle.md) covers the timing and ordering of these deploys. [Workload Identity](workload-identity.md) explains how identity and RBAC modules wire together at runtime.
 
-## The three top-level templates
+## The three deployment stages
 
 ![Bicep architecture](../diagrams/bicep-architecture.png)
 
-Three Bicep entrypoints, each with a single responsibility:
+The AKS, PaaS, and Flux stages are separate entrypoints:
 
 | Template | Style | What it lands |
 |---|---|---|
@@ -24,11 +26,13 @@ Each deploys via `az deployment group create` against the same resource group. T
 
 A single template would work, but the three boundaries match three different lifecycles:
 
-- **`aks.bicep`** is the slowest piece (~30 min) and almost never changes after first deploy.
+- **`infra/aks.bicep`** is the slowest piece (~30 min) and almost
+  never changes after first deploy.
 - **`main.bicep`** changes when you add a partition, swap a PaaS sku, or wire a new identity. It deploys in ~2-3 min and re-runs idempotently.
 - **`flux.bicep`** changes whenever you change profile or ingress mode (`--profile`, `--ingress-mode`). It deploys in seconds.
 
-Splitting them also keeps `--dry-run` useful: `spi up --dry-run` runs `az deployment group what-if` against `aks.bicep` and `main.bicep` and skips everything after, so you see the ARM-level diff without paying for a full deploy.
+Splitting them also keeps `--dry-run` useful: it runs what-if against the
+AKS entrypoint and `main.bicep`, then skips Kubernetes and Flux work.
 
 ## Why raw Bicep for AKS and PaaS
 
@@ -46,7 +50,7 @@ The full rationale is in [ADR-008](../decisions/008-bicep-for-azure-provisioning
 | `keyvault.bicep` | Key Vault resource only | RBAC lives in `rbac.bicep`; secret values are declared in `main.bicep` (runtime secrets land later via CLI) |
 | `acr.bicep` | Container Registry (Basic SKU) | UAMI gets `AcrPull` |
 | `cosmos-gremlin.bicep` | Cosmos DB Gremlin account + graph DB | Entitlements graph; shared across partitions |
-| `partition.bicep` | Per-partition: Cosmos SQL account + 24 containers, local-auth-disabled Service Bus namespace + 14 topics + 14 subscriptions, Storage account + 5 containers, per-partition KV secrets (`{p}-storage-account-blob-endpoint`, `{p}-cosmos-primary-key`, `{p}-sb-connection` placeholder, etc.) | Looped from `main.bicep` over `dataPartitions` |
+| `partition.bicep` | Per-partition: local-auth-disabled Cosmos SQL account + 24 containers, local-auth-disabled Service Bus namespace + 14 topics + 14 subscriptions, Storage account + service containers, and endpoint/placeholder KV secrets | Looped from `main.bicep` over `dataPartitions` |
 | `storage-common.bicep` | Common Storage account (legal tags, cross-partition data) | One per environment, not per partition |
 | `rbac.bicep` | RBAC role assignments scoped per resource | Key Vault Secrets User, Storage Blob/Table Data Contributor, Azure Service Bus Data Owner, AcrPull |
 | `vnet.bicep` | VNet + private subnet + NAT gateway | Consumed by `aks.bicep` (BYO VNet for AKS egress), not `main.bicep` |
@@ -124,7 +128,7 @@ Output snippet:
    ~ Modify: Microsoft.Storage/storageAccounts/spistackdev1common
 ```
 
-The dry-run does not touch the cluster. It does land the resource group (Bicep needs an RG target), but it skips soft-deleted Key Vault recovery — that runs only on a real deploy (`if not dry_run` in `azure_infra.py`).
+The dry-run does not touch the cluster. It does land the resource group (Bicep needs an RG target), but it skips soft-deleted Key Vault recovery; that runs only on a real deploy (`if not dry_run` in `azure_infra.py`).
 
 ## Related ADRs
 

@@ -24,9 +24,10 @@ on:
         description: "Deployment profile"
         type: choice
         options:
+          - bare
           - core
-          - full
-        default: core
+          - minimal
+        default: bare
 
 permissions:
   contents: read
@@ -52,11 +53,15 @@ jobs:
       rg: ${{ steps.env.outputs.rg }}
       suffix: ${{ steps.env.outputs.suffix }}
       created: ${{ steps.env.outputs.created }}
+      profile: ${{ steps.env.outputs.profile }}
     env:
       ENV_SUFFIX: ${{ inputs.env_suffix || format('run{0}', github.run_id) }}
-      PROFILE: ${{ inputs.profile || 'core' }}
+      # Start the scheduled reliability trend at the infra + empty GitOps rung.
+      # Once bare is stable, promote the default to minimal without changing
+      # the provision/verify/teardown workflow shape.
+      PROFILE: ${{ inputs.profile || 'bare' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up uv + Python
         uses: astral-sh/setup-uv@v7
@@ -149,7 +154,9 @@ jobs:
           echo "rg=$RG" >> "$GITHUB_OUTPUT"
           echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
           echo "created=$CREATED_UTC" >> "$GITHUB_OUTPUT"
+          echo "profile=$PROFILE" >> "$GITHUB_OUTPUT"
           echo "Resource group: $RG"
+          echo "Profile: $PROFILE"
 
       - name: Quota guard (max 2 in-flight CI smoke RGs)
         run: |
@@ -188,7 +195,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v5
@@ -234,6 +241,7 @@ jobs:
         run: bash scripts/wait_for_flux_ready.sh --timeout 2700
 
       - name: Acceptance probe (gateway reachable)
+        if: ${{ needs.provision.outputs.profile != 'bare' }}
         run: |
           set -euo pipefail
           # Smoke-level probe: gateway service exists and the Istio gateway
@@ -241,6 +249,33 @@ jobs:
           # for the smoke; deeper acceptance lives in osdu-test skill.
           kubectl get svc -n aks-istio-ingress
           kubectl get pods -n aks-istio-ingress --field-selector=status.phase=Running
+
+      - name: Acceptance probe (HTTPS terminates)
+        if: ${{ needs.provision.outputs.profile != 'bare' }}
+        run: |
+          set -euo pipefail
+          # A pod-level probe cannot catch a dead TLS path: cert-manager
+          # stalling on issuance leaves every pod Running while :443 refuses
+          # connections (the ADR-025 failure mode). Handshake the gateway's
+          # HTTPS hostname for real; retry to absorb ACME issuance lag.
+          host=$(kubectl get gateway spi-gateway -n aks-istio-ingress \
+            -o jsonpath='{.spec.listeners[?(@.protocol=="HTTPS")].hostname}' | awk '{print $1}')
+          if [[ -z "$host" ]]; then
+            echo "No HTTPS listener on spi-gateway; skipping TLS probe (ip mode)."
+            exit 0
+          fi
+          for i in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://${host}/" || true)
+            if [[ "$code" =~ ^[0-9]+$ && "$code" != "000" ]]; then
+              echo "HTTPS terminated on ${host} (HTTP ${code}) after ${i} attempts"
+              exit 0
+            fi
+            echo "attempt ${i}: no TLS yet on ${host} (code=${code}); retrying in 30s"
+            sleep 30
+          done
+          echo "HTTPS never terminated on ${host}; dumping certificate state" >&2
+          kubectl get certificates,certificaterequests,orders,challenges -A || true
+          exit 1
 
       - name: Capture diagnostics on failure
         if: failure()

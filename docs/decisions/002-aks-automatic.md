@@ -1,12 +1,10 @@
 # ADR-002: AKS Automatic as Compute Substrate
 
-**Status**: Superseded by [ADR-021](021-aks-base-node-autoprovisioning.md)
+**Status**: Accepted; reaffirmed by [ADR-040](040-aks-automatic-only.md)
 
-> Superseded 2026-06. AKS Automatic began enforcing a non-bypassable guardrail
-> that blocks the `MutatingWebhookConfiguration` objects cert-manager and
-> CloudNativePG require, so the stack can no longer reconcile on Automatic.
-> ADR-021 moves to the Base SKU with Node Autoprovisioning. The rationale below
-> is retained for history.
+> Reaffirmed 2026-08. Kubernetes 1.36 replaced the former blanket admission
+> restriction with a scoped policy compatible with cert-manager and
+> CloudNativePG (ADR-019). ADR-040 removes the temporary alternate topology.
 
 ## Context
 
@@ -21,7 +19,7 @@ Deploy the cluster as AKS Automatic (`sku.name: Automatic`). The stack consumes 
 - **Karpenter** for node auto-provisioning; no manual node pools. Our workload NodePool CRs (ADR-007, Layer 0b) are still user-declared but Karpenter honors them.
 - **Managed Istio** service mesh and ingress gateway. Istio installation, upgrades, and CNI chaining are Azure-managed.
 - **Deployment Safeguards** enforced as a non-bypassable `ValidatingAdmissionPolicy` (non-root, seccomp `RuntimeDefault`, capability drop, resource requests and limits, probes). ADR-004 covers how our workloads comply.
-- **Key Vault CSI** secret provider (available for future use; most services today read from Key Vault via SDK + Workload Identity).
+- **Key Vault CSI** secret provider (available but largely unused; the services read from Key Vault via SDK + Workload Identity).
 - **Cilium CNI** in overlay mode.
 - **Managed Prometheus** and **Container Insights** for metrics and logs into Azure Monitor and Log Analytics.
 

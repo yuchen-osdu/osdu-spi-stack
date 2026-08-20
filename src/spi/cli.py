@@ -44,7 +44,7 @@ from .images import (
     render_image_lock_configmap,
     resolve_image_lock,
 )
-from .ingress import resolve_acme_email, resolve_ingress_mode
+from .ingress import ensure_istio_revision_published, resolve_acme_email, resolve_ingress_mode
 from .shell import kubectl_apply_yaml, kubectl_json, run_command
 
 app = typer.Typer(
@@ -85,6 +85,7 @@ def _show_config(config: Config, *, show_application_insights: bool = True):
     table.add_row("Cluster Name", config.cluster_name)
     table.add_row("Resource Group", config.resource_group)
     table.add_row("Location", config.location)
+    table.add_row("AKS Mode", "Automatic 1.36")
     table.add_row("Repository", config.repo_url)
     table.add_row("Branch", config.repo_branch)
     table.add_row("Data Partitions", ", ".join(config.data_partitions))
@@ -107,7 +108,7 @@ def _show_config(config: Config, *, show_application_insights: bool = True):
     if aad_override:
         table.add_row("AAD Client ID", f"{aad_override} [dim](env override)[/dim]")
     else:
-        table.add_row("AAD Client ID", "[dim](default: UAMI client id)[/dim]")
+        table.add_row("AAD Client ID", "[dim](default: ARM service audience)[/dim]")
     table.add_row(
         "Creator Access",
         ", ".join(config.creator_user_ids) if config.creator_user_ids else "[dim]disabled[/dim]",
@@ -124,9 +125,10 @@ def _show_next_steps(config: Config):
     table.add_column("Command", style="yellow")
 
     table.add_row("Watch progress", "kubectl get kustomizations -n osdu-flux --watch")
-    table.add_row("Check operators", "kubectl get pods -n foundation")
-    table.add_row("Check middleware", "kubectl get pods -n platform")
-    table.add_row("Check services", "kubectl get pods -n osdu")
+    if config.profile is not Profile.BARE:
+        table.add_row("Check operators", "kubectl get pods -n foundation")
+        table.add_row("Check middleware", "kubectl get pods -n platform")
+        table.add_row("Check services", "kubectl get pods -n osdu")
     table.add_row("View status", "uv run spi status")
     table.add_row("Cleanup", f"uv run spi down{config.env_flag}")
 
@@ -138,7 +140,7 @@ def _build_config(
     env: str = "",
     repo_url: str = "https://github.com/Azure/osdu-spi-stack.git",
     branch: str = "main",
-    location: str = "eastus2",
+    location: str = "westus3",
     data_partitions: Optional[List[str]] = None,
     ingress_mode: IngressMode = IngressMode.AZURE,
     dns_zone: str = "",
@@ -436,7 +438,6 @@ def _resolve_application_insights(
         if for_up:
             write_rg_application_insights_tag(rg, resolved)
         return resolved
-
     component_exists = detect_existing_application_insights(rg, env) if exists else False
     workspace_exists = (
         detect_existing_log_analytics(rg, env) if exists and not component_exists else False
@@ -510,7 +511,11 @@ def check(
 
 @app.command()
 def up(
-    profile: Optional[Profile] = typer.Option(None, help="Deployment profile (default: core)"),
+    profile: Optional[Profile] = typer.Option(
+        None,
+        help="Deployment profile: core (default), graduated (core + DDMS), "
+        "minimal (middleware only), or bare (infra + GitOps only).",
+    ),
     env: str = typer.Option(..., "--env", help="Environment name (required, e.g. dev1, test)"),
     repo_url: str = typer.Option(
         "https://github.com/Azure/osdu-spi-stack.git",
@@ -518,7 +523,11 @@ def up(
         help="Git repository URL",
     ),
     branch: str = typer.Option("main", "--branch", help="Git branch"),
-    location: str = typer.Option("eastus2", "--location", help="Azure region"),
+    location: str = typer.Option(
+        "westus3",
+        "--location",
+        help="Azure region (eastus2/centralus have shown API Server VNet Integration capacity constraints)",
+    ),
     data_partitions: Optional[List[str]] = typer.Option(
         None, "--partition", help="Data partition names (can specify multiple)"
     ),
@@ -569,7 +578,8 @@ def up(
     image_source: Optional[ImageSource] = typer.Option(
         None,
         "--image-source",
-        help="Service image source: ghcr (SPI service forks) or community.",
+        help="Service image source: ghcr (SPI service forks) or the explicit community "
+        "compatibility source. Community builds must support the Entra-only data plane.",
     ),
     image_org: Optional[str] = typer.Option(
         None,
@@ -603,11 +613,26 @@ def up(
     if profile is None:
         profile = Profile.CORE
 
+    if profile is Profile.BARE:
+        if ingress_mode is not None:
+            raise typer.BadParameter(
+                "profile 'bare' deploys no ingress substrate; this option is not supported",
+                param_hint="--ingress-mode",
+            )
+        if dns_zone:
+            raise typer.BadParameter(
+                "profile 'bare' deploys no ingress substrate; this option is not supported",
+                param_hint="--dns-zone",
+            )
+        resolved_ingress = IngressMode.AZURE
+    else:
+        resolved_ingress = resolve_ingress_mode(ingress_mode)
+
     title = "[bold]SPI Stack[/bold] - Azure-native OSDU Software Stack"
     if dry_run:
         title += "\n[warning]DRY RUN: previewing Bicep changes only[/warning]"
     else:
-        title += "\nAKS (Base + Node Autoprovisioning) + Azure PaaS + Flux CD GitOps"
+        title += "\nAKS Automatic 1.36 + Azure PaaS + Flux CD GitOps"
 
     console.print(Panel(title, border_style="cyan"))
     check_prerequisites(PREREQ_TOOLS)
@@ -616,11 +641,15 @@ def up(
     # derived resource names are stable across `spi up` re-runs and don't
     # collide with deployments in other subscriptions.
     name_suffix = _resolve_name_suffix(env, for_up=True)
-    resolved_application_insights = _resolve_application_insights(
-        env,
-        requested=application_insights,
-        for_up=not dry_run,
-    )
+    try:
+        resolved_application_insights = _resolve_application_insights(
+            env,
+            requested=application_insights,
+            for_up=not dry_run,
+        )
+    except RuntimeError as exc:
+        console.print(f"[error]{exc}[/error]")
+        raise typer.Exit(code=2)
     try:
         resolved_creator_user_ids = _resolve_creator_user_ids(seed_creator, creator_user_id)
         (
@@ -646,7 +675,7 @@ def up(
         branch=branch,
         location=location,
         data_partitions=data_partitions,
-        ingress_mode=resolve_ingress_mode(ingress_mode),
+        ingress_mode=resolved_ingress,
         dns_zone=dns_zone,
         ingress_prefix=ingress_prefix,
         acme_email=resolve_acme_email(acme_email),
@@ -864,6 +893,17 @@ def reconcile(
             "Run 'uv run spi reconcile --resume' to unfreeze.[/dim]"
         )
         return
+
+    # An environment created before the revision was published would let Flux
+    # apply an empty istio.io/rev and drop sidecar injection. This must run for
+    # BOTH paths: plain `spi reconcile` also pulls the new commit and annotates
+    # every Kustomization including spi-namespaces, so it can render the empty
+    # label just as readily as --resume can.
+    try:
+        ensure_istio_revision_published()
+    except RuntimeError as exc:
+        console.print(f"[error]{exc}[/error]")
+        raise typer.Exit(code=1)
 
     if resume:
         ns = resolve_flux_namespace()

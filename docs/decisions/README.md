@@ -13,14 +13,14 @@ For more information [see](https://adr.github.io/).
    - Status starts as `proposed`.
 3. For each considered option, write one line on why it was rejected. The decision is what was chosen; alternatives get just enough space to show the trade-off.
 4. Open a PR. The status moves to `accepted` once the decision is agreed.
-5. Decisions can be changed later. A new ADR supersedes an old one; do not edit accepted ADRs in place.
+5. Decisions can be changed later. Reversing or materially changing an accepted decision needs a new ADR that supersedes the old one; do not silently rewrite a closed decision in place. A small additive adjustment that extends a decision without contradicting it (a later profile, flag, or value) may instead be recorded as a short dated amendment note in the existing ADR, since a whole new ADR for a one-line change is disproportionate.
 
 ## ADR Style
 
-ADRs record decisions, not engineering logs. Keep them short and forward-facing so a reader can grok the decision in a single pass.
+ADRs record decisions, not engineering logs. Keep them short and forward-facing so a reader can grok the decision in a single pass. The prose style (voice, word list, review checklist) is fixed in [docs/STYLE.md](../STYLE.md); the structural rules below complement it.
 
 - **No `## Validation` sections.** Phase-by-phase acceptance logs belong in the PR description, not in the ADR.
-- **No post-acceptance `## Amendment` sections.** If a decision needs revising, write a new ADR that supersedes it. Inline amendments re-open a record that should be closed.
+- **Amend only for small additive notes; supersede for real changes.** A decision that is reversed or materially changed gets a new ADR that supersedes it, not a rewrite of the closed record. A minor additive extension that does not contradict the decision (for example a later profile that reuses the same pattern) may be captured as a brief dated amendment note, a line or two, in place rather than a full new ADR.
 - **No incident narrative in Context.** State the structural problem the decision addresses. Specific clusters, timeout values, and triggering incidents age poorly inside the ADR.
 - **One-line option rejections.** Write "Rejected: <one clause>" rather than paragraphs re-litigating prior attempts.
 - **Forward-looking, not retrospective.** "Supersedes X because..." is fine; "The previous version of this ADR proposed..." is a sign the ADR should be superseded rather than edited.
@@ -44,10 +44,10 @@ Create an ADR for any decision that could plausibly have gone a different way an
 | ADR | Title | Status |
 |-----|-------|--------|
 | [001](001-azure-paas-for-data.md) | Azure PaaS for OSDU Data Services | Accepted |
-| [002](002-aks-automatic.md) | AKS Automatic as Compute Substrate | Superseded by [021](021-aks-base-node-autoprovisioning.md) |
+| [002](002-aks-automatic.md) | AKS Automatic as Compute Substrate | Accepted; reaffirmed by [040](040-aks-automatic-only.md) |
 | [003](003-in-cluster-middleware-scope.md) | In-Cluster Middleware Scope | Accepted |
 | [004](004-local-helm-chart-safeguards.md) | Local Helm Chart for Safeguards Compliance | Accepted |
-| [005](005-workload-identity.md) | Workload Identity for Azure PaaS Access | Accepted |
+| [005](005-workload-identity.md) | Workload Identity for Azure PaaS Access | Accepted; data-plane boundary revised by [027](027-entra-only-data-plane.md) |
 | [006](006-three-namespace-model.md) | Three-Namespace Model | Accepted |
 | [007](007-layered-kustomization-ordering.md) | Layered Flux Kustomization Ordering | Accepted |
 | [008](008-bicep-for-azure-provisioning.md) | Bicep for Azure Provisioning | Accepted |
@@ -57,15 +57,28 @@ Create an ADR for any decision that could plausibly have gone a different way an
 | [012](012-ingress-profiles.md) | Three Ingress Profiles (azure, dns, ip) | Accepted |
 | [013](013-schema-load-flux-job.md) | Schema Load via a Flux-Managed Job | Accepted |
 | [014](014-suspend-gitops-after-deploy.md) | Suspend GitOps Reconciliation After Deploy | Accepted |
-| [015](015-partition-entitlements-bootstrap.md) | Partition + Entitlements Bootstrap via a Flux Helm Chart | Accepted |
-| [016](016-istio-jwt-projection.md) | Istio JWT Projection for Azure-Provider OSDU Services | Accepted |
+| [015](015-partition-entitlements-bootstrap.md) | Partition + Entitlements Bootstrap via a Flux Helm Chart | Accepted; membership seeding extended by [036](036-per-identity-authorization.md) |
+| [016](016-istio-jwt-projection.md) | Istio JWT Projection for Azure-Provider OSDU Services | Accepted; projection revised by [036](036-per-identity-authorization.md) |
 | [017](017-osdu-image-lock.md) | Per-Deploy Image Lock via ConfigMap + Flux Substitution | Accepted |
 | [018](018-karpenter-nodepool-authoring.md) | Karpenter NodePool Authoring as Workload Manifests | Accepted |
-| [019](019-adme-aligned-integration-tests.md) | ADME-Aligned, Secret-Less Integration Tests on the Deploy Lane | Accepted |
-| [020](020-deploy-lane-invariants.md) | Deploy-Lane CI-Mode and Digest-Pin Invariants | Accepted |
-| [021](021-aks-base-node-autoprovisioning.md) | AKS Base SKU with Node Autoprovisioning | Accepted |
-| [022](022-disable-local-auth-data-services.md) | Disable Local Auth on Azure Data Services | Accepted |
-| [023](023-application-insights-telemetry.md) | Application Insights for Service Telemetry | Accepted |
-| [024](024-record-ingestion-data-plane.md) | Record-Ingestion Data-Plane Enablement | Accepted |
-| [025](025-spi-ghcr-service-images.md) | SPI-Built GHCR Images as the Service Baseline | Accepted |
-| [026](026-graduated-wellbore-profile.md) | Graduated Profile Starts with the Wellbore Service Pair | Accepted |
+| [019](019-kubernetes-136-minimum.md) | Kubernetes 1.36 Minimum for AKS Automatic | Accepted |
+| [020](020-osdu-flux-gitops-namespace.md) | Dedicated Namespace for SPI GitOps Objects | Accepted |
+| [021](021-data-plane-rbac-dual-path.md) | Data-Plane RBAC Dual Path | Superseded by [027](027-entra-only-data-plane.md) |
+| [022](022-spi-pool-node-label.md) | SPI-Owned Node-Pool Label Contract | Accepted |
+| [023](023-optional-application-insights.md) | Optional Application Insights | Accepted |
+| [024](024-middleware-only-minimal-profile.md) | Middleware-Only Minimal Profile | Accepted |
+| [025](025-tls-certificates-in-platform.md) | TLS Certificates in the Platform Namespace | Accepted |
+| [026](026-airflow-3.md) | Airflow 3, Single-Engine | Accepted |
+| [027](027-entra-only-data-plane.md) | Entra-Only Azure Data Plane | Accepted |
+| [028](028-windows-batch-shim-launcher.md) | Windows Batch Shim Launcher | Proposed |
+| [029](029-adme-aligned-integration-tests.md) | ADME-Aligned, Secret-Less Integration Tests on the Deploy Lane | Accepted |
+| [030](030-deploy-lane-invariants.md) | Deploy-Lane CI-Mode and Digest-Pin Invariants | Accepted |
+| [032](032-spi-ghcr-service-images.md) | SPI-Built GHCR Images as the Service Baseline | Accepted |
+| [033](033-selectable-aks-deployment-modes.md) | Selectable AKS Deployment Modes | Superseded by [040](040-aks-automatic-only.md) |
+| [034](034-runtime-resolved-istio-revision.md) | Runtime-Resolved Managed Istio Revision | Accepted |
+| [035](035-entra-first-data-plane.md) | Entra-First Azure Data Plane | Superseded by [027](027-entra-only-data-plane.md) |
+| [036](036-per-identity-authorization.md) | Per-Identity Authorization | Accepted |
+| [037](037-cluster-side-onboarding.md) | Cluster-Side Service Onboarding | Accepted |
+| [038](038-subscription-resolved-availability-zones.md) | Subscription-Resolved Availability Zones | Accepted |
+| [039](039-graduated-wellbore-profile.md) | Graduated Profile Starts with the Wellbore Service Pair | Accepted |
+| [040](040-aks-automatic-only.md) | AKS Automatic as the Only Cluster Topology | Accepted |

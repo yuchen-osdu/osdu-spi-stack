@@ -1,0 +1,106 @@
+# SPI Stack - Ingress profile: AZURE, minimal variant
+#
+# Identical to ingress/azure/ minus spi-osdu-routes. The minimal stack
+# profile deploys no OSDU services, so a Kustomization that dependsOn
+# spi-osdu-services would stall on DependencyNotReady forever.
+#
+# Required variables in spi-ingress-config ConfigMap (osdu-flux):
+#   ACME_EMAIL, INGRESS_FQDN
+
+---
+# Cert issuers (Let's Encrypt staging + prod).
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: spi-cert-manager-issuers
+  namespace: osdu-flux
+  labels:
+    spi-stack.layer: "1"
+spec:
+  interval: 10m
+  dependsOn:
+    - name: spi-cert-manager
+  sourceRef:
+    kind: GitRepository
+    name: osdu-spi-stack-system
+  path: ./software/components/cert-manager-issuers
+  prune: true
+  wait: true
+  timeout: 5m
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: spi-ingress-config
+
+---
+# Kibana with server.basePath=/kibana so it can serve from a subpath.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: spi-kibana
+  namespace: osdu-flux
+  labels:
+    spi-stack.layer: "3"
+spec:
+  interval: 10m
+  dependsOn:
+    - name: spi-elasticsearch
+  sourceRef:
+    kind: GitRepository
+    name: osdu-spi-stack-system
+  path: ./software/overlays/kibana-subpath
+  prune: true
+  wait: true
+  timeout: 10m
+
+---
+# HTTPS:443 listener with Let's Encrypt cert for the auto-FQDN.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: spi-gateway
+  namespace: osdu-flux
+  labels:
+    spi-stack.layer: "1"
+spec:
+  interval: 10m
+  dependsOn:
+    - name: spi-cert-manager-issuers
+  sourceRef:
+    kind: GitRepository
+    name: osdu-spi-stack-system
+  path: ./software/overlays/gateway-tls-single-host
+  prune: true
+  wait: true
+  timeout: 10m
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: spi-ingress-config
+
+---
+# HTTPRoutes for the middleware UIs (Kibana /kibana, Airflow /airflow).
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: spi-middleware-routes
+  namespace: osdu-flux
+  labels:
+    spi-stack.layer: "6"
+spec:
+  interval: 10m
+  dependsOn:
+    - name: spi-airflow
+    - name: spi-kibana
+    - name: spi-gateway
+  sourceRef:
+    kind: GitRepository
+    name: osdu-spi-stack-system
+  path: ./software/stacks/osdu/routes/single-host/middleware
+  prune: true
+  wait: true
+  timeout: 5m
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: spi-ingress-config

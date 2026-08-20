@@ -21,6 +21,12 @@ param repoUrl string
 param repoBranch string = 'main'
 
 @description('Profile path segment under software/stacks/osdu/profiles (e.g., "core").')
+@allowed([
+  'bare'
+  'minimal'
+  'core'
+  'graduated'
+])
 param profile string = 'core'
 
 @description('Ingress profile path segment under software/stacks/osdu/ingress (for example azure or azure-graduated).')
@@ -50,6 +56,8 @@ var gitRepositoryBase = {
 var gitRepositoryAuth = !empty(gitRepositoryLocalAuthRef) ? {
   localAuthRef: gitRepositoryLocalAuthRef
 } : {}
+
+var ingressPath = './software/stacks/osdu/ingress/${ingressMode}'
 
 resource aks 'Microsoft.ContainerService/managedClusters@2024-10-01' existing = {
   name: clusterName
@@ -100,7 +108,7 @@ resource gitopsConfig 'Microsoft.KubernetesConfiguration/fluxConfigurations@2024
         timeoutInSeconds: 1800
       }
       ingress: {
-        path: './software/stacks/osdu/ingress/${ingressMode}'
+        path: ingressPath
         prune: true
         syncIntervalInSeconds: 600
         timeoutInSeconds: 1800

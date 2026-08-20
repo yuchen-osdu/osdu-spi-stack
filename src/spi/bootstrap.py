@@ -21,8 +21,15 @@ from .templates import storage_class
 STORAGE_CLASSES = ["pg-storageclass", "redis-storageclass", "es-storageclass"]
 
 
-def _detect_istio_revision() -> str:
+def detect_istio_revision() -> str:
     """Detect the installed Istio ASM revision from the cluster."""
+    data = kubectl_json(["get", "deploy", "-n", "aks-istio-system"])
+    if data and data.get("items"):
+        for item in data["items"]:
+            name = item.get("metadata", {}).get("name", "")
+            if name.startswith("istiod-"):
+                return name.removeprefix("istiod-")
+
     data = kubectl_json(["get", "ns", "aks-istio-system"])
     if data:
         rev = data.get("metadata", {}).get("labels", {}).get("istio.io/rev", "")
@@ -34,7 +41,7 @@ def _detect_istio_revision() -> str:
         rev = data["items"][0].get("metadata", {}).get("labels", {}).get("istio.io/rev", "")
         if rev:
             return rev
-    return "asm-1-28"
+    raise RuntimeError("Unable to detect the installed AKS managed Istio revision.")
 
 
 def ensure_namespaces(istio_revision: str = "") -> None:
@@ -42,7 +49,7 @@ def ensure_namespaces(istio_revision: str = "") -> None:
     console.print("\n[bold]Ensuring namespaces...[/bold]")
 
     if not istio_revision:
-        istio_revision = _detect_istio_revision()
+        istio_revision = detect_istio_revision()
     console.print(f"  [info]Istio revision: {istio_revision}[/info]")
 
     for ns in ["osdu-flux", "foundation", "platform"]:

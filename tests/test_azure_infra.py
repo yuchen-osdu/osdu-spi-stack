@@ -9,6 +9,8 @@ import json
 import subprocess
 from unittest import mock
 
+import pytest
+
 from spi import azure_infra
 from spi.config import Config
 
@@ -27,8 +29,10 @@ def test_existing_aks_outputs_includes_kubelet_identity_object_id():
     cluster = {
         "name": cfg.cluster_name,
         "id": "/subscriptions/s/resourceGroups/rg/providers/x/managedClusters/c",
-        "location": "eastus2",
+        "location": cfg.location,
         "provisioningState": "Succeeded",
+        "sku": {"name": "Automatic"},
+        "currentKubernetesVersion": "1.36.2",
         "oidcIssuerProfile": {"issuerUrl": "https://oidc"},
         "identity": {"userAssignedIdentities": {"/id": {"principalId": "cluster-pid"}}},
         "identityProfile": {"kubeletidentity": {"objectId": "kubelet-oid"}},
@@ -47,11 +51,29 @@ def test_existing_aks_outputs_kubelet_id_empty_when_absent():
     cfg = Config(env="dev1")
     cluster = {
         "name": cfg.cluster_name,
-        "location": "eastus2",
+        "location": cfg.location,
         "provisioningState": "Succeeded",
+        "sku": {"name": "Automatic"},
+        "kubernetesVersion": "1.36.0",
     }
     with mock.patch.object(azure_infra, "run_command", return_value=_fake_result(cluster)):
         out = azure_infra._existing_aks_outputs(cfg)
 
     assert out is not None
     assert out["kubeletIdentityObjectId"] == ""
+
+
+def test_existing_aks_outputs_rejects_unsupported_kubernetes_version():
+    cfg = Config(env="dev1")
+    cluster = {
+        "name": cfg.cluster_name,
+        "location": cfg.location,
+        "provisioningState": "Succeeded",
+        "sku": {"name": "Automatic"},
+        "currentKubernetesVersion": "1.35.9",
+    }
+    with (
+        mock.patch.object(azure_infra, "run_command", return_value=_fake_result(cluster)),
+        pytest.raises(RuntimeError, match="requires 1.36 or newer"),
+    ):
+        azure_infra._existing_aks_outputs(cfg)

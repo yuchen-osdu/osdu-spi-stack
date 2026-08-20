@@ -26,7 +26,7 @@ spec:
       tag: "${WELLBORE_DOMAIN_SERVICES_IMAGE_TAG}"
       digest: "${WELLBORE_DOMAIN_SERVICES_IMAGE_DIGEST}"
     nodeSelector:
-      agentpool: osdu
+      spi-pool: osdu
     tolerations:
       - key: workload
         operator: Equal

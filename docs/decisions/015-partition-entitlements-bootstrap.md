@@ -32,7 +32,7 @@ Shape:
 Rejected:
 
 - **Imperative CLI step.** Re-opens the problems ADR-011 and ADR-013 closed: hidden CLI dependency, no re-run from the cluster, invisible to `flux get kustomizations`.
-- **Per-partition Flux Kustomization stamping.** One Kustomization per partition would duplicate every wiring decision in this ADR. A single Kustomization that contains a chart with a per-partition loop is the same outcome with less YAML.
+- **Per-partition Flux Kustomization stamping.** One Kustomization per partition duplicates every wiring decision above. A single Kustomization holding a chart with a per-partition loop is the same outcome with less YAML.
 - **Partition-prefixed values in the chart's `partition.json`.** Double-prefixes every stored value and surfaces as "Invalid data partition id" the first time a service dereferences the record. The bare-key pattern matches what `partition-azure` expects.
 
 ## Consequences

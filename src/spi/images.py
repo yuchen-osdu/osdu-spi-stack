@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -143,9 +144,9 @@ CORE_IMAGE_NAMES = (
     "unit",
 )
 PROFILE_IMAGE_NAMES = {
+    "bare": (),
+    "minimal": (),
     "core": CORE_IMAGE_NAMES,
-    # Full remains the backward-compatible alias for the implemented core stack.
-    "full": CORE_IMAGE_NAMES,
     "graduated": CORE_IMAGE_NAMES
     + (
         "wellbore-domain-services",
@@ -170,11 +171,31 @@ def image_lock_key(service_name: str) -> str:
     return service_name.upper().replace("-", "_")
 
 
-def gitlab_get(url: str):
+def _urlopen_with_retry(
+    request: urllib.request.Request,
+    *,
+    attempts: int = 3,
+    timeout: int = 15,
+):
+    """Open an HTTP request, retrying transient network and server failures."""
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return urllib.request.urlopen(request, timeout=timeout)  # nosec B310
+        except (TimeoutError, urllib.error.URLError, ConnectionError) as exc:
+            if isinstance(exc, urllib.error.HTTPError) and exc.code < 500:
+                raise
+            last_error = exc
+            if attempt < attempts:
+                time.sleep(5 * attempt)
+    raise ImageResolutionError(f"Registry request failed after {attempts} attempts: {last_error}")
+
+
+def gitlab_get(url: str, attempts: int = 3):
     """GET a GitLab API URL and return parsed JSON."""
 
     req = urllib.request.Request(url, headers={"User-Agent": "spi-stack-resolver"})
-    with urllib.request.urlopen(req, timeout=15) as resp:  # nosec B310
+    with _urlopen_with_retry(req, attempts=attempts) as resp:
         return json.loads(resp.read())
 
 

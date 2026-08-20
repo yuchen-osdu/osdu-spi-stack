@@ -23,7 +23,7 @@ Some pieces are in every mode and live under `software/components/`:
 - **Managed Istio** from AKS Automatic (ADR-002). Provides the Gateway API implementation and the ingress LoadBalancer service.
 - **`Gateway` resource** in the `aks-istio-ingress` namespace. The selected ingress profile is its sole Flux owner. `ip` renders HTTP:80 only; `azure` and `dns` render HTTP:80 plus their HTTPS listeners in the same Kustomization.
 - **cert-manager** for any mode that issues TLS (`azure`, `dns`).
-- **`spi-ingress-config` ConfigMap** in `flux-system`, written by the CLI during K8s bootstrap. Carries `GATEWAY_HOSTNAME`, `GATEWAY_LABEL`, `DNS_ZONE`, and similar values consumed by Flux `postBuild.substituteFrom`.
+- **`spi-ingress-config` ConfigMap** in `osdu-flux`, written by the CLI during K8s bootstrap. Carries `GATEWAY_HOSTNAME`, `GATEWAY_LABEL`, `DNS_ZONE`, and similar values consumed by Flux `postBuild.substituteFrom`.
 
 ## Mode: `azure` (default)
 
@@ -103,7 +103,7 @@ You curl `https://<label>.<region>.cloudapp.azure.com/api/partition/v1/partition
 Five things to check in order:
 
 1. **DNS resolves.** `dig <label>.<region>.cloudapp.azure.com`. If empty, the AKS LB Service does not have the DNS label annotation; check `kubectl get svc -n aks-istio-ingress -o yaml`.
-2. **TLS handshake completes.** `curl -vI https://<label>...`. If TLS errors, cert-manager has not issued. `kubectl describe certificate -n aks-istio-ingress` shows the ACME state.
+2. **TLS handshake completes.** `curl -vI https://<label>...`. If TLS errors, cert-manager has not issued. `kubectl describe certificate -n platform` shows the ACME state (certs issue into `platform` and reach the Gateway via ReferenceGrant, ADR-025).
 3. **The HTTPRoute exists and is accepted.** `kubectl get httproute -n osdu`. The `Accepted` condition should be `True`. If the Gateway rejected it (hostname mismatch), the message tells you which field is wrong.
 4. **The backend Service has endpoints.** `kubectl get endpoints -n osdu`. If the service has no ready pods, the 404 is actually a 503 wearing 404 clothing.
 5. **The path matches what the service expects.** OSDU APIs live under `/api/<service>/v1/...`. The HTTPRoute is path-prefix-based, not regex, so a typo in the path is a 404.
@@ -116,7 +116,7 @@ Same drill, plus one: **ExternalDNS wrote the A record.** `kubectl logs deploy/e
 
 ## Related ADRs
 
-- [ADR-002](../decisions/002-aks-automatic.md) -- AKS Automatic (managed Istio + Gateway)
+- [ADR-040](../decisions/040-aks-automatic-only.md) -- AKS Automatic and managed Istio
 - [ADR-005](../decisions/005-workload-identity.md) -- Workload Identity (second UAMI for ExternalDNS)
 - [ADR-006](../decisions/006-three-namespace-model.md) -- Three-namespace model (Gateway in `aks-istio-ingress`)
 - [ADR-012](../decisions/012-ingress-profiles.md) -- Three Ingress Profiles

@@ -16,7 +16,7 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "rich>=15.0.0",
-    "typer>=0.26.5",
+    "typer>=0.27.0",
     "pydantic>=2.13.4",
     "pyyaml>=6.0",
     "packaging>=26.2",
@@ -54,12 +54,12 @@ exclude = [
 
 [dependency-groups]
 dev = [
-    "pre-commit>=4.6.0",
-    "pytest>=9.0.3",
+    "pre-commit>=4.6.1",
+    "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "pyyaml>=6.0.3",
-    "ruff>=0.15.15",
-    "ty>=0.0.42",
+    "ruff>=0.16.0",
+    "ty>=0.0.63",
 ]
 
 [tool.ruff]
