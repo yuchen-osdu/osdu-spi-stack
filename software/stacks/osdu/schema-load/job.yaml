@@ -70,7 +70,7 @@ spec:
             defaultMode: 0755
       containers:
         - name: loader
-          image: community.opengroup.org:5555/osdu/platform/system/schema-service/schema-service-schema-load-master:df3e78629f7e398cbda86d93946e49b011076d8f
+          image: community.opengroup.org:5555/osdu/platform/system/schema-service/schema-service-schema-load-master@sha256:c4596cdfc5510116c2777d575fad661a397b2fce09132af4980c3d99a461c66c
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:

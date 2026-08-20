@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -33,6 +34,11 @@ WELLBORE_IMAGES = {
     "wellbore-domain-services",
     "wellbore-domain-services-worker",
 }
+SCHEMA_LOAD_IMAGE = (
+    "community.opengroup.org:5555/osdu/platform/system/schema-service/"
+    "schema-service-schema-load-master"
+    "@sha256:c4596cdfc5510116c2777d575fad661a397b2fce09132af4980c3d99a461c66c"
+)
 
 
 def test_image_sets_are_profile_aware():
@@ -43,6 +49,14 @@ def test_image_sets_are_profile_aware():
     assert graduated == core | WELLBORE_IMAGES
     assert len(core) == 13
     assert len(graduated) == 15
+
+
+def test_schema_load_uses_available_immutable_digest():
+    job = (
+        Path(__file__).parents[1] / "software" / "stacks" / "osdu" / "schema-load" / "job.yaml"
+    ).read_text(encoding="utf-8")
+
+    assert f"image: {SCHEMA_LOAD_IMAGE}" in job
 
 
 def _image_lock_data(profile: str) -> dict[str, str]:
