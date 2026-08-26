@@ -1,7 +1,5 @@
 # ADR-015: Partition + Entitlements Bootstrap via a Flux Helm Chart
 
-**Status**: Accepted
-
 ## Context
 
 OSDU's Azure provider needs two pieces of state in place before any record, schema, or entitlements operation can succeed against a fresh cluster:
@@ -39,6 +37,6 @@ Rejected:
 
 - Fresh deploy reaches a schema-loaded cluster whose creator can call user-facing OSDU APIs without a manual Entitlements post-step.
 - Multi-partition enables via `spi up --env dev1 --partition p1 --partition p2`; the chart renders one partition-init + one entitlements-init Job per partition with no manifest changes.
-- Four per-partition Key Vault secrets are declared in `partition.bicep` (`{p}-storage-account-blob-endpoint`, and `"DISABLED"` placeholders for `{p}-cosmos-connection`, `{p}-sb-connection`, `{p}-storage-account-key`) so the partition record resolves under Workload Identity without exposing real connection strings. Service Bus local auth is disabled; indexer-queue must use a Workload Identity-aware Service Bus client path.
+- Four per-partition Key Vault secrets are declared in `partition.bicep` (`{p}-storage-account-blob-endpoint`, and `"DISABLED"` placeholders for `{p}-cosmos-connection`, `{p}-sb-connection`, `{p}-storage-account-key`) so the partition record resolves under Workload Identity without exposing real connection strings (ADR-023). The `{p}-sb-connection` placeholder leaves indexer-queue's community image unable to authenticate; the gap is covered in ADR-005.
 - Manual re-run is `kubectl delete job -n osdu partition-init-{p} entitlements-init-{p}` followed by `flux reconcile kustomization spi-osdu-init`. 409 responses on re-run are treated as success.
 - Additional human users remain an explicit administration task; only the identity that runs `spi up` is seeded automatically.

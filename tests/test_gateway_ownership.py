@@ -32,10 +32,18 @@ def _resources(relative_path: str) -> set[str]:
     return set(document.get("resources", []))
 
 
-def test_core_profile_does_not_own_gateway():
+def test_core_profile_gateway_kustomization_is_the_orphaned_placeholder():
+    """The live Gateway is owned only by the ingress tree's spi-gateway-tls.
+
+    The core spi-gateway Kustomization is retained solely to orphan the old
+    Flux inventory without pruning the Gateway during the ownership handoff.
+    """
     core = _kustomizations("software/stacks/osdu/profiles/core/stack.yaml")
 
-    assert all(document["metadata"]["name"] != "spi-gateway" for document in core)
+    gateway = _by_name(core, "spi-gateway")
+    assert gateway["spec"]["path"] == "./software/components/inventory-handoff"
+    assert gateway["spec"]["prune"] is False
+    assert gateway["spec"]["deletionPolicy"] == "Orphan"
 
 
 def test_each_ingress_profile_has_exactly_one_gateway_owner():
@@ -47,21 +55,25 @@ def test_each_ingress_profile_has_exactly_one_gateway_owner():
 
     for mode, expected_path in expected_paths.items():
         documents = _kustomizations(f"software/stacks/osdu/ingress/{mode}/stack.yaml")
-        gateway = _by_name(documents, "spi-gateway")
+        gateway = _by_name(documents, "spi-gateway-tls")
 
         assert gateway["spec"]["path"] == expected_path
-        assert all(document["metadata"]["name"] != "spi-gateway-tls" for document in documents)
-        assert "spi-gateway" in _dependencies(_by_name(documents, "spi-osdu-routes"))
+        assert all(document["metadata"]["name"] != "spi-gateway" for document in documents)
+        assert "spi-gateway-tls" in _dependencies(_by_name(documents, "spi-osdu-routes"))
 
 
 def test_tls_profiles_order_issuer_before_gateway():
-    for mode in ("azure", "dns"):
+    expected_gateway_deps = {
+        "azure": {"spi-cert-manager-issuers", "spi-ingress-dns-label"},
+        "dns": {"spi-cert-manager-issuers"},
+    }
+    for mode, expected in expected_gateway_deps.items():
         documents = _kustomizations(f"software/stacks/osdu/ingress/{mode}/stack.yaml")
         issuers = _by_name(documents, "spi-cert-manager-issuers")
-        gateway = _by_name(documents, "spi-gateway")
+        gateway = _by_name(documents, "spi-gateway-tls")
 
         assert _dependencies(issuers) == {"spi-cert-manager"}
-        assert _dependencies(gateway) == {"spi-cert-manager-issuers"}
+        assert _dependencies(gateway) == expected
 
 
 def test_tls_overlays_retain_http_gateway_base_for_acme():

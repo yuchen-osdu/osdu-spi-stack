@@ -1,13 +1,6 @@
----
-status: "accepted"
-contact: "Yuchen Wang"
-date: "2026-07-27"
-deciders: "Yuchen Wang"
----
+# ADR-038: Resolve System Pool Availability Zones per Subscription
 
-# Resolve System Pool Availability Zones per Subscription
-
-## Context and Problem Statement
+## Context
 
 The AKS system pool is created with an explicit availability-zone list, exposed
 as the `availabilityZones` parameter on the cluster template. The parameter
@@ -41,7 +34,7 @@ already exists.
 - Keep the parameter and require operators to override it per environment
 - Maintain a per-region zone table in the repository
 
-## Decision Outcome
+## Decision
 
 Chosen option: "Resolve the usable zones from the subscription at deploy time".
 
@@ -59,7 +52,7 @@ they may be using for the first time. Rejected: a per-region table, because it
 encodes one subscription's entitlements into a shared template and goes stale
 silently.
 
-### Consequences
+## Consequences
 
 - Good, because the same template deploys unmodified across subscriptions.
 - Good, because a restricted zone is discovered before any resource is created.

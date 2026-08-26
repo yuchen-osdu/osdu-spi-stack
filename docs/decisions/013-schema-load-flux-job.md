@@ -1,7 +1,5 @@
 # ADR-013: Schema Load via a Flux-Managed Job
 
-**Status**: Accepted
-
 ## Context
 
 After Flux reconciles the OSDU core services, the schema-service Pod is `Ready` but its Cosmos DB container is empty. Any downstream record call that references a `kind` fails with `schema not found`. Loading the ~1,386 shared schemas that the OSDU community publishes is a mechanical, one-shot operation that has to happen exactly once per environment on fresh deploy.
@@ -17,7 +15,7 @@ Shape:
 - New Kustomization `spi-osdu-schema-load` at `software/stacks/osdu/schema-load/`, wired into the core profile as Layer 5b (after `spi-osdu-init`, before `spi-osdu-reference`) per ADR-007.
 - Single `Job` with `workload-identity-sa`, the workload-identity pod label, and a mounted ConfigMap that provides `Token.py` and `bootstrap.sh` at the paths the loader image's entrypoint expects.
 - Kustomization `healthChecks` target the Job's `Complete` condition so `spi status` surfaces the Job alongside every other Flux resource.
-- The loader image tag is pinned to the same SHA as `schema.yaml`. `scripts/resolve-image-tags.py --update` advances both tags together.
+- The loader image tag is resolved through `osdu-image-lock` from the same SHA selected for schema-service.
 - `bootstrap.sh` post-processes the loader's exit code: "already exists" failures are not fatal, so re-runs are idempotent.
 
 Rejected:
@@ -28,7 +26,7 @@ Rejected:
 ## Consequences
 
 - Fresh deploy reaches a usable schema-service with no CLI post-step.
-- Schema loader upgrades move with the service image via the existing tag-resolver.
+- Schema loader upgrades move with the service image via the live image lock.
 - Manual re-run is `kubectl delete job schema-load -n osdu` followed by `flux reconcile kustomization spi-osdu-schema-load --with-source`. Flux re-applies the Job.
 - The loader tag depends on OSDU community registry retention. Mirroring the image to the SPI ACR (already provisioned) is an available follow-up if retention becomes a problem.
-- Only the schema-service is seeded. Reference data, legal tags, entitlements root groups, and partition initialization are out of scope and remain future work.
+- Only the schema-service is seeded here; partition initialization and entitlements root-group provisioning run as a separate Flux-managed chart (ADR-015). Reference data and legal tags remain out of scope.

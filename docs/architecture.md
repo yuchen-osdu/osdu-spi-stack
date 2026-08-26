@@ -71,7 +71,7 @@ Three application namespaces:
 | **platform** | Middleware and Gateway | No | Elasticsearch, Redis, PostgreSQL (Airflow), Airflow, Istio Gateway |
 | **osdu** | OSDU services | Yes | OSDU service deployments, schema-load Job, `osdu-config`, `workload-identity-sa` |
 
-The `flux-system` namespace is managed by the AKS Flux extension and hosts the Flux controllers. SPI-owned GitOps objects (the `GitRepository`, Kustomizations, and bootstrap ConfigMaps/Secrets) live in the dedicated `osdu-flux` namespace (see [ADR-020](decisions/020-osdu-flux-gitops-namespace.md)). `aks-istio-system` and `aks-istio-ingress` are owned by AKS. See [ADR-006](decisions/006-three-namespace-model.md).
+The `flux-system` namespace is managed by the AKS Flux extension and hosts the Flux controllers. SPI-owned GitOps objects (the `GitRepository`, Kustomizations, and bootstrap ConfigMaps/Secrets) live in the dedicated `osdu-flux` namespace (see [ADR-019](decisions/019-osdu-flux-gitops-namespace.md)). `aks-istio-system` and `aks-istio-ingress` are owned by AKS. See [ADR-006](decisions/006-three-namespace-model.md).
 
 ### Layered dependency model
 
@@ -101,11 +101,30 @@ at Layer 7 while leaving the worker internal. See
 [ADR-012](decisions/012-ingress-profiles.md), and
 [ADR-039](decisions/039-graduated-wellbore-profile.md).
 
-## AKS Compute (Automatic)
+## Stack Profiles
+
+`spi up --profile <name>` selects which slice of the layer DAG Flux reconciles.
+
+| Profile | Layers | Deploys |
+|---------|--------|---------|
+| `minimal` | 0a-4b | Middleware only: operators, cert-manager, trust-manager, Gateway, Elasticsearch, Redis, PostgreSQL, Airflow, CA bundles. No OSDU services. |
+| `core` (default) | 0a-6 | Everything in `minimal`, plus the OSDU services, partition/entitlements bootstrap, schema load, and reference services. |
+| `graduated` | 0a-7 | Everything in `core`, plus Wellbore DDMS, its worker, policies, and routes. |
+| `bare` | none | Nothing. Infra plus activated GitOps only; Flux reconciles empty stack and ingress trees. |
+
+Layers 0a through 4b are byte-identical between `minimal`, `core`, and
+`graduated`, so middleware validated under `minimal` behaves the same under
+the fuller profiles. Because `minimal` never creates `spi-osdu-services`, it
+pairs with the `<mode>-minimal` ingress trees, which omit the OSDU HTTPRoute
+Kustomization that would otherwise stall on that dependency. See
+[ADR-021](decisions/021-middleware-only-minimal-profile.md) and
+[ADR-039](decisions/039-graduated-wellbore-profile.md).
+
+## AKS Automatic
 
 SPI Stack runs AKS Automatic on Kubernetes 1.36. That version supports the
 mutating webhooks required by cert-manager and CloudNativePG while retaining
-the managed platform features the stack depends on:
+the managed platform features below:
 
 | Feature | What it does |
 |---------|-------------|
@@ -115,7 +134,7 @@ the managed platform features the stack depends on:
 | **Azure RBAC for Kubernetes** | Cluster authorization |
 | **Cilium CNI** | eBPF networking in overlay mode |
 | **Managed Prometheus / Container Insights** | Cluster metrics and logs to Azure Monitor / Log Analytics |
-| **Application Insights** | Optional per-service request, dependency, and exception telemetry (`spi up --application-insights`; [ADR-023](decisions/023-optional-application-insights.md)) |
+| **Application Insights** | Optional per-service request, dependency, and exception telemetry (`spi up --application-insights`; [ADR-020](decisions/020-optional-application-insights.md)) |
 
 AKS Deployment Safeguards enforce the platform baseline, and the local
 `osdu-spi-service` Helm chart also bakes the same pod hardening into its
@@ -128,7 +147,8 @@ templates:
 - Resource requests and limits defined
 - Liveness and readiness probes defined
 
-See [ADR-019](decisions/019-kubernetes-136-minimum.md),
+See [ADR-002](decisions/002-aks-automatic.md),
+[ADR-031](decisions/031-kubernetes-136-minimum.md),
 [ADR-040](decisions/040-aks-automatic-only.md), and
 [ADR-004](decisions/004-local-helm-chart-safeguards.md).
 
@@ -249,9 +269,12 @@ Kustomizations consume that ConfigMap through Flux post-build substitution.
 `--image-ref` is an advanced path for resolving the same Git feature ref to each
 repository's `sha-<commit>` image. Run `spi reconcile --refresh-images` to
 refresh the configured selector. `--image-source community` retains the prior
-OSDU GitLab resolver as a fallback.
-`scripts/resolve-image-tags.py --update` remains available for static image
-references such as the schema-load Job.
+OSDU GitLab resolver as an explicit fallback.
+The refresh reconciles services, schema-load, then reference services in
+dependency order. Community fleets match schema-load to the selected
+schema-service SHA. GHCR fleets resolve the current community loader because
+the SPI schema repository publishes only the service package. A plain
+`spi reconcile` preserves pins and backfills loader entries into legacy locks.
 
 ### Suspend and resume
 
@@ -284,14 +307,7 @@ Created by the CLI during K8s bootstrap and mounted into every OSDU service via 
 | PaaS metadata and secret values | Azure Key Vault | SDK reads under Workload Identity (or CSI) |
 | In-cluster middleware passwords | Kubernetes Secrets in `platform`/`osdu` | CLI-generated once per environment |
 
-Key Vault endpoint metadata and compatibility placeholders are declared in
-`infra/main.bicep` and its modules. Cosmos and Service Bus local authentication
-is disabled, so their key-shaped secrets contain `DISABLED` rather than
-credential material. Runtime secrets that depend on in-cluster seed passwords
-(Elasticsearch and Redis credentials, `tbl-storage-endpoint`) are written
-post-handoff by the CLI. See
-[ADR-010](decisions/010-keyvault-secret-management.md) and
-[ADR-027](decisions/027-entra-only-data-plane.md).
+Most Key Vault secret values are declared in `infra/main.bicep` and resolved at deploy time. Local auth is disabled on the Cosmos and Service Bus accounts (ADR-023), so their key and connection secrets are written as `"DISABLED"` placeholders instead of real key material. A small set of runtime secrets that depend on in-cluster seed passwords (Elasticsearch and Redis credentials, `tbl-storage-endpoint`) are written post-handoff by the CLI. See [ADR-010](decisions/010-keyvault-secret-management.md).
 
 ### CA distribution and Redis mTLS
 

@@ -90,15 +90,6 @@ TOOL_REGISTRY: dict[str, ToolInfo] = {
             "windows": "winget install FluxCD.Flux",
         },
     },
-    "helm": {
-        "check_args": ["version", "--short"],
-        "description": "Helm package manager",
-        "install": {
-            "darwin": "brew install helm",
-            "linux": "curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash",
-            "windows": "winget install Helm.Helm",
-        },
-    },
 }
 
 
@@ -178,7 +169,7 @@ def check_prerequisites(tools: List[str]) -> None:
 
     if missing:
         console.print(f"\n[error]Missing required tools: {', '.join(missing)}[/error]")
-        console.print("[dim]Run 'uv run spi check' for full details.[/dim]")
+        console.print("[dim]Run 'spi check' for full details.[/dim]")
         raise typer.Exit(code=1)
 
 

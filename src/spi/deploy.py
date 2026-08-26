@@ -25,12 +25,14 @@ import json
 import os
 import subprocess
 import time
+from typing import Any, Dict, Optional, Tuple
 
 import typer
 
 from .azure_infra import provision_azure_infra
 from .bicep import run_bicep_deployment
 from .bootstrap import (
+    create_istio_revision_configmap,
     create_storage_classes,
     ensure_namespaces,
     install_gateway_api_crds,
@@ -41,9 +43,9 @@ from .images import (
     IMAGE_LOCK_CONFIGMAP,
     IMAGE_LOCK_NAMESPACE,
     ImageResolutionError,
+    ResolvedImage,
     image_lock_key,
     image_lock_names,
-    render_image_lock_configmap,
     resolve_image_lock,
 )
 from .ingress import (
@@ -53,8 +55,9 @@ from .ingress import (
     resolve_post_deploy_inputs,
 )
 from .paths import INFRA_ROOT
+from .pins import PinError, live_pins, render_lock_with_pins
 from .secrets import ensure_secrets, get_or_create_seed
-from .shell import kubectl_apply_yaml, kubectl_json, run_command, run_process
+from .shell import kubectl_apply_yaml, kubectl_json, prune_kube_context, run_command, run_process
 from .templates import (
     istio_auth_resources,
     osdu_config_configmap,
@@ -218,8 +221,8 @@ def _create_spi_init_values(config: Config) -> None:
     )
 
 
-def _resolve_image_lock(config: Config) -> str:
-    """Resolve the configured service image baseline and render the Flux lock."""
+def _resolve_image_lock(config: Config) -> dict[str, ResolvedImage]:
+    """Resolve the configured service image baseline."""
 
     selector = config.image_ref or config.image_tag
     console.print(
@@ -242,14 +245,7 @@ def _resolve_image_lock(config: Config) -> str:
             f"  [success]{name}[/success] -> {image.repository.split('/')[-1]}:{image.tag[:12]}"
         )
 
-    return render_image_lock_configmap(
-        resolved,
-        source=config.image_source,
-        tag=config.image_tag,
-        ref=config.image_ref,
-        org=config.image_org,
-        profile=config.gitops_profile,
-    )
+    return resolved
 
 
 def _create_image_lock(image_lock_yaml: str) -> None:
@@ -486,6 +482,8 @@ def deploy_azure(
     config: Config,
     dry_run: bool = False,
     refresh_images: bool = True,
+    azure_account: Optional[Dict[str, Any]] = None,
+    deployer_principal: Optional[Tuple[str, str]] = None,
 ) -> None:
     """Provision Azure infra, bootstrap Kubernetes, deploy via GitOps.
 
@@ -493,7 +491,7 @@ def deploy_azure(
     Kubernetes bootstrap phase, and GitOps activation are skipped so the
     caller can inspect what would change without actually provisioning.
     """
-    image_lock_yaml = ""
+    resolved_images: dict[str, ResolvedImage] = {}
     # Core and graduated deploy OSDU services that consume the image lock.
     # Minimal and bare skip registry resolution entirely.
     if (
@@ -507,7 +505,7 @@ def deploy_azure(
     ):
         # Resolve before provisioning so registry/API failures stop quickly and
         # never leave a partially configured cluster with a mixed image set.
-        image_lock_yaml = _resolve_image_lock(config)
+        resolved_images = _resolve_image_lock(config)
 
     # For dns mode we need to resolve the DNS zone BEFORE running main.bicep
     # so the conditional external-dns-identity + DNS Zone Contributor role
@@ -518,13 +516,19 @@ def deploy_azure(
         config.dns_zone_rg = rg
 
     # Phase 1-3: Azure infrastructure
-    infra_outputs = provision_azure_infra(config, dry_run=dry_run)
+    infra_outputs = provision_azure_infra(
+        config,
+        dry_run=dry_run,
+        account=azure_account,
+        deployer_principal=deployer_principal,
+    )
 
     if dry_run:
         return
 
     # Phase 4: Kubernetes bootstrap
-    ensure_namespaces(infra_outputs.get("istio_revision", ""))
+    istio_revision = ensure_namespaces(infra_outputs.get("istio_revision", ""))
+    create_istio_revision_configmap(istio_revision)
     create_storage_classes()
     install_gateway_api_crds()
 
@@ -534,8 +538,33 @@ def deploy_azure(
     _deploy_flux_config(config, activate_gitops=False)
 
     ensure_secrets()
-    if image_lock_yaml:
-        _create_image_lock(image_lock_yaml)
+    if resolved_images:
+        try:
+            pins = live_pins()
+        except PinError as exc:
+            console.print(f"[error]{exc}[/error]")
+            console.print(
+                "[error]Cannot verify service pin state; aborting before the "
+                "image lock overwrite could revert an active pin.[/error]"
+            )
+            raise typer.Exit(code=1)
+        _create_image_lock(
+            render_lock_with_pins(
+                resolved_images,
+                pins,
+                source=config.image_source,
+                tag=config.image_tag,
+                ref=config.image_ref,
+                org=config.image_org,
+                profile=config.gitops_profile,
+            )
+        )
+        if pins:
+            console.print(
+                "[warning]Active service pins preserved: "
+                + ", ".join(f"{name} (MR !{pin.mr})" for name, pin in sorted(pins.items()))
+                + "; release with 'spi service reset <service>'.[/warning]"
+            )
     elif config.profile in {Profile.CORE, Profile.GRADUATED}:
         _validate_existing_image_lock(config.profile)
     _create_osdu_config(config, infra_outputs)
@@ -580,9 +609,50 @@ def deploy_azure(
     _pin_gitops_source()
 
 
+def _cluster_api_server(config: Config) -> str:
+    """The API server FQDN of the cluster about to be deleted, or "".
+
+    Read while the resource group still exists, because it is what proves a
+    kubeconfig context belongs to this cluster rather than a same-named one
+    in another subscription. Comes back empty when the cluster is already
+    gone or was never created, and the prune then leaves the kubeconfig
+    alone. `privateFqdn` comes first because a private cluster populates both
+    fields, and `az aks get-credentials` without `--public-fqdn` is what wrote
+    the kubeconfig entry this is compared against.
+    """
+    result = run_command(
+        [
+            "az",
+            "aks",
+            "show",
+            "--resource-group",
+            config.resource_group,
+            "--name",
+            config.cluster_name,
+            "--query",
+            "privateFqdn || fqdn",
+            "--output",
+            "tsv",
+        ],
+        description=f"Look up API server for {config.cluster_name}",
+        display=False,
+        check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
 def cleanup_azure(config: Config) -> None:
-    """Delete Azure resource group and all resources."""
+    """Delete Azure resource group and all resources.
+
+    The kubeconfig entries `spi up` merged in point at a cluster that is
+    about to stop answering, so they are pruned on the way out. The prune
+    waits for Azure to report the resource group gone; `--no-wait` returns on
+    acceptance, and an accepted delete can still fail afterwards.
+    """
     console.print("\n[bold]Cleaning up Azure resources...[/bold]")
+    api_server = _cluster_api_server(config)
     result = run_command(
         ["az", "group", "delete", "--name", config.resource_group, "--yes", "--no-wait"],
         description=f"Delete resource group: {config.resource_group}",
@@ -602,6 +672,7 @@ def cleanup_azure(config: Config) -> None:
             check=False,
         )
         if exists.returncode == 0 and exists.stdout.strip().lower() == "false":
+            prune_kube_context(config.cluster_name, server_fqdn=api_server)
             display_result(f"Resource group {config.resource_group} deleted")
             return
         time.sleep(10)
@@ -609,4 +680,8 @@ def cleanup_azure(config: Config) -> None:
     display_result("Cleanup accepted by Azure; deletion is continuing in the background")
     console.print(
         f"  [warning]Verify later with: az group exists --name {config.resource_group}[/warning]"
+    )
+    console.print(
+        f"  [warning]kubeconfig context {config.cluster_name} is left in place until the "
+        f"deletion is confirmed[/warning]"
     )

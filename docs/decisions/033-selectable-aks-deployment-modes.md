@@ -1,17 +1,10 @@
----
-status: "superseded by [ADR-040](040-aks-automatic-only.md)"
-contact: "Yuchen Wang"
-date: "2026-07-24"
-deciders: "Yuchen Wang"
----
+# ADR-033: Selectable AKS Deployment Modes
 
-# Selectable AKS Deployment Modes
-
-## Context and Problem Statement
+## Context
 
 Two validated cluster topologies now exist for the same stack. AKS Automatic is
 the upstream substrate (ADR-002) and is deployable again on Kubernetes 1.36
-(ADR-019). A temporary AKS Base topology with Node Autoprovisioning was adopted while
+(ADR-031). A temporary AKS Base topology with Node Autoprovisioning was adopted while
 Automatic blocked the mutating webhooks cert-manager and CloudNativePG require,
 and it remains a fully validated deployment shape with explicit Azure RBAC,
 Cilium overlay networking, and a region-aware system pool.
@@ -36,7 +29,7 @@ proven fallback.
 - Base only, deferring Automatic indefinitely
 - One conditional AKS template covering both SKUs
 
-## Decision Outcome
+## Decision
 
 Chosen option: "Two selectable modes behind a persistent flag".
 
@@ -59,7 +52,7 @@ Rejected: Base only, because it permanently diverges from upstream.
 Rejected: one conditional template, because mode-specific properties are
 mutually exclusive and a single resource obscures which shape is deployed.
 
-### Consequences
+## Consequences
 
 - Good, because the zero-flag path matches upstream AKS Automatic.
 - Good, because the Base topology stays validated without a second software

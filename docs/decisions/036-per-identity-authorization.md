@@ -1,13 +1,6 @@
----
-status: "accepted"
-contact: "Yuchen Wang"
-date: "2026-07-24"
-deciders: "Yuchen Wang"
----
+# ADR-036: Per-Identity Authorization with Explicit Membership Seeding
 
-# Per-Identity Authorization with Explicit Membership Seeding
-
-## Context and Problem Statement
+## Context
 
 ADR-016 projects token claims into the `x-app-id` and `x-user-id` headers the
 Azure-provider OSDU images read. Its original filter collapsed every token with
@@ -33,7 +26,7 @@ prove nothing about authorization, and a negative test cannot fail.
 - Keep the audience special case and grant test identities implicitly
 - Seed membership directly in the Entitlements graph
 
-## Decision Outcome
+## Decision
 
 Chosen option: "Identity-only projection plus explicit membership seeding".
 
@@ -57,7 +50,7 @@ Rejected: keeping the audience special case, because it makes authorization
 tests meaningless. Rejected: graph-level seeding, because it couples bootstrap
 to Entitlements internals that ADR-015 already avoided.
 
-### Consequences
+## Consequences
 
 - Good, because authorization is enforced per identity and is testable in both
   directions.

@@ -1,10 +1,3 @@
----
-status: "accepted"
-contact: "Yuchen Wang"
-date: "2026-08-19"
-deciders: "Yuchen Wang"
----
-
 # ADR-039: Graduated profile starts with the Wellbore service pair
 
 ## Context
@@ -23,7 +16,7 @@ Add a cumulative `graduated` profile containing:
 - the internal `wellbore-domain-services-worker`;
 - a public route for the main service only;
 - NetworkPolicy and Istio AuthorizationPolicy around the worker;
-- profile-aware atomic image resolution for the core 13 images plus the two
+- profile-aware atomic image resolution for the core 14 images plus the two
   Wellbore images.
 
 The worker uses the same Workload Identity as the core services, resolves its

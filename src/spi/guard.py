@@ -156,9 +156,7 @@ def verify_spi_cluster() -> str:
         console.print(
             "[dim]The osdu-spi-stack-system GitRepository was not found on the cluster.[/dim]"
         )
-        console.print(
-            "[dim]Run 'uv run spi up' to deploy, or set SPI_SKIP_GUARD=1 to bypass.[/dim]"
-        )
+        console.print("[dim]Run 'spi up' to deploy, or set SPI_SKIP_GUARD=1 to bypass.[/dim]")
         raise typer.Exit(code=1)
 
     return ctx

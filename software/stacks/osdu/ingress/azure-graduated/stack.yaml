@@ -9,7 +9,7 @@ spec:
   interval: 10m
   dependsOn:
     - name: spi-wellbore-services
-    - name: spi-gateway
+    - name: spi-gateway-tls
   sourceRef:
     kind: GitRepository
     name: osdu-spi-stack-system

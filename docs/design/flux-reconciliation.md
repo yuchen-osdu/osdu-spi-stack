@@ -29,7 +29,7 @@ OSDU service images move on a different cadence than the repo. Per [ADR-017](../
 
 The service Kustomizations under `software/stacks/osdu/profiles/core/` carry `postBuild.substituteFrom` blocks that reference `osdu-image-lock`. When Flux reconciles those Kustomizations, the `${PARTITION_IMAGE_REPOSITORY}` and `${PARTITION_IMAGE_TAG}` expressions in the rendered YAML expand against the live ConfigMap. Updating the lock and reconciling the Kustomization triggers a rolling update.
 
-The CLI is the only writer of `osdu-image-lock`. `spi reconcile --refresh-images` re-resolves and re-applies the lock, then forces a reconcile on the service Kustomizations. Nothing else moves service image tags.
+The CLI is the only writer of `osdu-image-lock`. `spi reconcile --refresh-images` re-resolves and re-applies the lock, then forces a reconcile on the service Kustomizations. `spi service pin <name> --mr <iid>` overwrites one service's lock entries with the image an OSDU merge-request pipeline built, recording provenance and the canonical image in a lock annotation ([ADR-017](../decisions/017-osdu-image-lock.md)); `spi service reset` restores the canonical entries. Both refresh paths render the lock with active pins overlaid, so a refresh or a re-run `spi up` never reverts a pin. Nothing else moves service image tags.
 
 ## The layer DAG (core profile)
 
@@ -42,8 +42,9 @@ L1  spi-cert-manager          dependsOn: spi-namespaces
     spi-trust-manager         dependsOn: spi-cert-manager
     spi-eck-operator          dependsOn: spi-namespaces
     spi-cnpg-operator         dependsOn: spi-namespaces
+    spi-helm-sources          dependsOn: spi-namespaces           (ADR-025)
 L2  spi-elasticsearch         dependsOn: spi-eck-operator, spi-nodepools
-    spi-redis                 dependsOn: spi-cert-manager, spi-nodepools
+    spi-redis                 dependsOn: spi-cert-manager, spi-nodepools, spi-helm-sources
     spi-postgresql            dependsOn: spi-cnpg-operator, spi-nodepools
 L3  spi-airflow               dependsOn: spi-postgresql
 L4a spi-osdu-config           dependsOn: spi-namespaces
@@ -54,7 +55,7 @@ L5b spi-osdu-schema-load      dependsOn: spi-osdu-init            (ADR-013)
 L6  spi-osdu-reference        dependsOn: spi-osdu-services, spi-osdu-schema-load
 ```
 
-The `ingress` Kustomization (`software/stacks/osdu/ingress/<mode>/stack.yaml`) attaches the sole `spi-gateway` owner at L1, plus cert issuers and ExternalDNS where required, and HTTPRoutes at L6. See [ADR-007](../decisions/007-layered-kustomization-ordering.md) and [gateway-ingress](gateway-ingress.md).
+The `ingress` Kustomization (`software/stacks/osdu/ingress/<mode>/stack.yaml`) attaches additional Kustomizations at L1 (the mode's Gateway owner, cert issuers, and ExternalDNS for `dns`) and L6 (HTTPRoutes). The active Gateway owner lives in the ingress tree because its listeners are mode-specific and exactly one Kustomization may render and prune the object. See [ADR-025](../decisions/025-single-flux-inventory-owner.md) and [gateway-ingress](gateway-ingress.md).
 
 ## How `dependsOn` actually gates
 
@@ -62,7 +63,7 @@ A Kustomization with `wait: true` (every Kustomization in the SPI stack uses thi
 
 Two gotchas worth knowing:
 
-1. **`wait: true` is per-layer slow.** A slow operator delays everything behind it. Per-layer `timeout` is tuned in `stack.yaml` (15 min for Elasticsearch and Airflow, 30 min for the OSDU service layers, 35 min for schema-load). Bumping a timeout is a real change; bump it deliberately, not reflexively.
+1. **`wait: true` is per-layer slow.** A slow operator delays everything behind it. Per-layer `timeout` is tuned in `stack.yaml` (15 min for Elasticsearch and Airflow, 30 min for the OSDU service layers, 155 min for schema-load, which tracks the Job's `activeDeadlineSeconds` plus headroom). Bumping a timeout is a real change; bump it deliberately, not reflexively.
 2. **Cross-Kustomization dependencies are not transitive.** L5 dependsOn L4b but not L1; if L1 breaks, L5 reports its own gate as unmet (L4b never went Ready), not "L1 broken." Trace the chain upward to find the root.
 
 When debugging a stuck layer:
@@ -108,6 +109,14 @@ spec:
 
 So changing the ConfigMap changes the resolved image on the next reconcile. The lock is the entire pin surface; no service YAML has a static image tag.
 
+## `postBuild.substituteFrom` for the cluster Istio revision
+
+`spi-namespaces` uses the same mechanism for one value: the managed Istio revision that labels the `osdu` namespace. The revision is a property of the cluster (`istiod-asm-1-30` in `aks-istio-system`), not of the repository, so `software/components/namespaces/namespaces.yaml` carries `istio.io/rev: ${ISTIO_REVISION}` and the Kustomization substitutes it from `osdu-flux/spi-cluster-config`.
+
+The CLI owns that ConfigMap. `spi up` writes it during the Kubernetes bootstrap, before Flux is installed, and every `spi reconcile` (including `--resume`) re-detects the live revision and re-applies it. That keeps clusters bootstrapped by an older CLI, and clusters whose AKS Istio revision was upgraded after the last deploy, on the correct value before any new commit is applied.
+
+The substitution is not marked `optional`. A missing ConfigMap fails `spi-namespaces` with `substitute from ConfigMap ... not found` and blocks the layers above it, which is the intended outcome: the alternative is labelling `osdu` with a guessed revision, which disables sidecar injection silently and surfaces much later as `app-id=` empty (see [workload identity](workload-identity.md)). Recovery is `spi reconcile`.
+
 ## Suspend and resume
 
 `spi up` ends with `kubectl patch gitrepository/osdu-spi-stack-system --type=merge -p '{"spec":{"suspend":true}}'`. This stops the source-controller from polling and stops Flux from auto-applying new revisions. It does **not** stop downstream Kustomizations from reconciling against the cached revision; Phase 2 runs to completion exactly as ADR-014 promises.
@@ -117,7 +126,9 @@ So changing the ConfigMap changes the resolved image on the next reconcile. The 
 | `spi reconcile` | One-shot reconcile (annotates the source + stack Kustomization with `reconcile.fluxcd.io/requestedAt`) | yes (unchanged) |
 | `spi reconcile --suspend` | Set `spec.suspend: true` if not already | yes |
 | `spi reconcile --resume` | Set `spec.suspend: false` (Flux resumes 10-min polling) | no |
-| `spi reconcile --refresh-images` | Re-resolve `osdu-image-lock`, re-apply, then reconcile service Kustomizations | yes (unchanged) |
+| `spi reconcile --refresh-images` | Re-resolve `osdu-image-lock`, re-apply (active pins overlaid), then reconcile service Kustomizations | yes (unchanged) |
+| `spi service pin <name> --mr <iid>` | Overwrite one service's lock entries with an MR pipeline image, then reconcile its consumers in dependency order | yes (unchanged) |
+| `spi service reset <name>` | Restore the pinned service's canonical lock entries, then reconcile its consumers | yes (unchanged) |
 
 `spi status` and `spi info` both show a yellow `SUSPENDED` banner when the source is pinned.
 
@@ -142,7 +153,7 @@ $ kubectl describe kustomization spi-bootstrap -n osdu-flux
    redis-disable-mtls not found
 ```
 
-The Istio CRD has not registered yet, or the namespace is wrong. `kubectl get crd | grep istio` confirms. Fix the upstream (`spi-gateway` Kustomization or the AKS Istio extension), reconcile, and the chain unblocks layer by layer.
+The Istio CRD has not registered yet, or the namespace is wrong. `kubectl get crd | grep istio` confirms. Fix the upstream Gateway owner (`spi-gateway-tls`, declared by the selected ingress tree) or the AKS Istio extension, reconcile, and the chain unblocks layer by layer.
 
 The same pattern works for HelmRelease failures (`flux get helmreleases -n osdu-flux`), schema-load Job failures (`kubectl logs job/schema-load -n osdu`), and image substitution failures (`kubectl get cm osdu-image-lock -n osdu-flux -o yaml` shows the resolved values).
 
@@ -151,7 +162,7 @@ The same pattern works for HelmRelease failures (`flux get helmreleases -n osdu-
 ```bash
 $ uv run spi reconcile --refresh-images
 [CLI]   resolving OSDU community registry...
-[CLI]   resolved 13 images (PARTITION_IMAGE_TAG=ab12cd34..., ...)
+[CLI]   resolved 14 images (PARTITION_IMAGE_TAG=ab12cd34..., ...)
 [CLI]   kubectl apply -f -  (osdu-image-lock)
 [Flux]  reconciling kustomization spi-osdu-services
 [Flux]  HelmRelease partition upgraded

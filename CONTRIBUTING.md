@@ -87,7 +87,7 @@ Use [Conventional Commits](https://www.conventionalcommits.org/) format:
 ```
 feat(cli): add --dry-run flag to up command
 fix(bicep): handle missing partition tag gracefully
-docs(adr): add ADR-019 for ingress profiles
+docs(adr): add ADR-012 for ingress profiles
 chore(deps): bump typer to 0.24
 refactor(providers): extract shared cluster validation
 ```
@@ -103,6 +103,21 @@ need to appear).
 PR titles must follow Conventional Commits because GitHub squash-merge uses
 the PR title as the commit subject. A non-conforming title would silently
 disappear from auto-generated release notes.
+
+### PR Descriptions
+
+The description is the durable record of why a change happened; squash-merge
+keeps only the title in history. Structure it in three parts:
+
+1. **Why**: the problem or measurement that motivated the change, with the
+   number or named artifact that demonstrates it. A reviewer should
+   understand the motivation before reading any diff.
+2. **What changed**: grouped by concern rather than by file, one line each.
+   Do not restate the diff.
+3. **Validation**: which checks ran and their results, reported honestly.
+   A check that could not run is listed with the reason, never omitted.
+
+Keep the whole description under roughly 20 lines.
 
 ## Validation Before Submitting
 

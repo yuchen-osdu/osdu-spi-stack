@@ -5,7 +5,32 @@
 # spi-osdu-services would stall on DependencyNotReady forever.
 #
 # Required variables in spi-ingress-config ConfigMap (osdu-flux):
-#   ACME_EMAIL, INGRESS_FQDN
+#   ACME_EMAIL, INGRESS_FQDN, DNS_LABEL
+
+---
+# Azure DNS label on the add-on's external ingress Service. Applied by
+# Flux because only the flux-system controllers are exempt from the
+# admission policy that denies writes in aks-istio-ingress.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: spi-ingress-dns-label
+  namespace: osdu-flux
+  labels:
+    spi-stack.layer: "1"
+spec:
+  interval: 10m
+  sourceRef:
+    kind: GitRepository
+    name: osdu-spi-stack-system
+  path: ./software/components/azure-dns-label
+  prune: false
+  wait: true
+  timeout: 5m
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: spi-ingress-config
 
 ---
 # Cert issuers (Let's Encrypt staging + prod).
@@ -54,11 +79,13 @@ spec:
   timeout: 10m
 
 ---
-# HTTPS:443 listener with Let's Encrypt cert for the auto-FQDN.
+# The Gateway: HTTP:80 for ACME HTTP-01 plus the HTTPS:443 listener
+# bound to the auto-FQDN. The ingress tree is the Gateway's sole Flux
+# owner, so no second Kustomization re-applies the object.
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
-  name: spi-gateway
+  name: spi-gateway-tls
   namespace: osdu-flux
   labels:
     spi-stack.layer: "1"
@@ -66,6 +93,7 @@ spec:
   interval: 10m
   dependsOn:
     - name: spi-cert-manager-issuers
+    - name: spi-ingress-dns-label
   sourceRef:
     kind: GitRepository
     name: osdu-spi-stack-system
@@ -92,7 +120,7 @@ spec:
   dependsOn:
     - name: spi-airflow
     - name: spi-kibana
-    - name: spi-gateway
+    - name: spi-gateway-tls
   sourceRef:
     kind: GitRepository
     name: osdu-spi-stack-system

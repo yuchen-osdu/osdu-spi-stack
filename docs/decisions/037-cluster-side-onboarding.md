@@ -1,13 +1,6 @@
----
-status: "accepted"
-contact: "Yuchen Wang"
-date: "2026-07-27"
-deciders: "Yuchen Wang"
----
+# ADR-037: Cluster-Side Onboarding for Service-Fork CI/CD
 
-# Cluster-Side Onboarding for Service-Fork CI/CD
-
-## Context and Problem Statement
+## Context
 
 The deploy lane (ADR-029, ADR-030) lets a service fork build an image and set it
 on a running Deployment. That only works once the fork can actually reach the
@@ -39,7 +32,7 @@ as a retired cluster's identity while every other setting points at the new one.
 - Documented manual steps
 - A separate bootstrap tool outside the CLI
 
-## Decision Outcome
+## Decision
 
 Chosen option: "A single idempotent `spi onboard` command".
 
@@ -64,7 +57,7 @@ failures are delayed and hard to attribute. Rejected: a separate tool, because
 it would duplicate the CLI's existing cluster discovery, naming and
 authentication.
 
-### Consequences
+## Consequences
 
 - Good, because onboarding a fork is one reviewable command with a preview mode.
 - Good, because re-running repairs drift instead of compounding it.

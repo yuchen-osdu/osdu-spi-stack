@@ -1,7 +1,5 @@
 # ADR-005: Workload Identity for Azure PaaS Access
 
-**Status**: Accepted
-
 ## Context
 
 OSDU services authenticate to Cosmos DB, Service Bus, Azure Storage, and Key Vault. The alternative is to store connection strings or service-principal credentials as Kubernetes Secrets; those leak easily, require rotation, and multiply the secret inventory.
@@ -28,3 +26,7 @@ Rejected: per-service UAMIs with least-privilege scoping. The role surface (the 
 - The schema-load Job (ADR-013) and any future workloads in the `osdu` namespace reuse this ServiceAccount without any new Azure-side provisioning.
 - Service Bus local authentication is disabled and `${partition}-sb-connection` is a `"DISABLED"` placeholder. Services that use Service Bus must set both `AZURE_MSI_ISENABLED=true` and `AZURE_PAAS_WORKLOADIDENTITY_ISENABLED=true` so `core-lib-azure` chooses the token path.
 - `indexer-queue` remains the compatibility risk: current upstream pins `core-lib-azure` 2.0.6, whose subscription client can use legacy MSI but does not have the newer Workload Identity-aware client path. It must move to a Workload Identity-aware core-lib version before local-auth-disabled Service Bus can work end to end.
+- The default SPI image fleet contains a Workload-Identity-capable
+  indexer-queue build. The explicit community fallback remains subject to the
+  upstream compatibility gap described in
+  [secret lifecycle](../design/secret-lifecycle.md).
