@@ -144,8 +144,8 @@ def _show_next_steps(config: Config):
         table.add_row("Check operators", "kubectl get pods -n foundation")
         table.add_row("Check middleware", "kubectl get pods -n platform")
         table.add_row("Check services", "kubectl get pods -n osdu")
-    table.add_row("View status", "uv run spi status")
-    table.add_row("Cleanup", f"uv run spi down{config.env_flag}")
+    table.add_row("View status", "spi status")
+    table.add_row("Cleanup", f"spi down{config.env_flag}")
 
     console.print(table)
 
@@ -1040,7 +1040,7 @@ def reconcile(
         )
         console.print(
             "[dim]The cluster is pinned and safe for deploy-lane CI (ADR-032). "
-            "Run 'uv run spi reconcile --resume' to unfreeze.[/dim]"
+            "Run 'spi reconcile --resume' to unfreeze.[/dim]"
         )
         return
 
