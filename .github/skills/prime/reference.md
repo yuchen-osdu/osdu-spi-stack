@@ -9,7 +9,7 @@ Repository: `Azure/osdu-spi-stack`
 src/spi/                  Python CLI (Typer + Rich + Pydantic)
   cli.py                  Commands: check, up, down, status, info, reconcile, update
   config.py               Config model (Azure-only, Profile enum)
-  checks.py               Tool prerequisites (az, bicep, kubectl, kubelogin, flux, helm)
+  checks.py               Tool prerequisites (az, bicep, kubectl, kubelogin, flux)
   deploy.py               Orchestrates: infra -> bootstrap -> GitOps (deploy_azure)
   azure_infra.py          RG + AKS imperative, PaaS via Bicep (provision_azure_infra)
   bicep.py                az deployment group create wrapper
@@ -73,6 +73,9 @@ uv run spi info --show-secrets               # Include credentials
 uv run spi reconcile                         # Force Flux reconcile
 uv run spi reconcile --suspend               # Freeze GitOps
 uv run spi reconcile --resume                # Unfreeze GitOps
+uv run spi service pin schema --mr 847       # Pin a service to an MR pipeline image
+uv run spi service reset schema              # Restore the canonical image
+uv run spi service list                      # Show active pins
 ```
 
 Azure resource names are derived from the `--env` flag for isolation.
@@ -83,7 +86,8 @@ Azure resource names are derived from the `--env` flag for isolation.
 (`docs/design/`), and `docs/architecture.md`. When reviewing or writing
 changes under `docs/`, hold them to that guide: impersonal active voice,
 claims backed by a named artifact or exact number, the banned/rationed word
-list, and its per-genre rules. ADRs are closed records (no dateable status,
+list, and its per-genre rules. ADRs state the current ruling and are
+rewritten in place when a decision changes (no status, dates, or amendments;
 no external-project narrative); design docs are living documents
 (status-marked present tense is correct). Review suggestions for these files
 must themselves comply with the guide; do not propose wording the guide bans.
@@ -91,7 +95,7 @@ must themselves comply with the guide; do not propose wording the guide bans.
 ## Key Design Decisions
 
 - Azure-only (no KinD/AWS/GCP); SPI services depend on Azure PaaS (ADR-001)
-- AKS Automatic 1.36 + managed Istio (ADR-019, ADR-040)
+- AKS Automatic 1.36 + managed Istio (ADR-031, ADR-040)
 - Imperative CLI bootstrap, then Flux CD + AKS GitOps Extension for K8s workloads (ADR-009)
 - Local Helm chart bakes Safeguards compliance into templates (ADR-004)
 - Workload Identity for all Azure PaaS access; no stored credentials (ADR-005)
@@ -101,10 +105,10 @@ must themselves comply with the guide; do not propose wording the guide bans.
 - Azure PaaS provisioning declared in Bicep (`infra/`); RG + AKS + soft-delete
   recovery + post-deploy Key Vault writes remain imperative (ADR-008)
 - Local auth disabled on Cosmos (Gremlin + SQL) and Service Bus for Microsoft-tenant
-  CloudGov policy; Workload Identity + data-plane RBAC instead (ADR-022)
-- Application Insights is optional/default-off and wired to all services when enabled (ADR-023)
+  CloudGov policy; Workload Identity + data-plane RBAC instead (ADR-023)
+- Application Insights is optional/default-off and wired to all services when enabled (ADR-020)
 - Record-ingestion data plane enabled: system-cosmos secrets, per-partition record
-  blob container, Elasticsearch TLS (ADR-024)
+  blob container, Elasticsearch TLS
 
 ## OSDU Service Provider Context
 
@@ -145,14 +149,18 @@ Services default to public images built by the yuchen-osdu SPI service forks:
 - `spi up` resolves only the selected profile's fleet and writes it to
   `osdu-flux/osdu-image-lock`; service manifests use Flux post-build
   substitution from that ConfigMap.
-- `--image-source community` retains the OSDU GitLab registry as a fallback.
+- Schema-load is always live-locked; community fleets match the schema-service
+  tag, while GHCR fleets resolve the current community loader explicitly.
+- `--image-source community` selects the OSDU GitLab registry explicitly.
 - Refresh a live cluster with `uv run spi reconcile --refresh-images`.
+- `spi service pin` and `spi service reset` manage MR pipeline images without
+  losing the canonical profile-aware fleet on refresh.
 - To refresh static checked-in image references, run
   `python scripts/resolve-image-tags.py --update`.
 
 ## Deployment Workflow
 
-1. `spi check` -- verify az, bicep, kubectl, kubelogin, flux, helm installed
+1. `spi check` -- verify az, bicep, kubectl, kubelogin, flux installed
 2. `spi up --env dev1` -- provisions Azure infra (~45-50 min, mostly AKS Automatic), bootstraps K8s, activates GitOps
    - RG + AKS via `az` CLI
    - Identity + KV + ACR + CosmosDB + Service Bus + Storage + RBAC via

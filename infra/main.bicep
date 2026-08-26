@@ -89,7 +89,7 @@ param dnsZoneName string = ''
 param dnsZoneResourceGroup string = ''
 
 @description('Object ID of the deployer. Grants Key Vault Secrets Officer so the post-deploy bootstrap step can write runtime secrets.')
-param deployerPrincipalId string = ''
+param deployerPrincipalId string
 
 @description('Principal type of deployerPrincipalId.')
 @allowed([

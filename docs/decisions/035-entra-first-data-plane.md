@@ -1,17 +1,10 @@
----
-status: "superseded by [ADR-027](027-entra-only-data-plane.md)"
-contact: "Yuchen Wang"
-date: "2026-07-24"
-deciders: "Yuchen Wang"
----
+# ADR-035: Entra-First Data-Plane Authentication Boundary
 
-# Entra-First Data-Plane Authentication Boundary
-
-## Context and Problem Statement
+## Context
 
 Two accepted decisions describe the data plane differently. ADR-021 keeps key
 and SAS material alongside data-plane RBAC so one codebase deploys in both
-policy-constrained and unconstrained subscriptions. ADR-027 disables local
+policy-constrained and unconstrained subscriptions. ADR-023 disables local
 authentication outright because Microsoft-tenant policy denies Service Bus
 namespaces with local auth enabled and forces `disableLocalAuth` on Cosmos
 accounts.
@@ -35,7 +28,7 @@ reads its Cosmos SQL key from Key Vault.
 - Dual path everywhere, keeping all key material
 - Entra-only everywhere, including Cosmos SQL
 
-## Decision Outcome
+## Decision
 
 Chosen option: "Entra-first with a named, capability-driven exception".
 
@@ -51,15 +44,15 @@ partition account, alongside Service Bus Data Sender and Receiver from ADR-005.
 Where keys work, the grants are inert; where policy removes keys, they are the
 live path.
 
-This supersedes the dual-path posture of ADR-021 for Gremlin and Service Bus and
-narrows ADR-027 for Cosmos SQL. Removing the remaining SQL key is gated solely on
+This supersedes the dual-path posture now preserved as ADR-043 for Gremlin and Service Bus and
+is itself superseded by ADR-023. Removing the remaining SQL key was gated on
 Partition gaining the data-plane MSI client.
 
 Rejected: dual path everywhere, because it retains credentials the deployed
 images no longer use. Rejected: Entra-only everywhere, because it breaks
 Partition today.
 
-### Consequences
+## Consequences
 
 - Good, because the same Bicep deploys in constrained and unconstrained
   subscriptions.

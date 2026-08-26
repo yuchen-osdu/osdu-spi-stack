@@ -26,7 +26,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Iterable
+from typing import Iterable, Mapping
 
 GITLAB_HOST = "https://community.opengroup.org"
 GITHUB_API_HOST = "https://api.github.com"
@@ -36,6 +36,8 @@ DEFAULT_GHCR_ORG = "yuchen-osdu"
 DEFAULT_GHCR_TAG = "main-snapshot"
 IMAGE_LOCK_CONFIGMAP = "osdu-image-lock"
 IMAGE_LOCK_NAMESPACE = "osdu-flux"
+SCHEMA_SERVICE_NAME = "schema"
+SCHEMA_LOAD_SERVICE_NAME = "schema-load"
 
 _SHA_TAG_RE = re.compile(r"^[0-9a-f]{40}$")
 _BEARER_PARAMETER_RE = re.compile(r'([a-zA-Z]+)="([^"]*)"')
@@ -48,6 +50,10 @@ class ImageSource(str, Enum):
 
 class ImageResolutionError(RuntimeError):
     """Raised when one or more OSDU image tags cannot be resolved."""
+
+
+class ImageNotFoundError(ImageResolutionError):
+    """Raised when a requested registry repository or tag does not exist."""
 
 
 @dataclass(frozen=True)
@@ -87,14 +93,10 @@ IMAGE_REGISTRY: dict[str, ImageRegistryEntry] = {
     "entitlements": ImageRegistryEntry(400, "entitlements", "services/entitlements.yaml"),
     "legal": ImageRegistryEntry(74, "legal", "services/legal.yaml"),
     "schema": ImageRegistryEntry(26, "schema-service", "services/schema.yaml"),
-    # The schema-load Job is intentionally not part of the live image lock.
-    # A completed Kubernetes Job cannot be updated in place, so it remains a
-    # Git default that the resolver script can refresh for new deployments.
     "schema-load": ImageRegistryEntry(
         26,
         "schema-service-schema-load",
         "schema-load/job.yaml",
-        image_lock=False,
     ),
     "storage": ImageRegistryEntry(44, "storage", "services/storage.yaml"),
     "search": ImageRegistryEntry(19, "search-service", "services/search.yaml"),
@@ -133,6 +135,9 @@ CORE_IMAGE_NAMES = (
     "entitlements",
     "legal",
     "schema",
+    # The loader Job ships only with core/graduated and joins the live lock
+    # even when the selected GHCR service fleet uses its community package.
+    "schema-load",
     "storage",
     "search",
     "indexer",
@@ -325,6 +330,11 @@ def _registry_tags(project_id: int, repo_id: int) -> list[dict]:
     return tags
 
 
+def _registry_repository(project_id: int, image_name: str) -> dict | None:
+    repos = _registry_repositories(project_id, image_name)
+    return next((repo for repo in repos if repo.get("name") == image_name), None)
+
+
 def _tag_detail(project_id: int, repo_id: int, tag: str) -> dict:
     quoted_tag = urllib.parse.quote(tag, safe="")
     return gitlab_get(
@@ -357,8 +367,7 @@ def resolve_image(service_name: str, entry: ImageRegistryEntry, branch: str) -> 
         else branch
     )
     image_name = f"{entry.image}-{effective_branch}"
-    repos = _registry_repositories(entry.project_id, image_name)
-    repo = next((r for r in repos if r.get("name") == image_name), None)
+    repo = _registry_repository(entry.project_id, image_name)
     if not repo:
         raise ImageResolutionError(f"{service_name}: registry repository {image_name!r} not found")
 
@@ -416,6 +425,81 @@ def resolve_ghcr_ref_image(service_name: str, org: str, ref: str) -> ResolvedIma
     )
 
 
+def resolve_image_tag(
+    service_name: str,
+    entry: ImageRegistryEntry,
+    branch: str,
+    tag: str,
+) -> ResolvedImage:
+    """Resolve a service image only if the exact tag exists."""
+
+    image_name = f"{entry.image}-{branch}"
+    repo = _registry_repository(entry.project_id, image_name)
+    if not repo:
+        raise ImageResolutionError(f"{service_name}: registry repository {image_name!r} not found")
+
+    try:
+        detail = _tag_detail(entry.project_id, repo["id"], tag)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise ImageResolutionError(
+                f"{service_name}: tag {tag!r} not found in {image_name!r}"
+            ) from exc
+        raise
+
+    return ResolvedImage(
+        name=service_name,
+        repository=repo["location"],
+        tag=detail["name"],
+        created_at=detail.get("created_at", ""),
+        digest=detail.get("digest", ""),
+    )
+
+
+def resolve_image_commit(
+    service_name: str,
+    entry: ImageRegistryEntry,
+    branch: str,
+    sha: str,
+) -> ResolvedImage:
+    """Resolve a service image only if a tag matches the given commit.
+
+    Pipeline tags are commit SHAs of varying length (full or CI short SHA),
+    so a tag matches when it equals the commit or is a prefix of it.
+    """
+
+    image_name = f"{entry.image}-{branch}"
+    repo = _registry_repository(entry.project_id, image_name)
+    if not repo:
+        raise ImageNotFoundError(f"{service_name}: registry repository {image_name!r} not found")
+
+    tags = _registry_tags(entry.project_id, repo["id"])
+    matches = [
+        tag["name"]
+        for tag in tags
+        if tag.get("name") and len(tag["name"]) >= 7 and sha.startswith(tag["name"])
+    ]
+    if not matches:
+        raise ImageNotFoundError(f"{service_name}: no tag for commit {sha[:12]} in {image_name!r}")
+
+    tag = max(matches, key=len)
+    try:
+        detail = _tag_detail(entry.project_id, repo["id"], tag)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise ImageNotFoundError(
+                f"{service_name}: tag {tag!r} not found in {image_name!r}"
+            ) from exc
+        raise
+    return ResolvedImage(
+        name=service_name,
+        repository=repo["location"],
+        tag=detail["name"],
+        created_at=detail.get("created_at", ""),
+        digest=detail.get("digest", ""),
+    )
+
+
 def resolve_images(
     source: ImageSource = ImageSource.GHCR,
     tag: str | None = None,
@@ -445,6 +529,8 @@ def resolve_images(
     errors: list[str] = []
 
     for name in requested:
+        if name == SCHEMA_LOAD_SERVICE_NAME:
+            continue
         entry = IMAGE_REGISTRY[name]
         try:
             if source == ImageSource.GHCR:
@@ -458,9 +544,60 @@ def resolve_images(
             message = str(exc)
             errors.append(message if message.startswith(f"{name}:") else f"{name}: {message}")
 
+    if SCHEMA_LOAD_SERVICE_NAME in requested:
+        if source == ImageSource.COMMUNITY:
+            try:
+                schema_image = resolved.get(SCHEMA_SERVICE_NAME)
+                if schema_image is None:
+                    if SCHEMA_SERVICE_NAME not in requested:
+                        schema_image = resolve_image(
+                            SCHEMA_SERVICE_NAME,
+                            IMAGE_REGISTRY[SCHEMA_SERVICE_NAME],
+                            resolved_ref,
+                        )
+                    else:
+                        raise ImageResolutionError(
+                            f"{SCHEMA_LOAD_SERVICE_NAME}: unable to resolve matching schema tag"
+                        )
+                resolved[SCHEMA_LOAD_SERVICE_NAME] = resolve_image_tag(
+                    SCHEMA_LOAD_SERVICE_NAME,
+                    IMAGE_REGISTRY[SCHEMA_LOAD_SERVICE_NAME],
+                    resolved_ref,
+                    schema_image.tag,
+                )
+            except Exception as exc:
+                if SCHEMA_SERVICE_NAME in requested:
+                    if not str(exc).startswith(f"{SCHEMA_LOAD_SERVICE_NAME}:"):
+                        errors.append(
+                            f"{SCHEMA_LOAD_SERVICE_NAME}: unable to resolve matching schema tag"
+                        )
+                    else:
+                        errors.append(str(exc))
+                else:
+                    errors.append(
+                        f"{SCHEMA_LOAD_SERVICE_NAME}: unable to resolve matching schema tag: {exc}"
+                    )
+        else:
+            try:
+                # The SPI GHCR fleet has no standalone schema-load package.
+                # Keep the loader live-locked from the community registry
+                # instead of retaining a committed digest that will be pruned.
+                resolved[SCHEMA_LOAD_SERVICE_NAME] = resolve_image(
+                    SCHEMA_LOAD_SERVICE_NAME,
+                    IMAGE_REGISTRY[SCHEMA_LOAD_SERVICE_NAME],
+                    DEFAULT_IMAGE_BRANCH,
+                )
+            except Exception as exc:
+                message = str(exc)
+                errors.append(
+                    message
+                    if message.startswith(f"{SCHEMA_LOAD_SERVICE_NAME}:")
+                    else f"{SCHEMA_LOAD_SERVICE_NAME}: {message}"
+                )
+
     if errors:
         raise ImageResolutionError("; ".join(errors))
-    return resolved
+    return {name: resolved[name] for name in requested}
 
 
 def resolve_image_lock(
@@ -481,6 +618,60 @@ def resolve_image_lock(
     )
 
 
+def image_lock_missing_schema_load(lock_data: Mapping[str, str]) -> bool:
+    """Report whether an existing lock predates schema-load's inclusion."""
+
+    key = image_lock_key(SCHEMA_LOAD_SERVICE_NAME)
+    return not (lock_data.get(f"{key}_IMAGE_REPOSITORY") and lock_data.get(f"{key}_IMAGE_TAG"))
+
+
+def schema_load_lock_patch(
+    lock_data: Mapping[str, str],
+    branch: str = DEFAULT_IMAGE_BRANCH,
+) -> dict[str, str]:
+    """Return the loader entries missing from an existing image lock.
+
+    Locks generated before schema-load joined the live lock carry a schema pin
+    but no loader keys, and the Job requires them (ADR-013). The loader is
+    resolved from the schema tag the lock already records, so the backfill
+    keeps the loader on the running service's commit instead of jumping to the
+    newest master build.
+    """
+
+    schema_tag = lock_data.get(f"{image_lock_key(SCHEMA_SERVICE_NAME)}_IMAGE_TAG", "")
+    if not schema_tag:
+        raise ImageResolutionError(
+            f"{SCHEMA_LOAD_SERVICE_NAME}: image lock records no schema image tag to match"
+        )
+
+    if lock_data.get("IMAGE_SOURCE", ImageSource.COMMUNITY.value) == ImageSource.COMMUNITY.value:
+        image = resolve_image_tag(
+            SCHEMA_LOAD_SERVICE_NAME,
+            IMAGE_REGISTRY[SCHEMA_LOAD_SERVICE_NAME],
+            lock_data.get("IMAGE_BRANCH") or branch,
+            schema_tag,
+        )
+    else:
+        image = resolve_image(
+            SCHEMA_LOAD_SERVICE_NAME,
+            IMAGE_REGISTRY[SCHEMA_LOAD_SERVICE_NAME],
+            DEFAULT_IMAGE_BRANCH,
+        )
+
+    key = image_lock_key(SCHEMA_LOAD_SERVICE_NAME)
+    patch = {
+        f"{key}_IMAGE": image.image,
+        f"{key}_IMAGE_REPOSITORY": image.repository,
+        f"{key}_IMAGE_TAG": image.tag,
+        f"{key}_IMAGE_CREATED_AT": image.created_at,
+        f"{key}_IMAGE_DIGEST": image.digest,
+    }
+    count = lock_data.get("IMAGE_COUNT", "")
+    if count.isdigit():
+        patch["IMAGE_COUNT"] = str(int(count) + 1)
+    return patch
+
+
 def _yaml_string(value: str) -> str:
     return json.dumps(str(value))
 
@@ -493,6 +684,7 @@ def render_image_lock_configmap(
     org: str = DEFAULT_GHCR_ORG,
     profile: str = "core",
     resolved_at: datetime | None = None,
+    extra_annotations: Mapping[str, str] | None = None,
 ) -> str:
     """Render the Flux substitution ConfigMap for service image pins."""
 
@@ -541,8 +733,11 @@ def render_image_lock_configmap(
         f"    spi-stack.osdu.dev/image-tag: {_yaml_string(resolved_tag)}",
         f"    spi-stack.osdu.dev/image-ref: {_yaml_string(resolved_ref)}",
         f"    spi-stack.osdu.dev/resolved-at: {_yaml_string(timestamp)}",
-        "data:",
     ]
+    annotations = dict(extra_annotations or {})
+    for key in sorted(annotations):
+        lines.append(f"    {key}: {_yaml_string(annotations[key])}")
+    lines.append("data:")
     for key in sorted(data):
         lines.append(f"  {key}: {_yaml_string(data[key])}")
     return "\n".join(lines) + "\n"

@@ -32,16 +32,19 @@ metadata:
     app.kubernetes.io/component: schema-load
 spec:
   backoffLimit: 2
-  # 60 min ceiling. The loader POSTs ~1,386 schemas; on a cold cluster the
-  # backing Cosmos autoscales up from its 400 RU/s floor and throttles (429)
-  # the initial burst, so the SDK retries with backoff and a single pass can
-  # exceed 30 min even when the schema service is immediately ready. Note
-  # activeDeadlineSeconds is a terminal Job deadline that overrides
-  # backoffLimit (no retry once exceeded), so it must cover the throttled
-  # worst case; 60 min does. Operators trigger a manual re-run with
-  # kubectl delete job schema-load -n osdu (already-loaded schemas return
-  # 409 and are skipped, so a re-run converges quickly).
-  activeDeadlineSeconds: 3600
+  # 150 min ceiling covers every delay this Job can hit on a cold cluster.
+  # activeDeadlineSeconds starts counting when the Job becomes active, i.e.
+  # before the Pod is even scheduled, so it also includes node provisioning,
+  # scheduling, and image pull -- not just the time bootstrap.sh spends
+  # running. Observed cold-start node provisioning took ~28 min;
+  # 1800s (30 min) is budgeted for that pod-startup phase. The remaining
+  # 7200s covers the script's own WAIT_DEADLINE_SECONDS=2700 (the schema
+  # endpoint can stay unavailable for up to 45 min after the Pod starts
+  # running; the observed worst case was ~33 min, so this leaves
+  # headroom) plus 3600s+ for the throttled POST of ~1,386 schemas, which can
+  # itself exceed 30 min. The Flux Kustomization timeout must remain longer
+  # than this deadline.
+  activeDeadlineSeconds: 9000
   # No ttlSecondsAfterFinished: this is a one-shot loader. Flux
   # reconciles this Kustomization every 10 min; a TTL would let the
   # controller delete the completed Job and the next reconcile would
@@ -70,7 +73,11 @@ spec:
             defaultMode: 0755
       containers:
         - name: loader
-          image: community.opengroup.org:5555/osdu/platform/system/schema-service/schema-service-schema-load-master@sha256:c4596cdfc5510116c2777d575fad661a397b2fce09132af4980c3d99a461c66c
+          # Resolved live from the osdu-image-lock ConfigMap, on the same SHA
+          # selected for schema-service for community fleets, or from the
+          # current community loader when the service fleet comes from GHCR.
+          # No static default: a pinned SHA goes stale as upstream prunes it.
+          image: ${SCHEMA_LOAD_IMAGE_REPOSITORY}:${SCHEMA_LOAD_IMAGE_TAG}
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
@@ -83,7 +90,7 @@ spec:
             # primary partition as PRIMARY_PARTITION (renamed to make
             # multi-partition deploys honest); alias it back to the env
             # name the loader expects. system-db is primary-only by
-            # design (ADR-013), so loading against the primary is correct.
+            # design, so loading against the primary is correct.
             - name: DATA_PARTITION
               valueFrom:
                 configMapKeyRef:

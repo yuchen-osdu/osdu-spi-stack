@@ -1,18 +1,11 @@
----
-status: "accepted"
-contact: "Yuchen Wang"
-date: "2026-07-24"
-deciders: "Yuchen Wang"
----
+# ADR-034: Runtime-Resolved Managed Istio Revision
 
-# Runtime-Resolved Managed Istio Revision
-
-## Context and Problem Statement
+## Context
 
 Sidecar injection on the `osdu` namespace is selected by an `istio.io/rev`
 label that must match the managed Istio revision AKS actually installed. That
 revision is not constant: it is pinned by the AKS Automatic deployment and must
-track the Kubernetes minimum (ADR-019), so future platform versions can select
+track the Kubernetes minimum (ADR-031), so future platform versions can select
 a different revision without changing software manifests.
 
 The revision was previously hardcoded in two places, a Flux-managed Namespace
@@ -34,12 +27,12 @@ the intended sidecar.
 - Keep a hardcoded literal and update it with each revision change
 - Remove the label and rely on namespace-wide default injection
 
-## Decision Outcome
+## Decision
 
 Chosen option: "Publish the live revision as a substituted variable".
 
-Each AKS template outputs the revision it pins. The CLI carries that value into
-bootstrap and writes it into the `spi-ingress-config` ConfigMap as
+The AKS template outputs the revision it pins. The CLI carries that value into
+bootstrap and writes it into the `spi-cluster-config` ConfigMap as
 `ISTIO_REVISION`. The Namespace manifest references `${ISTIO_REVISION}` and its
 Kustomization substitutes from that ConfigMap, so Flux and the CLI converge on
 the same value instead of competing. When the CLI must infer the revision from
@@ -50,10 +43,11 @@ Rejected: a hardcoded literal, because it silently breaks injection whenever a
 cluster pins a different revision. Rejected: default injection, because the
 managed mesh expects explicit revision selection.
 
-### Consequences
+## Consequences
 
 - Good, because the label cannot disagree with the installed mesh.
-- Good, because Automatic and Base clusters share one manifest.
+- Good, because upgrades can change the managed revision without changing the
+  Namespace manifest.
 - Good, because an undetectable revision fails the deployment instead of
   producing unlabeled workloads.
 - Bad, because the Namespace manifest is no longer standalone; it requires the

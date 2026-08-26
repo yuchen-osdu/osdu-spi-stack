@@ -70,13 +70,21 @@ Copy the wheel URL for any version from that release's page under
 
 ### Upgrade
 
-After the first install, `spi` upgrades itself — no URL needed, same on every
-platform:
+After the first install, `spi` checks GitHub Releases and upgrades itself with
+no URL needed:
 
 ```bash
 spi update           # check for a newer version and install it
 spi update --check   # check only; do not install
 spi update --force   # reinstall even if already on the latest version
+```
+
+On native Windows installs managed by `uv`, `spi update` intentionally exits
+before replacing the active tool environment. Run the manual recovery command it
+prints from a new terminal instead:
+
+```bash
+uv tool install --force <wheel-url>
 ```
 
 > **Note:** `uv tool install git+https://github.com/...@vX.Y.Z` also works,
@@ -252,7 +260,7 @@ Everything is discovered by the CLI:
 uv run spi check
 ```
 
-**Required tools**: az, bicep, kubectl, kubelogin, flux, helm
+**Required tools**: az, bicep, kubectl, kubelogin, flux
 
 **System requirements**: Azure subscription with permissions to create resource groups and AKS clusters.
 
@@ -269,14 +277,16 @@ Commands:
   down       Delete all Azure resources                   --env NAME
   info       Show endpoints and optional credentials      [--show-secrets]
   reconcile  Force Flux to re-sync from Git               [--suspend] [--resume] [--refresh-images]
+  service    Pin services to MR pipeline images           pin <name> --mr <iid> | reset <name> | list
 ```
 
-Use `--dry-run` on `spi up` to preview the Bicep changes (`az deployment group what-if`) before any Azure resources are created beyond the resource group. `--ingress-mode` defaults to `azure`; the other supported modes are `dns` (per-service hostnames on an owned Azure DNS zone) and `ip` (bare IP, debug only). Service images default to each public `yuchen-osdu` package's `main-snapshot`, which is immediately pinned to an immutable digest. Use `--image-tag` for a coordinated release tag or `--image-ref` for advanced
+Use `--dry-run` on `spi up` to preview the Bicep changes (`az deployment group what-if`) before any Azure resources are created beyond the resource group. `--profile` defaults to `core`; `graduated` adds Wellbore main and worker services, `minimal` deploys middleware only, and `bare` activates GitOps against empty stack and ingress trees. `--ingress-mode` defaults to `azure`; the other supported modes are `dns` (per-service hostnames on an owned Azure DNS zone) and `ip` (bare IP, debug only). `--ingress-mode` and `--dns-zone` are rejected with `bare`. Service images default to each public `yuchen-osdu` package's `main-snapshot`, which is immediately pinned to an immutable digest. Use `--image-tag` for a coordinated release tag or `--image-ref` for advanced
 multi-repository feature validation. `--image-source community` is an explicit
 whole-fleet compatibility selection, not an automatic fallback; selected
 community builds must support the Entra-only Azure data plane.
 `--refresh-images` re-resolves the configured selector and reconciles the
-service Kustomizations.
+service Kustomizations; active `spi service` pins are overlaid rather than
+reverted (see `docs/design/flux-reconciliation.md`).
 
 
 ## Documentation

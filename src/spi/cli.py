@@ -14,14 +14,16 @@
 
 """SPI CLI - Deploy OSDU SPI Stack on Azure AKS."""
 
+import json
 import os
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import typer
 from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__
+from .bootstrap import create_istio_revision_configmap
 from .checks import PREREQ_TOOLS, check_prerequisites
 from .config import BASE_NAME, Config, IngressMode, Profile
 from .console import console, display_result, display_yaml
@@ -41,10 +43,18 @@ from .images import (
     IMAGE_LOCK_NAMESPACE,
     ImageResolutionError,
     ImageSource,
-    render_image_lock_configmap,
+    image_lock_missing_schema_load,
     resolve_image_lock,
+    schema_load_lock_patch,
 )
-from .ingress import ensure_istio_revision_published, resolve_acme_email, resolve_ingress_mode
+from .ingress import resolve_acme_email, resolve_ingress_mode
+from .pins import (
+    PinError,
+    live_pins,
+    pin_service,
+    render_lock_with_pins,
+    reset_service,
+)
 from .shell import kubectl_apply_yaml, kubectl_json, run_command
 
 app = typer.Typer(
@@ -52,6 +62,11 @@ app = typer.Typer(
     help="SPI Stack - deploy, monitor, and manage OSDU on Azure AKS.",
     add_completion=False,
 )
+
+service_app = typer.Typer(
+    help="Pin individual services to merge-request pipeline images for validation."
+)
+app.add_typer(service_app, name="service")
 
 
 def _version_callback(value: bool) -> None:
@@ -133,6 +148,126 @@ def _show_next_steps(config: Config):
     table.add_row("Cleanup", f"uv run spi down{config.env_flag}")
 
     console.print(table)
+
+
+def _trigger_kustomization(name: str, requested_at: str, namespace: str = "osdu-flux") -> None:
+    run_command(
+        [
+            "kubectl",
+            "annotate",
+            "--overwrite",
+            f"kustomization/{name}",
+            "-n",
+            namespace,
+            f"reconcile.fluxcd.io/requestedAt={requested_at}",
+        ],
+        description=f"Trigger Kustomization reconciliation ({name})",
+        check=False,
+    )
+
+
+def _kustomization_exists(name: str, namespace: str = "osdu-flux") -> bool:
+    """Report whether a Kustomization is declared on this cluster.
+
+    `--ignore-not-found` keeps genuine absence (a profile that never declares
+    the resource) an empty result, while authorization errors, API timeouts,
+    and context failures still abort instead of being read as "not present".
+    """
+    result = run_command(
+        [
+            "kubectl",
+            "get",
+            "kustomization",
+            name,
+            "-n",
+            namespace,
+            "--ignore-not-found",
+            "-o",
+            "name",
+        ],
+        description=f"Check Kustomization exists ({name})",
+        display=False,
+    )
+    return bool(result.stdout.strip())
+
+
+def _reconcile_kustomization(name: str, namespace: str = "osdu-flux") -> None:
+    run_command(
+        [
+            "flux",
+            "reconcile",
+            "kustomization",
+            name,
+            "-n",
+            namespace,
+            "--timeout",
+            "40m",
+        ],
+        description=f"Trigger and wait for Kustomization reconciliation ({name})",
+    )
+
+
+def _backfill_schema_load_lock(image_branch: str) -> None:
+    """Add the schema-load entries to a lock generated before it joined.
+
+    The schema-load Job substitutes SCHEMA_LOAD_IMAGE_REPOSITORY and
+    SCHEMA_LOAD_IMAGE_TAG with no static fallback (ADR-013), so a cluster whose
+    osdu-image-lock predates that change has to have the lock updated before
+    Flux applies the manifest. The loader is resolved from the schema tag the
+    lock already pins, leaving every other service pin untouched.
+    """
+    result = run_command(
+        [
+            "kubectl",
+            "get",
+            "configmap",
+            IMAGE_LOCK_CONFIGMAP,
+            "-n",
+            IMAGE_LOCK_NAMESPACE,
+            "--ignore-not-found",
+            "-o",
+            "json",
+        ],
+        description=f"Read {IMAGE_LOCK_CONFIGMAP} ConfigMap",
+        display=False,
+    )
+    raw = result.stdout.strip()
+    if not raw:
+        # minimal/bare profiles never create the lock; nothing to backfill.
+        return
+
+    try:
+        lock_data = json.loads(raw).get("data") or {}
+    except json.JSONDecodeError:
+        console.print(f"[warning]{IMAGE_LOCK_CONFIGMAP} is not readable as JSON.[/warning]")
+        return
+
+    if not image_lock_missing_schema_load(lock_data):
+        return
+
+    console.print("\n[bold]Backfilling schema-load into the image lock...[/bold]")
+    try:
+        patch = schema_load_lock_patch(lock_data, branch=image_branch)
+    except ImageResolutionError as exc:
+        console.print(f"[warning]Unable to backfill the schema-load image: {exc}[/warning]")
+        console.print("[dim]Run 'spi reconcile --refresh-images' to resolve a fresh lock.[/dim]")
+        return
+
+    run_command(
+        [
+            "kubectl",
+            "patch",
+            "configmap",
+            IMAGE_LOCK_CONFIGMAP,
+            "-n",
+            IMAGE_LOCK_NAMESPACE,
+            "--type=merge",
+            "-p",
+            json.dumps({"data": patch}),
+        ],
+        description=f"Backfill schema-load entries in {IMAGE_LOCK_CONFIGMAP}",
+    )
+    display_result(f"{IMAGE_LOCK_CONFIGMAP} ConfigMap updated with schema-load")
 
 
 def _build_config(
@@ -462,6 +597,18 @@ def _resolve_application_insights(
     return resolved
 
 
+def _resolve_up_context(
+    env: str,
+) -> Tuple[str, Dict[str, Any], Tuple[str, str]]:
+    """Resolve read-only Azure identity state before suffix persistence."""
+    from .azure_infra import _get_azure_account, _resolve_deployer_principal
+
+    account = _get_azure_account()
+    deployer_principal = _resolve_deployer_principal(account)
+    name_suffix = _resolve_name_suffix(env, for_up=True)
+    return name_suffix, account, deployer_principal
+
+
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
@@ -637,10 +784,11 @@ def up(
     console.print(Panel(title, border_style="cyan"))
     check_prerequisites(PREREQ_TOOLS)
 
-    # Resolve the persistent suffix from the RG tag (or mint a new one) so
-    # derived resource names are stable across `spi up` re-runs and don't
-    # collide with deployments in other subscriptions.
-    name_suffix = _resolve_name_suffix(env, for_up=True)
+    # Resolve the deployer before suffix persistence so an identity failure
+    # cannot mutate an existing untagged resource group. The suffix itself is
+    # derived from the RG tag (or minted fresh) so resource names stay stable
+    # across reruns and do not collide across subscriptions.
+    name_suffix, azure_account, deployer_principal = _resolve_up_context(env)
     try:
         resolved_application_insights = _resolve_application_insights(
             env,
@@ -697,6 +845,8 @@ def up(
             config,
             dry_run=dry_run,
             refresh_images=refresh_images,
+            azure_account=azure_account,
+            deployer_principal=deployer_principal,
         )
         if dry_run:
             console.print(
@@ -894,16 +1044,17 @@ def reconcile(
         )
         return
 
-    # An environment created before the revision was published would let Flux
-    # apply an empty istio.io/rev and drop sidecar injection. This must run for
-    # BOTH paths: plain `spi reconcile` also pulls the new commit and annotates
-    # every Kustomization including spi-namespaces, so it can render the empty
-    # label just as readily as --resume can.
-    try:
-        ensure_istio_revision_published()
-    except RuntimeError as exc:
-        console.print(f"[error]{exc}[/error]")
-        raise typer.Exit(code=1)
+    # spi-namespaces substitutes ISTIO_REVISION from spi-cluster-config, and
+    # that Kustomization gates every layer above it. Refresh the ConfigMap
+    # before any commit is applied so a cluster bootstrapped by an older CLI,
+    # or one whose managed Istio revision was upgraded since the last deploy,
+    # reconciles against the live revision instead of stalling on a missing
+    # or stale substitution source.
+    console.print("\n[bold]Refreshing cluster config for Flux substitution...[/bold]")
+    create_istio_revision_configmap()
+
+    if not refresh_images:
+        _backfill_schema_load_lock(image_branch or DEFAULT_IMAGE_BRANCH)
 
     if resume:
         ns = resolve_flux_namespace()
@@ -963,8 +1114,18 @@ def reconcile(
                 f"  [success]{name}[/success] -> {image.repository.split('/')[-1]}:{image.tag[:12]}"
             )
 
-        image_lock_yaml = render_image_lock_configmap(
+        try:
+            pins = live_pins()
+        except PinError as exc:
+            console.print(f"[error]{exc}[/error]")
+            console.print(
+                "[error]Refusing to refresh the image lock while pin state is "
+                "unreadable; a refresh could silently revert an active pin.[/error]"
+            )
+            raise typer.Exit(code=1)
+        image_lock_yaml = render_lock_with_pins(
             resolved,
+            pins,
             source=resolved_source,
             tag=resolved_tag,
             ref=resolved_ref,
@@ -974,6 +1135,11 @@ def reconcile(
         display_yaml(image_lock_yaml, "ConfigMap: osdu-image-lock")
         kubectl_apply_yaml(image_lock_yaml, "apply osdu-image-lock ConfigMap")
         display_result("osdu-image-lock ConfigMap updated")
+        for name, pin in sorted(pins.items()):
+            console.print(
+                f"  [warning]{name} stays pinned to MR !{pin.mr} ({pin.tag[:12]}); "
+                f"release with 'spi service reset {name}'[/warning]"
+            )
 
     # Default: force reconcile
     if get_suspend_status():
@@ -1003,22 +1169,113 @@ def reconcile(
         description="Trigger GitRepository reconciliation",
     )
 
-    for name in _flux_resource_names("kustomization", ns):
-        run_command(
-            [
-                "kubectl",
-                "annotate",
-                "--overwrite",
-                f"kustomization/{name}",
-                "-n",
-                ns,
-                f"reconcile.fluxcd.io/requestedAt={ts}",
-            ],
-            description=f"Trigger Kustomization reconciliation ({name})",
-            check=False,
+    core_kustomizations = [
+        "spi-osdu-services",
+        "spi-osdu-schema-load",
+        "spi-osdu-reference",
+    ]
+    all_kustomizations = _flux_resource_names("kustomization", ns)
+
+    if refresh_images:
+        # A resolved image tag has to reach schema-service before schema-load
+        # is force-recreated against it, and schema-load has to finish before
+        # reference re-seeds. Wait for each stage in order, but only for
+        # profiles that actually declare these Kustomizations.
+        console.print(
+            "\n[bold]Waiting for image refresh to propagate in dependency order...[/bold]"
         )
+        for name in all_kustomizations:
+            if name not in core_kustomizations:
+                _trigger_kustomization(name, ts, ns)
+        for name in core_kustomizations:
+            if not _kustomization_exists(name, ns):
+                console.print(f"  [dim]Skipping {name} (not present in this profile).[/dim]")
+                continue
+            _reconcile_kustomization(name, ns)
+    else:
+        for name in all_kustomizations:
+            _trigger_kustomization(name, ts, ns)
 
     console.print("[success]Reconciliation triggered.[/success]")
+
+
+@service_app.command("pin")
+def service_pin(
+    service: str = typer.Argument(help="Service name, e.g. schema (see 'spi service list')."),
+    mr: str = typer.Option(
+        ...,
+        "--mr",
+        help="Merge request IID in the service's OSDU GitLab repository.",
+    ),
+):
+    """Pin a service to the image built by its merge-request pipeline."""
+    ctx = verify_spi_cluster()
+    console.print(f"  [dim]Cluster context: {ctx}[/dim]")
+
+    try:
+        results = pin_service(service, mr)
+    except (PinError, ImageResolutionError) as exc:
+        console.print(f"[error]{exc}[/error]")
+        raise typer.Exit(code=1)
+
+    for name, pin in results:
+        console.print(
+            f"  [success]{name}[/success] pinned to MR !{pin.mr} ({pin.branch} @ {pin.tag[:12]})"
+        )
+    console.print(f"[dim]Release with: spi service reset {service}[/dim]")
+
+
+@service_app.command("reset")
+def service_reset(
+    service: str = typer.Argument(help="Pinned service name to release."),
+):
+    """Release a service pin and restore its recorded canonical image."""
+    ctx = verify_spi_cluster()
+    console.print(f"  [dim]Cluster context: {ctx}[/dim]")
+
+    try:
+        result = reset_service(service)
+    except (PinError, ImageResolutionError) as exc:
+        console.print(f"[error]{exc}[/error]")
+        raise typer.Exit(code=1)
+
+    for name in result.restored:
+        console.print(f"  [success]{name}[/success] restored to canonical image")
+    for name in result.refresh_required:
+        console.print(
+            f"  [warning]{name} pin removed, but no canonical image was recorded[/warning]"
+        )
+    if result.refresh_required:
+        console.print(
+            "[warning]Run 'spi reconcile --refresh-images' now to resolve and apply "
+            "canonical images.[/warning]"
+        )
+
+
+@service_app.command("list")
+def service_list():
+    """Show services currently pinned to merge-request images."""
+    ctx = verify_spi_cluster()
+    console.print(f"  [dim]Cluster context: {ctx}[/dim]")
+
+    try:
+        pins = live_pins()
+    except PinError as exc:
+        console.print(f"[error]{exc}[/error]")
+        raise typer.Exit(code=1)
+    if not pins:
+        console.print("No services are pinned.")
+        return
+
+    table = Table(title="Pinned services")
+    table.add_column("Service")
+    table.add_column("MR")
+    table.add_column("Branch")
+    table.add_column("Tag")
+    table.add_column("Pinned at")
+    for name, pin in sorted(pins.items()):
+        table.add_row(name, f"!{pin.mr}", pin.branch, pin.tag[:12], pin.applied_at)
+    console.print(table)
 
 
 @app.command()
@@ -1106,7 +1363,14 @@ def update(
                 "set GITHUB_TOKEN or `gh auth login` to raise rate limits)[/info]"
             )
 
-    rc = _update.run_upgrade(installer, wheel_url, display=not silent)
+    try:
+        rc = _update.run_upgrade(installer, wheel_url, display=not silent)
+    except _update.UpdateError as exc:
+        if silent:
+            typer.echo(str(exc), err=True)
+        else:
+            console.print(f"[error]{exc}[/error]")
+        raise typer.Exit(code=1)
     if rc != 0:
         if silent:
             typer.echo(f"spi upgrade failed (exit {rc})", err=True)

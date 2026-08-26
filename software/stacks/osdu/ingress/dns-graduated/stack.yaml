@@ -9,8 +9,8 @@ spec:
   interval: 10m
   dependsOn:
     - name: spi-wellbore-services
-    - name: spi-gateway
-    - name: spi-external-dns
+    - name: spi-gateway-tls
+    - name: spi-external-dns-release
   sourceRef:
     kind: GitRepository
     name: osdu-spi-stack-system

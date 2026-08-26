@@ -1,7 +1,5 @@
 # ADR-008: Bicep for Azure Provisioning
 
-**Status**: Accepted
-
 ## Context
 
 Provisioning an SPI Stack deploys on the order of 50 Azure resources: UAMI and federated credentials, Key Vault and its secrets, ACR, Cosmos DB Gremlin and per-partition SQL with 24 containers, per-partition Service Bus with 14 topics and 14 subscriptions, common and per-partition Storage with containers and tables, and a scoped RBAC set. An imperative `az` CLI orchestrator for this resource graph grows past a thousand lines and ships ordering bugs that ARM would reject at submit time.
@@ -16,7 +14,7 @@ Layout:
 
 - `infra/aks.bicep`. AKS Automatic 1.36 with hosted managed-system pools,
   automatic node provisioning, BYO networking, and managed Istio as raw
-  `Microsoft.ContainerService/managedClusters` Bicep (ADR-019, ADR-040). Raw
+  `Microsoft.ContainerService/managedClusters` Bicep (ADR-031, ADR-040). Raw
   Bicep is used because the required `hostedSystemProfile` surface is not
   exposed by the pinned AVM AKS module.
 - `infra/main.bicep`. Every other PaaS resource as hand-written Bicep under `infra/modules/` (identity, keyvault, acr, cosmos-gremlin, partition, storage-common, rbac, external-dns-*, vnet). Raw Bicep is simpler than AVM passthrough modules for resources where AVM adds no material defaults.

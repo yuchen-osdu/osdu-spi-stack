@@ -1,13 +1,6 @@
----
-status: "accepted"
-contact: "Yuchen Wang"
-date: "2026-07-20"
-deciders: "Yuchen Wang"
----
-
 # ADR-032: Use SPI-built GHCR images as the service baseline
 
-## Context and Problem Statement
+## Context
 
 The SPI engineering system now builds public service images in GHCR, while the
 stack still resolves its service baseline from OSDU community GitLab images.
@@ -40,7 +33,7 @@ Changing the default must not remove the community option.
 - Use GHCR tags as discovery selectors and pin their OCI digests.
 - Copy every SPI image into the Stack's private Azure Container Registry.
 
-## Decision Outcome
+## Decision
 
 Chosen option: "Use GHCR tags as discovery selectors and pin their OCI
 digests." The default baseline is each SPI service package's
@@ -91,14 +84,15 @@ The change adds the following behavior:
 - Service and reference-service HelmRelease manifests
   - consume the per-service digest from the Flux substitution ConfigMap.
 
-The image lock covers 13 running services. The schema-load Job remains outside
-the lock because a completed Job cannot be upgraded safely in place; it is
-still pinned to an immutable community image.
+The core image lock covers 14 runnable images, including schema-load.
+Graduated adds the two Wellbore images for 16 total. Schema-load is resolved
+from the matching community schema tag for community fleets and from the
+current community loader for GHCR fleets, because the SPI repositories do not
+publish a separate loader package.
 
-The GitHub organization is configurable via `--image-org`. It defaults to
-`Azure`; until that organization hosts the complete service and package fleet,
-adopters point it at whichever organization publishes their SPI service forks,
-or fall back to `--image-source community`.
+The GitHub organization is configurable via `--image-org` and defaults to
+`yuchen-osdu`. `--image-source community` is an explicit whole-fleet fallback,
+not an automatic per-service fallback.
 
 ## Live Validation
 
@@ -128,7 +122,7 @@ fleet:
 - CRS Conversion needed to exclude Boot's default logging starter after the
   core-lib-azure 3.0.1 dependency jump.
 
-### Consequences
+## Consequences
 
 - Good, because a clean `spi up` follows the latest successful `main` build for
   each service without depending on non-code commits at the repository HEAD.

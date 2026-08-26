@@ -24,7 +24,7 @@ The CLI is doing the minimum work needed to hand off to Flux. Every `az` and `ku
 
 The sequence inside `deploy.deploy_azure()` is:
 
-1. **Config resolution.** `Config.from_env()` takes `--env`, `--profile`, `--partition`, `--ingress-mode`, and applies defaults (region, derived cluster name, profile-driven layer wiring). Unless explicitly disabled, the CLI also resolves the current Azure caller from its access-token claims so Entitlements init can seed the same identifier the Gateway projects as `x-user-id`.
+1. **Config resolution.** `Config.from_env()` takes `--env`, `--profile`, `--partition`, `--ingress-mode`, and applies defaults. Before mutating Azure, the CLI resolves the deployer identity for RBAC, stable resource-name suffix, optional Application Insights mode, image selector, and, unless disabled, the creator identifier seeded into Entitlements.
 2. **Prerequisite check.** `check_prerequisites()` runs each tool in the registry (`az`, `bicep`, `kubectl`, `kubelogin`, `flux`, `helm`) and fails fast if anything is missing.
 3. **Resource group.** `az group create --name spi-stack-<env> --location <region>`. The one thing Bicep cannot do itself.
 4. **Key Vault soft-delete recovery.** If a prior `spi down` left a soft-deleted Key Vault with the same name, `az keyvault recover` brings it back so the upcoming Bicep deploy does not collide.
@@ -51,7 +51,8 @@ L0a  spi-namespaces
        |
        +--> L0b  spi-nodepools                            (ADR-018)
        +--> L1   spi-cert-manager, spi-trust-manager,
-       |          spi-eck-operator, spi-cnpg-operator
+       |          spi-eck-operator, spi-cnpg-operator,
+       |          spi-helm-sources
        |          |
        |          +--> L2   spi-elasticsearch, spi-redis, spi-postgresql
        |                     |
@@ -125,6 +126,8 @@ spi down --env <env>
 
 This deletes the resource group, which removes the AKS cluster, every PaaS resource it provisioned, and the role assignments scoped at the resource group. The Key Vault enters soft-delete; the next `spi up --env <env>` recovers it in Phase 1 step 4.
 
+Once Azure reports the resource group gone, `spi down` prunes the kubeconfig entries the Phase 1 `az aks get-credentials` merged in. `az group delete --no-wait` returns on acceptance rather than completion, and an accepted delete can still fail, so acceptance alone is not enough to strip a cluster's credentials. Deletion that outruns the 60-second acknowledgement window leaves the context in place and says so. Cluster names repeat across subscriptions: `spi up --env dev1` run in two subscriptions builds two `spi-stack-dev1` clusters, and both write the same context name. `spi down` therefore reads the cluster's API server FQDN before deleting the resource group, and prunes the context only when the kubeconfig entry points at that server; tearing one down leaves the other's credentials alone. A lookup that comes back empty, from a cluster already deleted or one that never finished creating, leaves the kubeconfig untouched and says which check failed. The kubeconfig is then read a second time, because `delete-context` edits only the file holding the winning entry and a multi-file `KUBECONFIG` can surface a shadowed context of the same name. That post-delete view decides the rest: the cluster and user entries go only when no context that survived references them, so a kubeconfig shared with another cluster stays intact, and `current-context`, which `delete-context` leaves naming the entry it removed, is cleared only when nothing took that name's place. `spi down` requires only `az`, so a machine without kubectl skips the prune instead of failing the teardown. The two kubeconfig reads are silent; the command panels report what teardown changes, and every entry it removes gets one.
+
 ## Worked example: `spi up --env dev1`, what you should see
 
 ```bash
@@ -168,6 +171,7 @@ returns the gateway hostname / IP and (with `--show-secrets`) the Workload Ident
 - `src/spi/azure_infra.py` -- Azure infra provisioning (`provision_azure_infra`: RG, AKS, `main.bicep`, KV recovery)
 - `src/spi/bicep.py` -- `az deployment group create` wrapper
 - `src/spi/bootstrap.py` -- K8s bootstrap (namespaces, StorageClasses, Gateway API CRDs)
+- `src/spi/shell.py` -- command execution; `prune_kube_context()` clears the Phase 4 kubeconfig entries
 - `src/spi/secrets.py` -- middleware secret seed + `platform`/`osdu` credential Secrets
 - `src/spi/images.py` -- resolves and renders `osdu-image-lock`
 - `infra/aks.bicep`, `infra/main.bicep`, `infra/flux.bicep` -- the three Bicep entrypoints

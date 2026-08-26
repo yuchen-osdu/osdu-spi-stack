@@ -21,6 +21,9 @@ This split is the decision in [ADR-010](../decisions/010-keyvault-secret-managem
 There are no Class 1 secrets. The OSDU services authenticate to Cosmos, Service Bus, Storage, and Key Vault using AAD bearer tokens minted via Workload Identity (see [workload-identity](workload-identity.md)). Tokens are short-lived, refreshed automatically by the Azure SDK, and never written to disk.
 
 Service Bus local authentication is disabled. `{partition}-sb-connection` is kept only as a schema-compatible `"DISABLED"` placeholder; Service Bus clients must use Workload Identity and the UAMI's `Azure Service Bus Data Owner` role.
+The default SPI GHCR fleet supplies a Workload-Identity-capable
+indexer-queue. The explicit community fallback may still require a newer
+upstream `core-lib-azure`; it never receives a SAS key.
 
 ## Class 2: Key Vault secrets
 
@@ -36,7 +39,7 @@ Most KV secrets are declared in Bicep, where the source value is Azure itself. T
 | `graph-db-endpoint` | Cosmos Gremlin endpoint | `main.bicep` |
 | `{p}-cosmos-endpoint`, `{p}-storage`, `{p}-sb-namespace` | Resource outputs | `main.bicep` |
 | `{p}-storage-account-blob-endpoint` | Resource `.properties` | `partition.bicep` |
-| `{p}-cosmos-primary-key`, `{p}-cosmos-connection`, `{p}-storage-account-key`, `{p}-sb-connection` | `"DISABLED"` compatibility placeholder | `partition.bicep` |
+| `{p}-cosmos-primary-key`, `{p}-cosmos-connection`, `{p}-storage-account-key`, `{p}-sb-connection` | `"DISABLED"` placeholder; local auth is disabled on the Cosmos and Service Bus accounts, so services authenticate through Workload Identity (ADR-023) | `partition.bicep` |
 
 Bicep writes are atomic with the rest of the deploy: the KV secret either lands with the resource or the whole deploy fails. ARM is idempotent on secret writes (a re-deploy with the same value is a no-op).
 
@@ -68,7 +71,7 @@ The CLI generates the middleware passwords and Airflow signing keys (`src/spi/se
 - **Elasticsearch.** The CLI creates `elasticsearch-es-elastic-user` in `platform`; ECK adopts it as the elastic-user credential.
 - **Redis.** The CLI creates `redis-credentials` in `platform`; the Bitnami chart consumes it via `existingSecret` (`software/components/redis/release.yaml`).
 - **PostgreSQL (Airflow).** The CLI creates `postgresql-superuser-credentials` and `postgresql-airflow-credentials` in `platform`; CNPG consumes them via `superuserSecret` / the owner secret.
-- **Airflow.** The CLI creates `airflow-metadata-secret` (the SQLAlchemy connection string) and `airflow-api-credentials` (admin password plus the `api-secret-key`, `jwt-secret`, and `fernet-key` signing material) in `platform`. The chart consumes the signing keys via `apiSecretKeySecretName` / `jwtSecretName` / `fernetKeySecretName`; seeding them keeps every key stable across Flux reconciles and inside CLI ownership (ADR-026).
+- **Airflow.** The CLI creates `airflow-metadata-secret` (the SQLAlchemy connection string) and `airflow-api-credentials` (admin password plus the `api-secret-key`, `jwt-secret`, and `fernet-key` signing material) in `platform`. The chart consumes the signing keys via `apiSecretKeySecretName` / `jwtSecretName` / `fernetKeySecretName`; seeding them keeps every key stable across Flux reconciles and inside CLI ownership; chart-managed keys either rotate on every render (api-secret, JWT) or live in an untracked pre-install-hook Secret (fernet).
 
 The same generated passwords are mirrored into Key Vault by the CLI (Writer B above), so OSDU services in `osdu` read Elasticsearch and Redis credentials through the same Workload Identity path as everything else.
 
