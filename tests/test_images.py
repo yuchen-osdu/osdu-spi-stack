@@ -419,7 +419,7 @@ def test_ghcr_fleet_resolves_schema_load_from_community(monkeypatch):
     )
 
     assert resolved["schema"].repository == "ghcr.io/yuchen-osdu/schema"
-    assert resolved["schema-load"].repository.startswith("community.opengroup.org/")
+    assert resolved["schema-load"].repository == "community.opengroup.org/schema-load-master"
     assert calls == [
         ("ghcr", "schema", "yuchen-osdu", "main-snapshot"),
         ("community", "schema-load", "master"),

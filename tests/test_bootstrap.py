@@ -27,7 +27,7 @@ from spi.bootstrap import (
     ensure_namespaces,
     render_istio_revision_configmap,
 )
-from spi.images import ResolvedImage
+from spi.images import ImageSource, ResolvedImage
 
 
 def _deploy_list(*names: str) -> dict:
@@ -161,6 +161,8 @@ class TestReconcileRefreshesClusterConfig:
         with (
             patch("spi.cli.verify_spi_cluster", return_value="spi-test"),
             patch("spi.cli.get_suspend_status", return_value=False),
+            patch("spi.cli._backfill_schema_load_lock"),
+            patch("spi.cli._flux_resource_names", return_value=[]),
             patch(
                 "spi.cli.run_command",
                 side_effect=lambda cmd_list, **kwargs: SimpleNamespace(
@@ -190,6 +192,10 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.verify_spi_cluster", return_value="spi-test"),
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
+            patch(
+                "spi.cli._read_image_lock_selection",
+                return_value=(ImageSource.COMMUNITY, "", "", "master", "core"),
+            ),
             patch(
                 "spi.cli.resolve_image_lock",
                 side_effect=cli.ImageResolutionError("schema: registry repository not found"),
@@ -223,6 +229,10 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.verify_spi_cluster", return_value="spi-test"),
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
+            patch(
+                "spi.cli._read_image_lock_selection",
+                return_value=(ImageSource.COMMUNITY, "", "", "master", "core"),
+            ),
             patch("spi.cli.resolve_image_lock", return_value=resolved),
             patch("spi.cli.live_pins", side_effect=PinError("could not read lock")),
             patch("spi.cli.kubectl_apply_yaml") as apply_yaml,
@@ -260,10 +270,22 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.verify_spi_cluster", return_value="spi-test"),
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
+            patch(
+                "spi.cli._read_image_lock_selection",
+                return_value=(ImageSource.COMMUNITY, "", "", "master", "core"),
+            ),
             patch("spi.cli.resolve_image_lock", return_value=resolved),
             patch("spi.cli.live_pins", return_value={}),
             patch("spi.cli.render_lock_with_pins", return_value="kind: ConfigMap\n"),
             patch("spi.cli.kubectl_apply_yaml"),
+            patch(
+                "spi.cli._flux_resource_names",
+                return_value=[
+                    "spi-osdu-services",
+                    "spi-osdu-schema-load",
+                    "spi-osdu-reference",
+                ],
+            ),
             patch("spi.cli.run_command", side_effect=_run_command) as run_command,
         ):
             result = runner.invoke(cli.app, ["reconcile", "--refresh-images"])
@@ -306,10 +328,15 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.verify_spi_cluster", return_value="spi-test"),
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
+            patch(
+                "spi.cli._read_image_lock_selection",
+                return_value=(ImageSource.COMMUNITY, "", "", "master", "core"),
+            ),
             patch("spi.cli.resolve_image_lock", return_value=resolved),
             patch("spi.cli.live_pins", return_value={}),
             patch("spi.cli.render_lock_with_pins", return_value="kind: ConfigMap\n"),
             patch("spi.cli.kubectl_apply_yaml"),
+            patch("spi.cli._flux_resource_names", return_value=[]),
             patch("spi.cli.run_command", side_effect=_run_command) as run_command,
         ):
             result = runner.invoke(cli.app, ["reconcile", "--refresh-images"])
@@ -353,6 +380,8 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.verify_spi_cluster", return_value="spi-test"),
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
+            patch("spi.cli._backfill_schema_load_lock"),
+            patch("spi.cli._flux_resource_names", return_value=[]),
             patch("spi.cli.run_command", side_effect=_run_command),
         ):
             result = runner.invoke(cli.app, ["reconcile"])
@@ -401,6 +430,7 @@ class TestSchemaLoadImageLockBackfill:
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
             lock_patcher as lock_patch,
+            patch("spi.cli._flux_resource_names", return_value=[]),
             patch("spi.cli.run_command", side_effect=_run_command) as run_command,
         ):
             result = runner.invoke(cli.app, ["reconcile", *args])
