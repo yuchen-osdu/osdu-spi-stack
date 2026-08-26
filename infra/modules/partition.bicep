@@ -5,38 +5,30 @@
 // optionally osdu-system-db on the primary partition), Service Bus
 // namespace with topics and subscriptions, storage account with blob
 // containers.
-//
-// Container, topic, subscription, and container-name definitions are
-// ported literally from azure_infra.py (OSDU_DB_CONTAINERS,
-// OSDU_SYSTEM_DB_CONTAINERS, SERVICEBUS_TOPICS, PARTITION_STORAGE_CONTAINERS).
 
-@description('Data partition name, e.g. "opendes".')
+@description('OSDU data partition identifier used in resource and secret names.')
 param partition string
 
-@description('Azure region.')
+@description('Azure region where the partition resources are deployed.')
 param location string
 
-@description('CosmosDB SQL account name for this partition.')
+@description('Globally unique Cosmos DB SQL account name for this partition.')
 param cosmosSqlName string
 
-@description('Service Bus namespace name for this partition.')
+@description('Globally unique Service Bus namespace name for this partition.')
 param serviceBusName string
 
-@description('Storage account name for this partition.')
+@description('Globally unique storage account name for this partition.')
 param storageAccountName string
 
-@description('True only for the primary partition; hosts osdu-system-db.')
+@description('Whether this partition owns the shared osdu-system-db database and its secrets.')
 param isPrimaryPartition bool = false
 
-@description('Key Vault name that receives the Cosmos primary key. Empty string skips the secret write.')
+@description('Existing Key Vault that receives partition secrets; an empty string omits all secret resources.')
 param keyVaultName string = ''
 
-@description('Principal ID (object ID) of the OSDU managed identity that accesses Cosmos SQL data.')
+@description('Principal ID of the OSDU workload identity granted Cosmos SQL data-plane access.')
 param principalId string
-
-// ──────────────────────────────────────────────────────────
-// Data definitions (ported from azure_infra.py)
-// ──────────────────────────────────────────────────────────
 
 var osduDbContainers = [
   { name: 'Authority', partitionKey: '/id' }
@@ -90,9 +82,8 @@ var serviceBusTopicDefs = [
   { name: 'replaytopic', maxSizeInMegabytes: 1024 }
 ]
 
-// Flat subscription list. Bicep for-loops cannot nest inside flatten() at
-// var-declaration time, so topic/sub pairs are enumerated explicitly.
-// "entitlements-changed" has no subscriptions and is intentionally omitted.
+// Bicep cannot flatten nested for-expressions in a variable, so topic and
+// subscription pairs are explicit. entitlements-changed intentionally has none.
 var serviceBusSubscriptionDefs = [
   { topicName: 'indexing-progress', subName: 'indexing-progresssubscription', maxDeliveryCount: 5, lockDuration: 'PT5M' }
   { topicName: 'legaltags', subName: 'legaltagssubscription', maxDeliveryCount: 5, lockDuration: 'PT5M' }
@@ -118,16 +109,13 @@ var partitionStorageContainerNames = [
   'file-persistent-area'
 ]
 
-// ──────────────────────────────────────────────────────────
-// CosmosDB SQL
-// ──────────────────────────────────────────────────────────
-
 resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2023-11-15' = {
   name: cosmosSqlName
   location: location
   kind: 'GlobalDocumentDB'
   properties: {
     databaseAccountOfferType: 'Standard'
+    // Data-plane access uses Entra-backed Cosmos RBAC.
     disableLocalAuth: true
     consistencyPolicy: {
       defaultConsistencyLevel: 'Session'
@@ -157,8 +145,9 @@ resource osduDb 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2023-11-15' 
   }
 }
 
-// Cosmos data-plane role for the OSDU managed identity. Local auth is disabled,
-// so services authenticate with Entra Workload Identity.
+// Cosmos SQL data-plane RBAC is separate from Azure RBAC and is invisible to
+// `az role assignment`. Without this role, OSDU data calls fail with 403
+// "does not have required RBAC permissions".
 var sqlDataContributorRoleId = '00000000-0000-0000-0000-000000000002'
 
 resource osduIdentitySqlDataContributor 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2023-11-15' = {
@@ -218,10 +207,6 @@ resource osduSystemDbContainerResources 'Microsoft.DocumentDB/databaseAccounts/s
   }
 }]
 
-// ──────────────────────────────────────────────────────────
-// Service Bus
-// ──────────────────────────────────────────────────────────
-
 resource serviceBusNamespace 'Microsoft.ServiceBus/namespaces@2022-10-01-preview' = {
   name: serviceBusName
   location: location
@@ -229,6 +214,8 @@ resource serviceBusNamespace 'Microsoft.ServiceBus/namespaces@2022-10-01-preview
     name: 'Standard'
     tier: 'Standard'
   }
+  // Local SAS authentication is disabled. Runtime access uses Workload Identity
+  // through the Data Sender and Receiver assignments in rbac.bicep.
   properties: {
     disableLocalAuth: true
     minimumTlsVersion: '1.2'
@@ -254,10 +241,6 @@ resource serviceBusSubscriptions 'Microsoft.ServiceBus/namespaces/topics/subscri
   ]
 }]
 
-// ──────────────────────────────────────────────────────────
-// Storage
-// ──────────────────────────────────────────────────────────
-
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   name: storageAccountName
   location: location
@@ -268,6 +251,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   properties: {
     accessTier: 'Hot'
     minimumTlsVersion: 'TLS1_2'
+    // Public blob and shared-key access are disabled; workloads use Entra RBAC.
     allowBlobPublicAccess: false
     allowSharedKeyAccess: false
     defaultToOAuthAuthentication: true
@@ -280,25 +264,16 @@ resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-01-01'
   name: 'default'
 }
 
-// The OSDU storage-azure provider writes record blobs to a container named
-// after the data partition id (e.g. "opendes"). core-lib-azure's BlobStore
-// does NOT auto-create it, so record ingestion fails with a 404
-// ContainerNotFound unless the container is pre-created alongside the fixed
-// per-service containers above.
+// Record blobs use a container named after the partition ID. The provider does
+// not create it, so record ingestion returns 404 unless it exists.
 resource storageContainerResources 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-01-01' = [for containerName in union(partitionStorageContainerNames, [partition]): {
   parent: blobService
   name: containerName
 }]
 
-// ──────────────────────────────────────────────────────────
-// Key Vault secrets (same-module for natural dependency)
-// ──────────────────────────────────────────────────────────
-//
-// Written inside this module so references to ``cosmosAccount`` and
-// ``storageAccount`` properties carry an implicit dependency on the
-// resources above. An ``existing`` reference at the parent scope does NOT
-// carry a dependency on the creating module, so it would fail with
-// ResourceNotFound.
+// Keeping these secrets in this module gives resource property references an
+// implicit deployment dependency. A parent-scope ``existing`` reference would
+// not depend on this module and could fail with ResourceNotFound.
 
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = if (!empty(keyVaultName)) {
   name: keyVaultName
@@ -322,8 +297,9 @@ resource storageAccountBlobEndpointSecret 'Microsoft.KeyVault/vaults/secrets@202
   }
 }
 
-// Local auth is disabled. These placeholders keep the partition-record schema
-// satisfied while every data-plane call uses Workload Identity.
+// Local authentication is disabled, so key and connection secrets contain the
+// literal "DISABLED" only to satisfy the partition-record schema. Services that
+// read these placeholders fail and must use Workload Identity instead.
 resource cosmosConnectionSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(keyVaultName)) {
   name: '${partition}-cosmos-connection'
   parent: keyVault
@@ -348,14 +324,9 @@ resource storageAccountKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' 
   }
 }
 
-// System-partition Cosmos secrets. OSDU "system" services (schema, workflow,
-// ...) resolve the shared catalog from KV secrets prefixed ``system-`` rather
-// than ``{partition}-``. The osdu-system-db SQL database lives in the primary
-// partition's Cosmos account (see osduSystemDb above), so these point at the
-// same account. Without them, system services fail at startup with
-// "Failed to retrieve system-cosmos-endpoint. Not found." ->
-// "system-cosmos-endpoint cannot be null" -> "Error creating Cosmos Client".
-// Only the primary partition owns the system DB, so guard on isPrimaryPartition.
+// System services resolve the shared catalog from ``system-*`` secrets. The
+// system database belongs to the primary partition, so only that partition
+// creates these secrets; without them, system services fail during startup.
 resource systemCosmosEndpointSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(keyVaultName) && isPrimaryPartition) {
   name: 'system-cosmos-endpoint'
   parent: keyVault
@@ -380,12 +351,17 @@ resource systemCosmosConnectionSecret 'Microsoft.KeyVault/vaults/secrets@2023-07
   }
 }
 
-// ──────────────────────────────────────────────────────────
-// Outputs
-// ──────────────────────────────────────────────────────────
-
+@description('Data partition identifier represented by these resources.')
 output partition string = partition
+
+@description('Azure resource ID of the partition Cosmos DB SQL account.')
 output cosmosAccountId string = cosmosAccount.id
+
+@description('Document endpoint for the partition Cosmos DB SQL account.')
 output cosmosEndpoint string = cosmosAccount.properties.documentEndpoint
+
+@description('Azure resource ID of the partition Service Bus namespace.')
 output serviceBusId string = serviceBusNamespace.id
+
+@description('Azure resource ID of the partition storage account.')
 output storageId string = storageAccount.id

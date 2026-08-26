@@ -1,26 +1,22 @@
 // Copyright 2026, Microsoft
 // Licensed under the Apache License, Version 2.0.
 //
-// GitOps activation: AKS-native Flux extension plus the cluster-scoped
-// GitRepository + Kustomization that Flux will reconcile against.
-//
-// Deployed twice by the CLI on AKS Automatic:
-//   1. Extension-only so Azure creates the protected flux-system namespace.
-//   2. Full GitOps activation after the CLI writes the ConfigMaps/secrets
-//      consumed by postBuild substitutions and HelmRelease valuesFrom.
+// AKS-native Flux extension and cluster-scoped GitOps configuration. The CLI
+// installs the extension first, then activates reconciliation after bootstrap
+// creates the configured GitOps namespace and inputs.
 
 targetScope = 'resourceGroup'
 
-@description('AKS cluster name; Flux is installed as a cluster-scoped extension.')
+@description('Name of the AKS cluster where Flux is installed as a cluster-scoped extension.')
 param clusterName string
 
-@description('Git repository URL (GitHub-style HTTPS).')
+@description('HTTPS URL of the Git repository that Flux reconciles.')
 param repoUrl string
 
-@description('Branch Flux should track.')
+@description('Git branch that Flux reconciles.')
 param repoBranch string = 'main'
 
-@description('Profile path segment under software/stacks/osdu/profiles (e.g., "core").')
+@description('Allowed profile directory under software/stacks/osdu/profiles.')
 @allowed([
   'bare'
   'minimal'
@@ -32,7 +28,7 @@ param profile string = 'core'
 @description('Ingress profile path segment under software/stacks/osdu/ingress (for example azure or azure-graduated).')
 param ingressMode string = 'azure'
 
-@description('Name of the fluxConfigurations resource on the cluster.')
+@description('Resource name for the cluster Flux configuration.')
 param configurationName string = 'osdu-spi-stack-system'
 
 @description('Create the fluxConfigurations GitOps resource. Set false to install only the Flux extension and namespace.')
@@ -70,17 +66,9 @@ resource fluxExtension 'Microsoft.KubernetesConfiguration/extensions@2024-11-01'
     extensionType: 'microsoft.flux'
     autoUpgradeMinorVersion: true
     releaseTrain: 'Stable'
-    // Disable Flux multi-tenancy enforcement. With it enabled (the default
-    // since extension v1.9), the Azure Flux agent injects
-    // `serviceAccountName: flux-applier` into managed Kustomizations and runs
-    // the OSS controllers with `--default-service-account=flux-applier`. On
-    // AKS Automatic that path is now blocked: the platform's
-    // protect-system-namespaces ValidatingAdmissionPolicy denies impersonating
-    // the flux-applier service account, so every reconcile fails with
-    // `dry-run failed (Forbidden): failed to get server groups`. With
-    // enforcement off the controllers apply as their own exempt flux-system
-    // identities, which can write to protected namespaces and create the
-    // admission webhooks cert-manager and CloudNativePG require.
+    // Multi-tenancy enforcement injects flux-applier impersonation, which AKS
+    // Automatic admission policy rejects with `dry-run failed (Forbidden)`.
+    // Disabling it lets controllers apply as their exempt flux-system identities.
     configurationSettings: {
       'multiTenancy.enforce': 'false'
     }
@@ -97,6 +85,8 @@ resource gitopsConfig 'Microsoft.KubernetesConfiguration/fluxConfigurations@2024
   scope: aks
   properties: {
     scope: 'cluster'
+    // AKS Automatic denies deployer writes to flux-system. The CLI seeds
+    // SPI-owned inputs into the configured namespace, so reconciliation uses it.
     namespace: gitopsNamespace
     sourceKind: 'GitRepository'
     gitRepository: union(gitRepositoryBase, gitRepositoryAuth)
@@ -120,5 +110,8 @@ resource gitopsConfig 'Microsoft.KubernetesConfiguration/fluxConfigurations@2024
   ]
 }
 
+@description('Resource name of the deployed Flux configuration, or an empty string when activation is disabled.')
 output configurationName string = activateGitOps ? gitopsConfig.name : ''
+
+@description('Resource name of the deployed Flux extension.')
 output extensionName string = fluxExtension.name
