@@ -156,6 +156,49 @@ See [Ingress modes](docs/architecture.md#ingress-profiles) and
 New environments default to public `yuchen-osdu` `main-snapshot` service images,
 resolved atomically to immutable digests before provisioning.
 
+## Onboard a Service Repository
+
+Initialize the service repository and complete its `.spi/service.yaml` descriptor first.
+The Stack profile must already contain the service Deployment, because onboarding reads the
+live Deployment and container names rather than creating workload manifests.
+
+From a Stack checkout, onboard and run the first canary verification with one command:
+
+```bash
+uv run spi onboard --repo yuchen-osdu/partition --env auto2 --verify
+```
+
+`--env auto2` derives the AKS cluster, AKS resource group, and identity resource group as
+`spi-stack-auto2`. The command resolves the target repository's exact `main` SHA, then
+validates its schema version 2 descriptor with `descriptor.py` and `schema.json` downloaded
+from the exact `main` SHA of `TEMPLATE_REPO_URL` (default
+`https://github.com/yuchen-osdu/osdu-spi.git`). It discovers the gateway, Storage account,
+partition, and Entitlements domain from the live Stack, then reconciles identity,
+federation, RBAC, Entitlements, and environment-owned GitHub Actions settings. Explicit
+`--service`, `--aks-cluster`, `--aks-rg`, `--identities-rg`, `--keyvault`, and
+`--gateway-url` values override discovery.
+
+Key Vault discovery, `KEYVAULT_NAME`, and the Secrets User role apply only when
+`tests.acceptance.keyVaultBindings` is non-empty. Removing those bindings removes the
+repository variable and, when the exact prior service identity and vault assignment are
+identifiable, removes that role assignment. The command never requires or populates test
+secret values.
+
+Verification is opt-in. `--verify` freezes the Flux GitRepository, Kustomizations, and
+HelmReleases, runs Validation with `force_full_pipeline=true`, and requires `🔒 Deploy,
+Test & Restore`, `🚀 Deploy to spi-stack`, and `🧪 Integration Tests` to succeed.
+`DEPLOY_VALIDATED` stays false while Validation and the first Settings Apply pass run. The
+command then sets it true and runs Settings Apply again so required checks become active.
+Each dispatch is tied to the resolved repository SHA; a moved `main` branch or ambiguous
+simultaneous dispatch fails. Timed-out runs are cancelled and awaited to a terminal state.
+The cluster remains frozen for CI mode.
+
+A material environment change, re-home, or verification resets `DEPLOY_VALIDATED=false`
+before the first repository mutation. A no-op `--no-verify` rerun preserves an existing
+true value. `--dry-run` reports Deployment and ConfigMap values as unresolved placeholders
+instead of reading the active kubectl context, and changes no Azure, Kubernetes, GitHub, or
+local kubeconfig state.
+
 ## Common Commands
 
 | Command | Purpose |

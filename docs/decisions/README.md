@@ -73,7 +73,7 @@ Each row states the ruling so the index can answer "what was decided" on its own
 | [034](034-runtime-resolved-istio-revision.md) | Runtime-Resolved Managed Istio Revision | The CLI publishes the live managed Istio revision for Flux namespace substitution. |
 | [035](035-entra-first-data-plane.md) | Entra-First Azure Data Plane | Historical transition decision, superseded by ADR-023. |
 | [036](036-per-identity-authorization.md) | Per-Identity Authorization | Istio projects each caller's identity, and Entitlements membership is seeded explicitly instead of collapsing callers to the bootstrap UAMI. |
-| [037](037-cluster-side-onboarding.md) | Cluster-Side Service Onboarding | `spi onboard` and `spi rehome` create or repair per-repository federation, RBAC, Entitlements membership, and the no-data identity. |
+| [037](037-cluster-side-onboarding.md) | Cluster-Side Service Onboarding | Descriptor-aware `spi onboard` discovers Stack facts, reconciles access, re-homes repositories, and optionally runs the first canary verification. |
 | [038](038-subscription-resolved-availability-zones.md) | Subscription-Resolved Availability Zones | The CLI resolves usable system-pool zones for the active subscription before deploying AKS. |
 | [039](039-graduated-wellbore-profile.md) | Graduated Profile Starts with the Wellbore Service Pair | `graduated` cumulatively extends core with Wellbore main and worker services, policies, scheduling, and routes. |
 | [040](040-aks-automatic-only.md) | AKS Automatic as the Only Cluster Topology | The stack exposes no Base-mode deployment path. |

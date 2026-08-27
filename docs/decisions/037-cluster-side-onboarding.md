@@ -3,68 +3,102 @@
 ## Context
 
 The deploy lane (ADR-029, ADR-030) lets a service fork build an image and set it
-on a running Deployment. That only works once the fork can actually reach the
-cluster, and reaching it requires a set of coupled facts that live on both
-sides: an Azure managed identity, federated credentials matching the exact OIDC
-subjects the workflows run as, Azure RBAC for the cluster and Key Vault, read
-access to the Flux objects the lane's CI-mode pre-flight inspects, membership in
-the OSDU entitlements groups the acceptance tests authorize against, and the
-repository secrets and variables that name all of it.
+on a running Deployment. Reaching the cluster couples Azure identity, GitHub
+OIDC subjects, Azure and Kubernetes RBAC, OSDU Entitlements membership, live
+Stack configuration, and repository Actions settings. A mismatch fails later
+inside CI, after the operator has lost the sequence that created it.
 
-Established by hand, this is long, easy to get subtly wrong, and silent when it
-is wrong: a missing entitlements membership or a federated credential with the
-right subject but the wrong audience surfaces much later as an opaque CI
-failure. It also has to be repeatable, because a fork is expected to move
-between clusters as environments are rebuilt, and a half-moved fork authenticates
-as a retired cluster's identity while every other setting points at the new one.
+The service repository owns build and acceptance behavior in
+`.spi/service.yaml`; the environment owns cluster coordinates and deployed
+resource names. Onboarding must preserve that boundary and must reject a
+descriptor before changing either environment. The template's descriptor
+parser and closed schema remain the single validation implementation.
 
-## Decision Drivers
-
-- One command should establish everything a fork needs to deploy and test.
-- Re-running it must be safe, and must repair partial or stale state.
-- Moving a fork to a new cluster must be the same command, not a manual cleanup.
-- Nothing may be granted that the lane does not actually need.
-- The plan must be inspectable before anything is changed.
-
-## Considered Options
-
-- A single idempotent `spi onboard` command
-- Documented manual steps
-- A separate bootstrap tool outside the CLI
+A service Deployment must already exist in the Stack. The command grants a
+repository access to that workload; it does not add a HelmRelease, Kustomization,
+template, or service manifest.
 
 ## Decision
 
-Chosen option: "A single idempotent `spi onboard` command".
+`spi onboard` is the cluster-side onboarding command. The descriptor-aware path
+is:
 
-`spi onboard` owns the cluster-side half of CI/CD onboarding. It creates or
-reuses the fork's managed identity and its federated credentials, assigns the
-Azure roles the lane needs, grants read access to the Flux resources the
-CI-mode pre-flight checks, seeds the CI identity into the entitlements groups
-the acceptance suite authorizes against, and writes the resulting `AZURE_*`
-secrets and repository/cluster link variables onto the target repository.
+```bash
+uv run spi onboard --repo yuchen-osdu/partition --env auto2 --verify
+```
 
-The command is idempotent by construction, and reconciles rather than assumes:
-it compares what exists against what is required and repairs the difference, so
-a re-run after a partial failure converges. Running it against a different
-cluster re-homes the fork in one step, because the identity recorded on the
-repository is what re-home detection reads. `--dry-run` prints the full plan,
-including the Key Vault secrets it expects to be populated out of band, without
-making any change.
+The command resolves the target repository's exact `main` SHA and reads
+`.spi/service.yaml` at that revision through the GitHub contents API raw media
+type. It resolves the exact `main` SHA of `TEMPLATE_REPO_URL`, downloads
+`.github/scripts/service-config/descriptor.py` and `schema.json` at that
+revision, imports the parser dynamically, and runs canonical parse and
+validation before mutation. Descriptor-aware onboarding requires schema version
+2. It extracts `service.name`,
+`tests.acceptance.noDataAccessTokenEnv`, and whether
+`tests.acceptance.keyVaultBindings` is non-empty. Explicit flags override the
+extracted service or environment discovery, not canonical validation.
 
-Rejected: documented manual steps, because the coupling between Azure, the
-cluster and the repository is exactly where hand-execution drifts, and the
-failures are delayed and hard to attribute. Rejected: a separate tool, because
-it would duplicate the CLI's existing cluster discovery, naming and
-authentication.
+`--env auto2` supplies `spi-stack-auto2` as the default AKS cluster, AKS
+resource group, and identity resource group. The live Deployment supplies the
+Deployment and container names. The `osdu-flux/spi-ingress-config` ConfigMap
+supplies `GATEWAY_URL`; `osdu/osdu-config` supplies `STORAGE_ACCOUNT_NAME` and,
+only when the descriptor has Key Vault bindings, `KEYVAULT_NAME`; `--partition`
+supplies `DATA_PARTITION_ID`; the Entitlements seed Job supplies
+`ENTITLEMENT_DOMAIN`.
+
+The command creates or reuses the service UAMI, reconciles the repository's
+federated credentials, assigns the namespace-scoped deploy role and cluster
+reader role, grants Flux read through native Kubernetes RBAC, and seeds the
+service identity into the root Entitlements groups. A descriptor that names
+`noDataAccessTokenEnv` receives the shared no-data identity without Azure data
+RBAC or Entitlements membership. A descriptor that omits the field causes that
+repository's no-data federated credentials and variables to be removed.
+
+Only environment-owned Actions settings are written. Azure client, tenant, and
+subscription IDs remain Actions secrets; the client ID is also paired with the
+non-secret identity variable. Deployment coordinates, gateway, Storage account,
+partition, Entitlements domain, and no-data identity facts are Actions
+variables. `KEYVAULT_NAME` and the Key Vault Secrets User role exist only for a
+non-empty `keyVaultBindings` contract. Removing that contract removes the
+variable and removes the exact prior service-identity role assignment when the
+vault and assignment remain identifiable.
+
+Verification is opt-in and leaves Flux frozen for CI mode. It freezes the Stack
+GitRepository, every Kustomization, and every HelmRelease, dispatches Validation
+on `main` with `force_full_pipeline=true`, and accepts only a run for the
+resolved SHA. The selector uses a captured run URL when the CLI returns one;
+otherwise it uses the prior run set, commit SHA, event, branch, and dispatch
+time, and rejects multiple matches. Validation succeeds only when the workflow
+and `🔒 Deploy, Test & Restore`, `🚀 Deploy to spi-stack`, and
+`🧪 Integration Tests` complete successfully.
+
+`DEPLOY_VALIDATED` remains false through Validation and the first Settings Apply
+pass. The command sets it true only after both succeed, then dispatches Settings
+Apply a second time so the required checks become active. A moved `main`
+branch, failed job, failed Settings Apply pass, or timeout restores false.
+Timed-out runs are cancelled and awaited to a terminal state. A material
+environment change, re-home, or requested verification resets false before the
+first repository mutation; a no-op `--no-verify` rerun preserves true.
+
+The command neither requires nor populates acceptance-test secret values.
+`--dry-run` does not inspect the active kubectl context. It reports the live
+Deployment and ConfigMap values as unresolved placeholders and prints the plan
+without changing Azure, Kubernetes, GitHub, or the local kubeconfig.
+
+- **Rejected: documented manual steps.** They expose each cross-system value for
+  inspection, but do not reconcile drift or prevent a half-rehomed repository.
+- **Rejected: a separate bootstrap tool.** It isolates onboarding code, but
+  duplicates Stack naming, cluster access, and Flux freeze behavior.
 
 ## Consequences
 
-- Good, because onboarding a fork is one reviewable command with a preview mode.
-- Good, because re-running repairs drift instead of compounding it.
-- Good, because re-homing a fork to a rebuilt cluster is the same command.
-- Good, because the granted permissions are declared in one place and can be
-  audited as a unit.
-- Bad, because the command spans three systems, so its failure modes are
-  correspondingly broad and it must be explicit about which side failed.
-- Bad, because Key Vault secret *values* remain an out-of-band step; the command
-  grants access to them but does not create them.
+- Onboarding and re-home use the same idempotent command; the cost is an
+  operation that spans GitHub, Azure, and Kubernetes failure domains.
+- Descriptor behavior stays repository-owned and environment values stay
+  Stack-owned; the cost is that onboarding cannot run until descriptor schema
+  version 2 and the service Deployment are both present.
+- The first canary can run without a second operator command; the cost is a
+  frozen cluster that requires an explicit `spi reconcile --resume` after CI
+  mode is no longer needed.
+- Key Vault RBAC is established without creating test data; acceptance-test
+  secret values remain outside Stack onboarding.
