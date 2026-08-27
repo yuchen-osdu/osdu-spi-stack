@@ -39,14 +39,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import tempfile
 import time
-from dataclasses import dataclass
+import types
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import typer
-import yaml
 
 from .console import console, display_result
 from .guard import DEFAULT_FLUX_NAMESPACE
@@ -61,11 +63,20 @@ GH_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 GH_OIDC_AUDIENCE = "api://AzureADTokenExchange"
 GH_API_VERSION = "2026-03-10"
 TARGET_REPO_REF = "main"
+DEFAULT_TEMPLATE_REPO_URL = "https://github.com/yuchen-osdu/osdu-spi.git"
+DESCRIPTOR_MODULE_PATH = ".github/scripts/service-config/descriptor.py"
+DESCRIPTOR_SCHEMA_PATH = ".github/scripts/service-config/schema.json"
 VALIDATION_WORKFLOW = "validate.yml"
 SETTINGS_APPLY_WORKFLOW = "settings-apply.yml"
 WORKFLOW_DISCOVERY_TIMEOUT_SECONDS = 180
 WORKFLOW_COMPLETION_TIMEOUT_SECONDS = 3600
+WORKFLOW_CANCEL_TIMEOUT_SECONDS = 180
 WORKFLOW_POLL_INTERVAL_SECONDS = 10
+EXPECTED_VALIDATION_JOBS = (
+    "🔒 Deploy, Test & Restore",
+    "🚀 Deploy to spi-stack",
+    "🧪 Integration Tests",
+)
 NO_DATA_ACCESS_IDENTITY_NAME = "spi-ci-no-data-access"
 FEDERATED_CREDENTIAL_LIMIT = 20
 
@@ -221,6 +232,15 @@ class ServiceDescriptor:
     schema_version: int
     service_name: str
     no_data_access_token_env: str
+    has_keyvault_bindings: bool
+
+
+@dataclass(frozen=True)
+class WorkflowJob:
+    name: str
+    status: str
+    conclusion: str
+    url: str = ""
 
 
 @dataclass(frozen=True)
@@ -231,6 +251,7 @@ class WorkflowRun:
     conclusion: str
     created_at: str
     head_sha: str
+    jobs: tuple[WorkflowJob, ...] = ()
 
 
 @dataclass
@@ -254,6 +275,10 @@ class OnboardInputs:
     descriptor_schema_version: int = 0
     descriptor_service_name: str = ""
     descriptor_no_data_access_token_env: str = ""
+    descriptor_has_keyvault_bindings: bool = False
+    repo_main_sha: str = ""
+    template_repo: str = ""
+    template_main_sha: str = ""
     subscription_id: str = ""
     tenant_id: str = ""
     cluster_resource_id: str = ""
@@ -266,11 +291,16 @@ class OnboardInputs:
     container_name: str = ""
     storage_account_name: str = ""
     data_partition_id: str = ""
+    expected_entitlement_domain: str = ""
     entitlement_domain: str = ""
+    existing_variables: Dict[str, str] = field(default_factory=dict)
+    existing_secret_names: set[str] = field(default_factory=set)
+    material_environment_change: bool = True
+    rehome: bool = False
     validation_url: str = ""
     validation_result: str = ""
-    settings_apply_url: str = ""
-    settings_apply_result: str = ""
+    settings_apply_urls: List[str] = field(default_factory=list)
+    settings_apply_results: List[str] = field(default_factory=list)
 
     @property
     def identity_name(self) -> str:
@@ -375,69 +405,29 @@ def _derive_stack_coordinates(
     return resolved
 
 
-def _parse_service_descriptor(raw: str, *, verify: bool) -> ServiceDescriptor:
-    """Read the onboarding fields from a service descriptor."""
-    try:
-        document = yaml.safe_load(raw)
-    except yaml.YAMLError as exc:
-        raise ValueError(f".spi/service.yaml is not valid YAML: {exc}") from exc
-    if not isinstance(document, dict):
-        raise ValueError(".spi/service.yaml must contain a YAML mapping.")
-
-    schema_version = document.get("schemaVersion")
-    if (
-        isinstance(schema_version, bool)
-        or not isinstance(schema_version, int)
-        or schema_version < 1
-    ):
-        raise ValueError(".spi/service.yaml schemaVersion must be a positive integer.")
-    if verify and schema_version != 2:
-        raise ValueError(
-            "--verify requires .spi/service.yaml schemaVersion: 2; "
-            f"the repository declares schemaVersion: {schema_version}."
-        )
-
-    service = document.get("service")
-    if not isinstance(service, dict):
-        raise ValueError(".spi/service.yaml must define service.name.")
-    service_name = service.get("name")
-    if not isinstance(service_name, str) or not service_name.strip():
-        raise ValueError(".spi/service.yaml service.name must be a non-empty string.")
-
-    tests = document.get("tests", {})
-    if tests is None:
-        tests = {}
-    if not isinstance(tests, dict):
-        raise ValueError(".spi/service.yaml tests must be a mapping when present.")
-    acceptance = tests.get("acceptance", {})
-    if acceptance is None:
-        acceptance = {}
-    if not isinstance(acceptance, dict):
-        raise ValueError(".spi/service.yaml tests.acceptance must be a mapping when present.")
-    no_data_access_token_env = acceptance.get("noDataAccessTokenEnv", "")
-    if no_data_access_token_env is None:
-        no_data_access_token_env = ""
-    if not isinstance(no_data_access_token_env, str):
-        raise ValueError(
-            ".spi/service.yaml tests.acceptance.noDataAccessTokenEnv must be a string when present."
-        )
-
-    return ServiceDescriptor(
-        schema_version=schema_version,
-        service_name=service_name.strip(),
-        no_data_access_token_env=no_data_access_token_env.strip(),
-    )
+def _github_repo_slug(repo_url: str) -> str:
+    value = repo_url.strip()
+    if value.startswith("git@github.com:"):
+        return value.removeprefix("git@github.com:").removesuffix(".git").strip("/")
+    if re.fullmatch(r"[^/\s]+/[^/\s]+", value):
+        return value.removesuffix(".git")
+    parsed = urlparse(value)
+    if parsed.hostname != "github.com":
+        raise ValueError(f"TEMPLATE_REPO_URL must identify a github.com repository: {value}")
+    parts = parsed.path.strip("/").removesuffix(".git").split("/")
+    if len(parts) != 2 or not all(parts):
+        raise ValueError(f"TEMPLATE_REPO_URL must identify one owner/repository: {value}")
+    return "/".join(parts)
 
 
-def _fetch_service_descriptor(repo: str, *, verify: bool) -> ServiceDescriptor:
-    """Fetch ``.spi/service.yaml`` from the target repository's main branch."""
+def _fetch_github_raw(repo: str, path: str, ref: str) -> str:
     proc = run_process(
         [
             "gh",
             "api",
             "-H",
             "Accept: application/vnd.github.raw+json",
-            f"repos/{repo}/contents/.spi/service.yaml?ref={TARGET_REPO_REF}",
+            f"repos/{repo}/contents/{path}?ref={ref}",
         ],
         capture_output=True,
         text=True,
@@ -447,10 +437,96 @@ def _fetch_service_descriptor(repo: str, *, verify: bool) -> ServiceDescriptor:
     if proc.returncode != 0:
         error = (proc.stderr or "").strip()
         raise ValueError(
-            f"Cannot read .spi/service.yaml from {repo}@{TARGET_REPO_REF} via gh api"
-            f"{f': {error}' if error else '.'}"
+            f"Cannot read {path} from {repo}@{ref} via gh api{f': {error}' if error else '.'}"
         )
-    return _parse_service_descriptor(proc.stdout, verify=verify)
+    return proc.stdout
+
+
+def _load_canonical_descriptor_validator(
+    template_repo: str, template_sha: str
+) -> tuple[Any, Dict[str, Any]]:
+    """Load the template's exact parser and schema without writing executable files."""
+    source = _fetch_github_raw(template_repo, DESCRIPTOR_MODULE_PATH, template_sha)
+    schema_text = _fetch_github_raw(template_repo, DESCRIPTOR_SCHEMA_PATH, template_sha)
+    try:
+        schema = json.loads(schema_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"{template_repo}@{template_sha} {DESCRIPTOR_SCHEMA_PATH} is not valid JSON."
+        ) from exc
+    if not isinstance(schema, dict):
+        raise ValueError(
+            f"{template_repo}@{template_sha} {DESCRIPTOR_SCHEMA_PATH} must contain an object."
+        )
+
+    module_name = f"_spi_service_descriptor_{template_sha[:16]}"
+    module = types.ModuleType(module_name)
+    module.__file__ = f"{template_repo}@{template_sha}/{DESCRIPTOR_MODULE_PATH}"
+    sys.modules[module_name] = module
+    try:
+        exec(compile(source, module.__file__, "exec"), module.__dict__)
+    except Exception as exc:
+        raise ValueError(
+            f"Cannot load canonical descriptor validator from {template_repo}@{template_sha}: {exc}"
+        ) from exc
+    finally:
+        sys.modules.pop(module_name, None)
+    if not callable(getattr(module, "parse", None)) or not callable(
+        getattr(module, "validate", None)
+    ):
+        raise ValueError(
+            f"Canonical descriptor validator from {template_repo}@{template_sha} "
+            "does not expose parse() and validate()."
+        )
+    return module, schema
+
+
+def _parse_service_descriptor(
+    raw: str, *, validator: Any, schema: Dict[str, Any]
+) -> ServiceDescriptor:
+    """Validate with the template's canonical parser, then extract onboarding facts."""
+    try:
+        document = validator.parse(raw)
+    except Exception as exc:
+        raise ValueError(f".spi/service.yaml canonical parse failed: {exc}") from exc
+    try:
+        errors = validator.validate(document, schema)
+    except Exception as exc:
+        raise ValueError(f".spi/service.yaml canonical validation failed: {exc}") from exc
+    if errors:
+        rendered = [
+            error.render() if callable(getattr(error, "render", None)) else str(error)
+            for error in errors
+        ]
+        raise ValueError(".spi/service.yaml failed canonical validation: " + "; ".join(rendered))
+
+    schema_version = document["schemaVersion"]
+    if schema_version != 2:
+        raise ValueError(
+            ".spi/service.yaml must use schemaVersion: 2 for descriptor-aware onboarding; "
+            f"the repository declares schemaVersion: {schema_version}."
+        )
+    service_name = document["service"]["name"]
+    acceptance = document.get("tests", {}).get("acceptance", {})
+    no_data_access_token_env = acceptance.get("noDataAccessTokenEnv", "")
+    keyvault_bindings = acceptance.get("keyVaultBindings", {})
+    return ServiceDescriptor(
+        schema_version=schema_version,
+        service_name=service_name,
+        no_data_access_token_env=no_data_access_token_env,
+        has_keyvault_bindings=bool(keyvault_bindings),
+    )
+
+
+def _fetch_service_descriptor(
+    repo: str,
+    ref: str,
+    *,
+    validator: Any,
+    schema: Dict[str, Any],
+) -> ServiceDescriptor:
+    raw = _fetch_github_raw(repo, ".spi/service.yaml", ref)
+    return _parse_service_descriptor(raw, validator=validator, schema=schema)
 
 
 def _resolve_descriptor_and_coordinates(inp: OnboardInputs) -> None:
@@ -461,14 +537,29 @@ def _resolve_descriptor_and_coordinates(inp: OnboardInputs) -> None:
             inp.aks_rg,
             inp.identities_rg,
         )
-        descriptor = _fetch_service_descriptor(inp.repo, verify=inp.verify)
-    except ValueError as exc:
+        inp.repo_main_sha = _repo_head_sha(inp.repo)
+        inp.template_repo = _github_repo_slug(
+            os.environ.get("TEMPLATE_REPO_URL", DEFAULT_TEMPLATE_REPO_URL)
+            or DEFAULT_TEMPLATE_REPO_URL
+        )
+        inp.template_main_sha = _repo_head_sha(inp.template_repo)
+        validator, schema = _load_canonical_descriptor_validator(
+            inp.template_repo, inp.template_main_sha
+        )
+        descriptor = _fetch_service_descriptor(
+            inp.repo,
+            inp.repo_main_sha,
+            validator=validator,
+            schema=schema,
+        )
+    except (ValueError, RuntimeError) as exc:
         console.print(f"[error]{exc}[/error]")
         raise typer.Exit(code=1) from exc
 
     inp.descriptor_schema_version = descriptor.schema_version
     inp.descriptor_service_name = descriptor.service_name
     inp.descriptor_no_data_access_token_env = descriptor.no_data_access_token_env
+    inp.descriptor_has_keyvault_bindings = descriptor.has_keyvault_bindings
     if inp.service.strip():
         inp.service = inp.service.strip()
         if inp.service != descriptor.service_name:
@@ -485,7 +576,12 @@ def _resolve_descriptor_and_coordinates(inp: OnboardInputs) -> None:
         "  [info]Descriptor: "
         f"schemaVersion={descriptor.schema_version}, service={descriptor.service_name}, "
         "noDataAccessTokenEnv="
-        f"{descriptor.no_data_access_token_env or '(not requested)'}[/info]"
+        f"{descriptor.no_data_access_token_env or '(not requested)'}, "
+        f"keyVaultBindings={'present' if descriptor.has_keyvault_bindings else 'none'}[/info]"
+    )
+    console.print(
+        f"  [info]Immutable inputs: repo={inp.repo_main_sha[:12]}, "
+        f"template={inp.template_repo}@{inp.template_main_sha[:12]}[/info]"
     )
 
 
@@ -595,25 +691,31 @@ def _verify_deployment(inp: OnboardInputs) -> None:
     cluster rather than assuming, and read the first container's name (D13).
     """
     console.print("\n[bold]Verifying target Deployment...[/bold]")
-    # Ensure we have a kube context for this cluster (idempotent). Skip in dry-run -- fetching
-    # credentials mutates the local kubeconfig, which a plan-only run must not do.
-    if not inp.dry_run:
-        _run(
-            [
-                "az",
-                "aks",
-                "get-credentials",
-                "--resource-group",
-                inp.aks_rg,
-                "--name",
-                inp.aks_cluster,
-                "--overwrite-existing",
-                "--only-show-errors",
-            ],
-            description="Get AKS credentials",
-        )
-
     candidate = f"osdu-{inp.service}"
+    if inp.dry_run:
+        inp.deployment_name = f"<unresolved:{candidate}>"
+        inp.container_name = "<unresolved:deployment-container>"
+        _plan(
+            f"leave Deployment/{candidate} and its container unresolved without "
+            "reading the active kubectl context"
+        )
+        return
+
+    _run(
+        [
+            "az",
+            "aks",
+            "get-credentials",
+            "--resource-group",
+            inp.aks_rg,
+            "--name",
+            inp.aks_cluster,
+            "--overwrite-existing",
+            "--only-show-errors",
+        ],
+        description="Get AKS credentials",
+    )
+
     deployment = run_process(
         ["kubectl", "get", "deployment", candidate, "-n", inp.namespace, "-o", "json"],
         capture_output=True,
@@ -624,15 +726,6 @@ def _verify_deployment(inp: OnboardInputs) -> None:
             f"Deployment/{candidate} not found in namespace '{inp.namespace}'. "
             "The service must be deployed (its HelmRelease reconciled) before onboarding."
         )
-        if inp.dry_run:
-            # A plan-only run may not have a kube context yet; warn and assume the convention.
-            console.print(
-                f"  [warning][dry-run] could not read the live Deployment ({msg}). Assuming '{candidate}'.[/warning]"
-            )
-            inp.deployment_name = candidate
-            inp.container_name = candidate
-            display_result(f"(dry-run) target Deployment assumed '{candidate}'")
-            return
         console.print(f"  [error]{msg}[/error]")
         raise typer.Exit(code=1)
     obj = json.loads(deployment.stdout)
@@ -668,6 +761,30 @@ def _read_configmap_data(name: str, namespace: str) -> Dict[str, str]:
 def _discover_environment_facts(inp: OnboardInputs) -> None:
     """Resolve repository inputs from the live Stack configuration."""
     console.print("\n[bold]Discovering Stack environment facts...[/bold]")
+    inp.data_partition_id = inp.partition.strip()
+    if not inp.data_partition_id:
+        console.print("  [error]--partition must not be empty.[/error]")
+        raise typer.Exit(code=1)
+
+    if inp.dry_run:
+        inp.gateway_url = (
+            inp.gateway_url.strip().rstrip("/")
+            if inp.gateway_url
+            else "<unresolved:osdu-flux/spi-ingress-config.INGRESS_FQDN>"
+        )
+        inp.storage_account_name = "<unresolved:osdu/osdu-config.STORAGE_ACCOUNT_NAME>"
+        if inp.descriptor_has_keyvault_bindings:
+            inp.keyvault = (
+                inp.keyvault.strip()
+                if inp.keyvault
+                else "<unresolved:osdu/osdu-config.KEYVAULT_NAME>"
+            )
+        else:
+            inp.keyvault = None
+        inp.expected_entitlement_domain = "<unresolved:entitlements-seed-domain>"
+        _plan("discover Stack ConfigMap facts without reading the active kubectl context")
+        return
+
     try:
         ingress = _read_configmap_data("spi-ingress-config", inp.flux_namespace)
         osdu = _read_configmap_data("osdu-config", inp.namespace)
@@ -683,7 +800,14 @@ def _discover_environment_facts(inp: OnboardInputs) -> None:
                 )
             inp.gateway_url = f"https://{fqdn}"
 
-        if inp.keyvault:
+        if not inp.descriptor_has_keyvault_bindings:
+            if inp.keyvault:
+                console.print(
+                    "  [info]Ignoring --keyvault because the descriptor has no "
+                    "keyVaultBindings.[/info]"
+                )
+            inp.keyvault = None
+        elif inp.keyvault:
             inp.keyvault = inp.keyvault.strip()
         else:
             inp.keyvault = osdu.get("KEYVAULT_NAME", "").strip()
@@ -701,18 +825,152 @@ def _discover_environment_facts(inp: OnboardInputs) -> None:
                 f"ConfigMap {inp.namespace}/osdu-config is missing "
                 "STORAGE_ACCOUNT_NAME or PRIMARY_STORAGE_ACCOUNT_NAME."
             )
+        inp.expected_entitlement_domain = osdu.get("DOMAIN", "").strip()
     except ValueError as exc:
         console.print(f"  [error]{exc}[/error]")
         raise typer.Exit(code=1) from exc
 
-    inp.data_partition_id = inp.partition.strip()
-    if not inp.data_partition_id:
-        console.print("  [error]--partition must not be empty.[/error]")
-        raise typer.Exit(code=1)
     console.print(f"  [info]GATEWAY_URL={inp.gateway_url}[/info]")
-    console.print(f"  [info]KEYVAULT_NAME={inp.keyvault}[/info]")
+    console.print(
+        f"  [info]KEYVAULT_NAME={inp.keyvault if inp.keyvault else '(not required)'}[/info]"
+    )
     console.print(f"  [info]STORAGE_ACCOUNT_NAME={inp.storage_account_name}[/info]")
     console.print(f"  [info]DATA_PARTITION_ID={inp.data_partition_id}[/info]")
+
+
+def _gh_list_variables(inp: OnboardInputs) -> Dict[str, str]:
+    data = _gh_json(["variable", "list", "-R", inp.repo, "--json", "name,value"])
+    if not isinstance(data, list):
+        raise RuntimeError(f"GitHub did not return repository variables for {inp.repo}.")
+    return {
+        str(item["name"]): str(item.get("value") or "")
+        for item in data
+        if isinstance(item, dict) and item.get("name")
+    }
+
+
+def _gh_list_secret_names(inp: OnboardInputs) -> set[str]:
+    data = _gh_json(["secret", "list", "-R", inp.repo, "--json", "name"])
+    if not isinstance(data, list):
+        raise RuntimeError(f"GitHub did not return repository secret names for {inp.repo}.")
+    return {str(item["name"]) for item in data if isinstance(item, dict) and item.get("name")}
+
+
+def _read_repository_state(inp: OnboardInputs) -> None:
+    try:
+        inp.existing_variables = _gh_list_variables(inp)
+        inp.existing_secret_names = _gh_list_secret_names(inp)
+    except RuntimeError as exc:
+        console.print(f"  [error]{exc}[/error]")
+        raise typer.Exit(code=1) from exc
+
+
+def _probe_existing_identities(inp: OnboardInputs) -> None:
+    service_identity = _az_json(
+        [
+            "identity",
+            "show",
+            "--name",
+            inp.identity_name,
+            "--resource-group",
+            inp.identities_rg,
+        ],
+        check=False,
+    )
+    if service_identity:
+        inp.identity_client_id = service_identity.get("clientId", "")
+        inp.identity_principal_id = service_identity.get("principalId", "")
+
+    if not inp.uses_no_data_access_identity:
+        return
+    no_data_identity = _az_json(
+        [
+            "identity",
+            "show",
+            "--name",
+            inp.no_data_access_identity_name,
+            "--resource-group",
+            inp.identities_rg,
+        ],
+        check=False,
+    )
+    if no_data_identity:
+        inp.no_data_access_identity_client_id = no_data_identity.get("clientId", "")
+        inp.no_data_access_identity_principal_id = no_data_identity.get("principalId", "")
+
+
+def _desired_repository_variables(inp: OnboardInputs) -> Dict[str, str]:
+    entitlement_domain = inp.entitlement_domain or inp.expected_entitlement_domain
+    desired = {
+        "K8S_DEPLOYMENT_NAME": inp.deployment_name,
+        "K8S_CONTAINER_NAME": inp.container_name,
+        "AZURE_CLIENT_ID": inp.identity_client_id,
+        "AKS_RESOURCE_GROUP": inp.aks_rg,
+        "AKS_CLUSTER_NAME": inp.aks_cluster,
+        "K8S_NAMESPACE": inp.namespace,
+        "FLUX_NAMESPACE": inp.flux_namespace,
+        "DATA_PARTITION_ID": inp.data_partition_id,
+        "ENTITLEMENT_DOMAIN": entitlement_domain,
+        "STORAGE_ACCOUNT_NAME": inp.storage_account_name,
+        "AAD_CLIENT_ID": AAD_TOKEN_RESOURCE,
+        "GATEWAY_URL": inp.gateway_url or "",
+    }
+    if inp.descriptor_has_keyvault_bindings:
+        desired["KEYVAULT_NAME"] = inp.keyvault or ""
+    if inp.uses_no_data_access_identity:
+        desired.update(
+            {
+                "NO_DATA_ACCESS_TESTER_CLIENT_ID": inp.no_data_access_identity_client_id,
+                "NO_DATA_ACCESS_TESTER_PRINCIPAL_ID": (inp.no_data_access_identity_principal_id),
+                "NO_DATA_ACCESS_TESTER_IDENTITY_NAME": inp.no_data_access_identity_name,
+            }
+        )
+    return desired
+
+
+def _removed_repository_variables(inp: OnboardInputs) -> set[str]:
+    removed: set[str] = set()
+    if not inp.descriptor_has_keyvault_bindings:
+        removed.add("KEYVAULT_NAME")
+    if not inp.uses_no_data_access_identity:
+        removed.update(
+            {
+                "NO_DATA_ACCESS_TESTER_CLIENT_ID",
+                "NO_DATA_ACCESS_TESTER_PRINCIPAL_ID",
+                "NO_DATA_ACCESS_TESTER_IDENTITY_NAME",
+            }
+        )
+    return removed
+
+
+def _determine_material_environment_change(inp: OnboardInputs) -> bool:
+    desired = _desired_repository_variables(inp)
+    removed = _removed_repository_variables(inp)
+    variable_change = any(
+        not value or inp.existing_variables.get(name) != value for name, value in desired.items()
+    )
+    variable_change = variable_change or any(name in inp.existing_variables for name in removed)
+    required_secrets = {
+        "AZURE_CLIENT_ID",
+        "AZURE_TENANT_ID",
+        "AZURE_SUBSCRIPTION_ID",
+    }
+    secret_change = not required_secrets.issubset(inp.existing_secret_names)
+    existing_client_id = inp.existing_variables.get("AZURE_CLIENT_ID", "")
+    inp.rehome = bool(existing_client_id) and (
+        not inp.identity_client_id or existing_client_id != inp.identity_client_id
+    )
+    inp.material_environment_change = variable_change or secret_change or inp.rehome
+    return inp.material_environment_change
+
+
+def _assert_repo_main_unchanged(repo: str, expected_sha: str) -> None:
+    actual_sha = _repo_head_sha(repo)
+    if actual_sha != expected_sha:
+        raise RuntimeError(
+            f"{repo}@{TARGET_REPO_REF} moved from {expected_sha[:12]} to "
+            f"{actual_sha[:12]}; refusing to mutate or dispatch against mixed revisions."
+        )
 
 
 # --------------------------------------------------------------------------------------
@@ -1221,6 +1479,62 @@ subjects:
         os.unlink(handle.name)
 
 
+def _remove_unused_keyvault_role(inp: OnboardInputs) -> None:
+    if inp.descriptor_has_keyvault_bindings:
+        return
+    previous_vault = inp.existing_variables.get("KEYVAULT_NAME", "").strip()
+    if not previous_vault or not inp.identity_principal_id:
+        return
+    vault = _az_json(["keyvault", "show", "--name", previous_vault], check=False)
+    if not vault or not vault.get("id"):
+        console.print(
+            f"  [warning]Previous Key Vault '{previous_vault}' is not readable; "
+            "its role assignment could not be inspected.[/warning]"
+        )
+        return
+    assignments = (
+        _az_json(
+            [
+                "role",
+                "assignment",
+                "list",
+                "--assignee",
+                inp.identity_principal_id,
+                "--role",
+                KEY_VAULT_SECRETS_USER_ROLE,
+                "--scope",
+                vault["id"],
+            ],
+            check=False,
+        )
+        or []
+    )
+    assignment_ids = [
+        str(assignment["id"])
+        for assignment in assignments
+        if isinstance(assignment, dict) and assignment.get("id")
+    ]
+    for assignment_id in assignment_ids:
+        if inp.dry_run:
+            _plan(
+                f"remove exact {KEY_VAULT_SECRETS_USER_ROLE} assignment "
+                f"{assignment_id} from {inp.identity_name}"
+            )
+        else:
+            _run(
+                ["az", "role", "assignment", "delete", "--ids", assignment_id],
+                description=(f"Remove unused Key Vault role from {inp.identity_name}"),
+            )
+    if assignment_ids:
+        if inp.dry_run:
+            console.print(
+                f"  [info](dry-run) {len(assignment_ids)} unused Key Vault "
+                "role assignment(s) would be removed[/info]"
+            )
+        else:
+            display_result(f"Removed {len(assignment_ids)} unused Key Vault role assignment(s)")
+
+
 def _ensure_rbac(inp: OnboardInputs) -> None:
     console.print("\n[bold]Ensuring Azure RBAC...[/bold]")
     # 5. Cluster User (get kubeconfig).
@@ -1239,7 +1553,7 @@ def _ensure_rbac(inp: OnboardInputs) -> None:
     # has no dataAction for the Flux CRD group, so this is granted via native k8s RBAC.
     _ensure_flux_read_rbac(inp)
     # 7. Key Vault Secrets User (acceptance-test secrets).
-    if inp.keyvault:
+    if inp.descriptor_has_keyvault_bindings and inp.keyvault:
         kv = _az_json(["keyvault", "show", "--name", inp.keyvault], check=False)
         if kv and kv.get("id"):
             _assign_role(
@@ -1254,7 +1568,8 @@ def _ensure_rbac(inp: OnboardInputs) -> None:
             )
     else:
         console.print(
-            "  [info]No --keyvault given; skipping Key Vault grant (set it for integration tests).[/info]"
+            "  [info]Descriptor has no keyVaultBindings; skipping Key Vault discovery "
+            "and grant.[/info]"
         )
 
 
@@ -1486,26 +1801,6 @@ def _gh_delete_variable(inp: OnboardInputs, name: str) -> None:
     console.print(f"  [success]variable {name} removed[/success]")
 
 
-def _gh_get_variable(inp: OnboardInputs, name: str) -> str:
-    """Return the current value of a repo Actions variable, or '' if unset/unreadable.
-
-    Used to detect a re-home: if AZURE_CLIENT_ID already names a *different* identity, the repo
-    is being moved from a previous cluster to this one.
-    """
-    proc = run_process(
-        ["gh", "api", f"repos/{inp.repo}/actions/variables/{name}", "--jq", ".value"],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        error = (proc.stderr or "").strip()
-        if "HTTP 404" in error:
-            return ""
-        console.print(f"  [error]gh variable read {name} failed: {error}[/error]")
-        raise typer.Exit(code=1)
-    return proc.stdout.strip()
-
-
 def _resolve_no_data_access_profile(inp: OnboardInputs) -> None:
     if inp.no_data_access_token_env is None:
         inp.no_data_access_token_env = inp.descriptor_no_data_access_token_env
@@ -1527,108 +1822,71 @@ def _should_write_secrets(secret_present: bool, is_rehome: bool, force: bool) ->
     return (not secret_present) or is_rehome or force
 
 
+def _gh_set_variable_if_changed(inp: OnboardInputs, name: str, value: str) -> None:
+    if inp.existing_variables.get(name) == value:
+        return
+    _gh_set_variable(inp, name, value)
+    inp.existing_variables[name] = value
+
+
+def _gh_delete_variable_if_present(inp: OnboardInputs, name: str) -> None:
+    if name not in inp.existing_variables:
+        return
+    _gh_delete_variable(inp, name)
+    inp.existing_variables.pop(name, None)
+
+
 def _write_handoff(inp: OnboardInputs) -> None:
     console.print("\n[bold]Writing handoff secrets + variables to the repo...[/bold]")
+    _determine_material_environment_change(inp)
+    if inp.material_environment_change or inp.verify:
+        _gh_set_variable_if_changed(inp, "DEPLOY_VALIDATED", "false")
 
-    # Re-home detection: the AZURE_CLIENT_ID variable records the identity (and therefore the
-    # cluster) the repo is currently linked to. A different value means this is a move from a
-    # previous cluster onto this one -- so we must repoint the AZURE_* secrets too, not just the
-    # variables, or azure/login would keep authenticating as the retired cluster's identity while
-    # everything else points here. (Model: one repo <-> one cluster; this makes retire-A /
-    # onboard-B seamless in a single command.)
-    existing_client_id = _gh_get_variable(inp, "AZURE_CLIENT_ID")
-    is_rehome = (
-        bool(existing_client_id)
-        and bool(inp.identity_client_id)
-        and existing_client_id != inp.identity_client_id
-    )
-    if is_rehome:
+    existing_client_id = inp.existing_variables.get("AZURE_CLIENT_ID", "")
+    if inp.rehome:
         console.print(
             f"  [warning]Re-homing {inp.repo}: AZURE_CLIENT_ID {existing_client_id} -> "
             f"{inp.identity_client_id} (repointing the repo from the previous cluster's "
             "identity to this one).[/warning]"
         )
 
-    secret_present = _secret_present(inp, "AZURE_CLIENT_ID")
-    if _should_write_secrets(secret_present, is_rehome, inp.force_rewrite_secrets):
+    required_secrets = {
+        "AZURE_CLIENT_ID",
+        "AZURE_TENANT_ID",
+        "AZURE_SUBSCRIPTION_ID",
+    }
+    secrets_present = required_secrets.issubset(inp.existing_secret_names)
+    if _should_write_secrets(secrets_present, inp.rehome, inp.force_rewrite_secrets):
         _gh_set_secret(inp, "AZURE_CLIENT_ID", inp.identity_client_id)
         _gh_set_secret(inp, "AZURE_TENANT_ID", inp.tenant_id)
         _gh_set_secret(inp, "AZURE_SUBSCRIPTION_ID", inp.subscription_id)
+        inp.existing_secret_names.update(required_secrets)
     else:
         console.print(
             "  [info]AZURE_* secrets already current for this identity; leaving as-is "
             "(use --force-rewrite-secrets to overwrite).[/info]"
         )
 
-    # Variables (always reconcile; non-sensitive). Together with the AZURE_* secrets these fully
-    # pin the repo->cluster link, so a single `spi onboard` against a new cluster re-homes the
-    # repo with no manual variable edits.
-    _gh_set_variable(inp, "K8S_DEPLOYMENT_NAME", inp.deployment_name)
-    _gh_set_variable(inp, "K8S_CONTAINER_NAME", inp.container_name)
-    # AZURE_CLIENT_ID as a variable too: validate.yml's `if:` gates on `vars.AZURE_CLIENT_ID`,
-    # and the next onboard reads it for re-home detection (above). Kept in lock-step with the
-    # secret written above so the two never diverge (design SS6.1 step 5).
-    _gh_set_variable(inp, "AZURE_CLIENT_ID", inp.identity_client_id)
-    # Cluster-routing variables -- onboard already knows these from its own arguments, so it
-    # writes them to remove the manual "set the AKS_*/KEYVAULT_NAME vars" step and to repoint
-    # them on a re-home.
-    _gh_set_variable(inp, "AKS_RESOURCE_GROUP", inp.aks_rg)
-    _gh_set_variable(inp, "AKS_CLUSTER_NAME", inp.aks_cluster)
-    _gh_set_variable(inp, "K8S_NAMESPACE", inp.namespace)
-    _gh_set_variable(inp, "FLUX_NAMESPACE", inp.flux_namespace)
-    _gh_set_variable(inp, "DATA_PARTITION_ID", inp.data_partition_id)
-    _gh_set_variable(inp, "ENTITLEMENT_DOMAIN", inp.entitlement_domain)
-    _gh_set_variable(inp, "STORAGE_ACCOUNT_NAME", inp.storage_account_name)
-    _gh_set_variable(inp, "DEPLOY_VALIDATED", "false")
-    # AAD_CLIENT_ID is the resource/audience the integration-test mints the acceptance-test
-    # token for, NOT an identity. SPI MSIs can only mint ARM-audience tokens, so this is a
-    # constant; the CI identity is carried by AZURE_CLIENT_ID (the token's appid). See
-    # AAD_TOKEN_RESOURCE.
-    _gh_set_variable(inp, "AAD_CLIENT_ID", AAD_TOKEN_RESOURCE)
-    no_data_variables = (
-        "NO_DATA_ACCESS_TESTER_CLIENT_ID",
-        "NO_DATA_ACCESS_TESTER_PRINCIPAL_ID",
-        "NO_DATA_ACCESS_TESTER_IDENTITY_NAME",
-    )
-    if inp.uses_no_data_access_identity:
-        _gh_set_variable(
-            inp,
-            "NO_DATA_ACCESS_TESTER_CLIENT_ID",
-            inp.no_data_access_identity_client_id,
-        )
-        _gh_set_variable(
-            inp,
-            "NO_DATA_ACCESS_TESTER_PRINCIPAL_ID",
-            inp.no_data_access_identity_principal_id,
-        )
-        _gh_set_variable(
-            inp,
-            "NO_DATA_ACCESS_TESTER_IDENTITY_NAME",
-            inp.no_data_access_identity_name,
-        )
-    else:
-        for variable_name in no_data_variables:
-            _gh_delete_variable(inp, variable_name)
-    _gh_delete_variable(inp, "NO_DATA_ACCESS_TOKEN_ENV")
-    _gh_set_variable(inp, "KEYVAULT_NAME", inp.keyvault or "")
-    _gh_set_variable(inp, "GATEWAY_URL", inp.gateway_url or "")
-
-
-def _secret_present(inp: OnboardInputs, name: str) -> bool:
-    proc = run_process(
-        ["gh", "secret", "list", "-R", inp.repo],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        return False
-    return any(line.split("\t")[0].strip() == name for line in proc.stdout.splitlines())
+    for name, value in _desired_repository_variables(inp).items():
+        _gh_set_variable_if_changed(inp, name, value)
+    for name in _removed_repository_variables(inp):
+        _gh_delete_variable_if_present(inp, name)
 
 
 def _workflow_run_from_json(document: Dict[str, Any]) -> WorkflowRun:
     database_id = document.get("databaseId")
     if isinstance(database_id, bool) or not isinstance(database_id, int):
         raise RuntimeError("GitHub workflow run response is missing databaseId.")
+    jobs = tuple(
+        WorkflowJob(
+            name=str(job.get("name") or ""),
+            status=str(job.get("status") or ""),
+            conclusion=str(job.get("conclusion") or ""),
+            url=str(job.get("url") or ""),
+        )
+        for job in document.get("jobs", []) or []
+        if isinstance(job, dict)
+    )
     return WorkflowRun(
         database_id=database_id,
         url=str(document.get("url") or ""),
@@ -1636,6 +1894,7 @@ def _workflow_run_from_json(document: Dict[str, Any]) -> WorkflowRun:
         conclusion=str(document.get("conclusion") or ""),
         created_at=str(document.get("createdAt") or ""),
         head_sha=str(document.get("headSha") or ""),
+        jobs=jobs,
     )
 
 
@@ -1690,9 +1949,13 @@ def _select_dispatched_run(
     ]
     if not candidates:
         return None
-    return min(
-        candidates, key=lambda run: (_parse_github_timestamp(run.created_at), run.database_id)
-    )
+    if len(candidates) > 1:
+        run_ids = ", ".join(str(run.database_id) for run in candidates)
+        raise RuntimeError(
+            f"Ambiguous workflow dispatch: {len(candidates)} new runs match the "
+            f"expected commit ({run_ids}). Refusing to select one."
+        )
+    return candidates[0]
 
 
 def _repo_head_sha(repo: str) -> str:
@@ -1704,8 +1967,7 @@ def _repo_head_sha(repo: str) -> str:
     if result.returncode != 0 or not result.stdout.strip():
         detail = (result.stderr or "").strip()
         raise RuntimeError(
-            f"Cannot resolve {repo}@{TARGET_REPO_REF} before workflow dispatch"
-            f"{f': {detail}' if detail else '.'}"
+            f"Cannot resolve {repo}@{TARGET_REPO_REF}{f': {detail}' if detail else '.'}"
         )
     return result.stdout.strip()
 
@@ -1714,6 +1976,7 @@ def _dispatch_workflow(
     repo: str,
     workflow: str,
     *,
+    expected_sha: str,
     inputs: Optional[Dict[str, str]] = None,
     discovery_timeout: int = WORKFLOW_DISCOVERY_TIMEOUT_SECONDS,
     poll_interval: int = WORKFLOW_POLL_INTERVAL_SECONDS,
@@ -1721,8 +1984,10 @@ def _dispatch_workflow(
     """Dispatch a workflow and identify the new run without racing older runs."""
     before = _list_workflow_runs(repo, workflow)
     previous_run_ids = {run.database_id for run in before}
-    head_sha = _repo_head_sha(repo)
+    _assert_repo_main_unchanged(repo, expected_sha)
     dispatched_after = datetime.now(timezone.utc) - timedelta(seconds=5)
+    # GitHub's workflow-dispatch API accepts a branch or tag, not a commit SHA.
+    # Guard main before/after dispatch and accept only a run whose headSha matches.
     command = ["gh", "workflow", "run", workflow, "-R", repo, "--ref", TARGET_REPO_REF]
     for name, value in (inputs or {}).items():
         command.extend(["-f", f"{name}={value}"])
@@ -1734,20 +1999,36 @@ def _dispatch_workflow(
             f"{f': {detail}' if detail else '.'}"
         )
 
+    captured = re.search(
+        r"/actions/runs/([0-9]+)",
+        "\n".join(part for part in (result.stdout, result.stderr) if part),
+    )
+    if captured:
+        selected = _read_workflow_run(repo, int(captured.group(1)))
+        if selected.database_id in previous_run_ids or selected.head_sha != expected_sha:
+            raise RuntimeError(
+                f"{workflow} returned run {selected.database_id}, but it does not match "
+                f"the expected new run at {expected_sha[:12]}."
+            )
+        _assert_repo_main_unchanged(repo, expected_sha)
+        return selected
+
     deadline = time.monotonic() + discovery_timeout
     while time.monotonic() < deadline:
+        _assert_repo_main_unchanged(repo, expected_sha)
         selected = _select_dispatched_run(
             _list_workflow_runs(repo, workflow),
             previous_run_ids=previous_run_ids,
-            head_sha=head_sha,
+            head_sha=expected_sha,
             dispatched_after=dispatched_after,
         )
         if selected:
+            _assert_repo_main_unchanged(repo, expected_sha)
             return selected
         time.sleep(poll_interval)
     raise RuntimeError(
         f"Timed out after {discovery_timeout}s waiting for GitHub to create the "
-        f"{workflow} run for {repo}@{TARGET_REPO_REF} ({head_sha[:12]})."
+        f"{workflow} run for {repo}@{TARGET_REPO_REF} ({expected_sha[:12]})."
     )
 
 
@@ -1760,7 +2041,7 @@ def _read_workflow_run(repo: str, run_id: int) -> WorkflowRun:
             "-R",
             repo,
             "--json",
-            "databaseId,url,status,conclusion,createdAt,headSha",
+            "databaseId,url,status,conclusion,createdAt,headSha,jobs",
         ],
         check=False,
     )
@@ -1774,19 +2055,65 @@ def _wait_for_workflow_run(
     run: WorkflowRun,
     *,
     completion_timeout: int = WORKFLOW_COMPLETION_TIMEOUT_SECONDS,
+    cancel_timeout: int = WORKFLOW_CANCEL_TIMEOUT_SECONDS,
     poll_interval: int = WORKFLOW_POLL_INTERVAL_SECONDS,
 ) -> WorkflowRun:
     deadline = time.monotonic() + completion_timeout
     current = run
+    if current.status == "completed" and not current.jobs:
+        current = _read_workflow_run(repo, run.database_id)
     while current.status != "completed" and time.monotonic() < deadline:
         time.sleep(poll_interval)
         current = _read_workflow_run(repo, run.database_id)
     if current.status != "completed":
+        cancel = run_process(
+            ["gh", "run", "cancel", str(run.database_id), "-R", repo],
+            capture_output=True,
+            text=True,
+        )
+        if cancel.returncode != 0:
+            detail = (cancel.stderr or "").strip()
+            console.print(
+                f"  [warning]Workflow cancellation returned exit {cancel.returncode}"
+                f"{f': {detail}' if detail else '.'}[/warning]"
+            )
+        cancel_deadline = time.monotonic() + cancel_timeout
+        while current.status != "completed" and time.monotonic() < cancel_deadline:
+            time.sleep(poll_interval)
+            current = _read_workflow_run(repo, run.database_id)
+        if current.status != "completed":
+            raise RuntimeError(
+                f"Workflow run {run.database_id} timed out after {completion_timeout}s; "
+                f"cancellation was requested but it did not become terminal within "
+                f"{cancel_timeout}s ({run.url or 'URL unavailable'})."
+            )
         raise RuntimeError(
-            f"Timed out after {completion_timeout}s waiting for workflow run "
-            f"{run.database_id} ({run.url or 'URL unavailable'})."
+            f"Workflow run {run.database_id} timed out after {completion_timeout}s and "
+            f"became terminal after cancellation was requested, conclusion "
+            f"'{current.conclusion or 'unknown'}' "
+            f"({current.url or run.url or 'URL unavailable'})."
         )
     return current
+
+
+def _require_validation_jobs(run: WorkflowRun) -> None:
+    jobs = {job.name: job for job in run.jobs}
+    problems = []
+    for name in EXPECTED_VALIDATION_JOBS:
+        job = jobs.get(name)
+        if not job:
+            problems.append(f"{name}: missing")
+        elif job.status != "completed" or job.conclusion != "success":
+            problems.append(
+                f"{name}: status={job.status or 'unknown'}, "
+                f"conclusion={job.conclusion or 'unknown'}"
+            )
+    if problems:
+        raise RuntimeError(
+            "Validation did not prove the required deploy lane jobs: "
+            + "; ".join(problems)
+            + f" ({run.url or run.database_id})."
+        )
 
 
 def _freeze_flux_for_verification(inp: OnboardInputs) -> None:
@@ -1810,17 +2137,19 @@ def _verify_onboarding(inp: OnboardInputs) -> None:
     _freeze_flux_for_verification(inp)
     if inp.dry_run:
         _plan(
-            f"dispatch {VALIDATION_WORKFLOW} on {inp.repo}@{TARGET_REPO_REF} "
+            f"dispatch {VALIDATION_WORKFLOW} for {inp.repo}@{inp.repo_main_sha[:12]} "
             "with force_full_pipeline=true and wait"
         )
-        _plan("set DEPLOY_VALIDATED=true after Validation succeeds")
-        _plan(f"dispatch {SETTINGS_APPLY_WORKFLOW} on {inp.repo}@{TARGET_REPO_REF} and wait")
+        _plan(f"dispatch {SETTINGS_APPLY_WORKFLOW} with DEPLOY_VALIDATED=false and wait")
+        _plan("set DEPLOY_VALIDATED=true after Validation and Settings Apply succeed")
+        _plan(f"dispatch {SETTINGS_APPLY_WORKFLOW} again to enable required checks and wait")
         return
 
     try:
         validation = _dispatch_workflow(
             inp.repo,
             VALIDATION_WORKFLOW,
+            expected_sha=inp.repo_main_sha,
             inputs={"force_full_pipeline": "true"},
         )
         inp.validation_url = validation.url
@@ -1833,22 +2162,43 @@ def _verify_onboarding(inp: OnboardInputs) -> None:
                 f"Validation concluded '{validation.conclusion or 'unknown'}': "
                 f"{validation.url or validation.database_id}"
             )
+        _require_validation_jobs(validation)
 
-        _gh_set_variable(inp, "DEPLOY_VALIDATED", "true")
-
-        settings = _dispatch_workflow(inp.repo, SETTINGS_APPLY_WORKFLOW)
-        inp.settings_apply_url = settings.url
+        settings = _dispatch_workflow(
+            inp.repo,
+            SETTINGS_APPLY_WORKFLOW,
+            expected_sha=inp.repo_main_sha,
+        )
         console.print(f"  [info]Settings Apply run: {settings.url}[/info]")
         settings = _wait_for_workflow_run(inp.repo, settings)
-        inp.settings_apply_url = settings.url
-        inp.settings_apply_result = settings.conclusion
+        inp.settings_apply_urls.append(settings.url)
+        inp.settings_apply_results.append(settings.conclusion)
         if settings.conclusion != "success":
             raise RuntimeError(
                 f"Settings Apply concluded '{settings.conclusion or 'unknown'}': "
                 f"{settings.url or settings.database_id}"
             )
+
+        _assert_repo_main_unchanged(inp.repo, inp.repo_main_sha)
+        _gh_set_variable_if_changed(inp, "DEPLOY_VALIDATED", "true")
+
+        settings = _dispatch_workflow(
+            inp.repo,
+            SETTINGS_APPLY_WORKFLOW,
+            expected_sha=inp.repo_main_sha,
+        )
+        console.print(f"  [info]Settings Apply readiness run: {settings.url}[/info]")
+        settings = _wait_for_workflow_run(inp.repo, settings)
+        inp.settings_apply_urls.append(settings.url)
+        inp.settings_apply_results.append(settings.conclusion)
+        if settings.conclusion != "success":
+            raise RuntimeError(
+                f"Settings Apply readiness pass concluded "
+                f"'{settings.conclusion or 'unknown'}': "
+                f"{settings.url or settings.database_id}"
+            )
     except RuntimeError as exc:
-        _gh_set_variable(inp, "DEPLOY_VALIDATED", "false")
+        _gh_set_variable_if_changed(inp, "DEPLOY_VALIDATED", "false")
         console.print(f"  [error]Onboarding verification failed: {exc}[/error]")
         console.print(
             "  [warning]DEPLOY_VALIDATED remains false. Flux remains frozen for CI mode.[/warning]"
@@ -1856,7 +2206,8 @@ def _verify_onboarding(inp: OnboardInputs) -> None:
         raise typer.Exit(code=1) from exc
 
     display_result(f"Validation succeeded: {inp.validation_url}")
-    display_result(f"Settings Apply succeeded: {inp.settings_apply_url}")
+    for index, url in enumerate(inp.settings_apply_urls, start=1):
+        display_result(f"Settings Apply pass {index} succeeded: {url}")
     console.print("[warning]Flux remains frozen for CI mode.[/warning]")
 
 
@@ -1864,20 +2215,18 @@ def _verify_onboarding(inp: OnboardInputs) -> None:
 # Step 9 - JSON summary
 # --------------------------------------------------------------------------------------
 def _emit_summary(inp: OnboardInputs) -> None:
-    deploy_validated = (
-        "true"
-        if inp.validation_result == "success" and inp.settings_apply_result == "success"
-        else "false"
-    )
+    deploy_validated = inp.existing_variables.get("DEPLOY_VALIDATED", "false")
     summary = {
         "service": inp.service,
         "repo": inp.repo,
         "dry_run": inp.dry_run,
         "descriptor": {
-            "ref": TARGET_REPO_REF,
+            "ref": inp.repo_main_sha,
             "schema_version": inp.descriptor_schema_version,
             "service_name": inp.descriptor_service_name,
             "no_data_access_token_env": (inp.descriptor_no_data_access_token_env or None),
+            "keyvault_bindings": inp.descriptor_has_keyvault_bindings,
+            "validator": f"{inp.template_repo}@{inp.template_main_sha}",
         },
         "identity": {
             "name": inp.identity_name,
@@ -1938,19 +2287,20 @@ def _emit_summary(inp: OnboardInputs) -> None:
                 if inp.uses_no_data_access_identity
                 else {}
             ),
-            "KEYVAULT_NAME": inp.keyvault,
             "GATEWAY_URL": inp.gateway_url,
+            **({"KEYVAULT_NAME": inp.keyvault} if inp.descriptor_has_keyvault_bindings else {}),
         },
+        "material_environment_change": inp.material_environment_change,
         "verification": {
             "requested": inp.verify,
             "validation": {
                 "url": inp.validation_url or None,
                 "result": inp.validation_result or None,
             },
-            "settings_apply": {
-                "url": inp.settings_apply_url or None,
-                "result": inp.settings_apply_result or None,
-            },
+            "settings_apply": [
+                {"url": url or None, "result": result or None}
+                for url, result in zip(inp.settings_apply_urls, inp.settings_apply_results)
+            ],
             "cluster_frozen": inp.verify and not inp.dry_run,
         },
     }
@@ -1963,7 +2313,7 @@ def onboard(inp: OnboardInputs) -> None:
     _resolve_descriptor_and_coordinates(inp)
     title = f"[bold]spi onboard[/bold] - grant {inp.repo} deploy access to {inp.aks_cluster}"
     if inp.verify:
-        title += "\n[info]Verification enabled: Validation then Settings Apply[/info]"
+        title += "\n[info]Verification enabled: Validation and two Settings Apply passes[/info]"
     if inp.dry_run:
         title += "\n[warning]DRY RUN: planning only, no changes[/warning]"
     from rich.panel import Panel
@@ -1972,8 +2322,16 @@ def onboard(inp: OnboardInputs) -> None:
 
     _check_preconditions(inp)
     _resolve_no_data_access_profile(inp)
+    _read_repository_state(inp)
+    _probe_existing_identities(inp)
     _verify_deployment(inp)
     _discover_environment_facts(inp)
+    _determine_material_environment_change(inp)
+    try:
+        _assert_repo_main_unchanged(inp.repo, inp.repo_main_sha)
+    except RuntimeError as exc:
+        console.print(f"[error]{exc}[/error]")
+        raise typer.Exit(code=1) from exc
     _ensure_identity(inp)
     _ensure_federated_credentials(inp)
     if inp.uses_no_data_access_identity:
@@ -1981,8 +2339,15 @@ def onboard(inp: OnboardInputs) -> None:
         _ensure_no_data_access_federated_credentials(inp)
     else:
         _remove_no_data_access_federated_credentials(inp)
+    _remove_unused_keyvault_role(inp)
     _ensure_rbac(inp)
     _ensure_entitlements_membership(inp)
+    _determine_material_environment_change(inp)
+    try:
+        _assert_repo_main_unchanged(inp.repo, inp.repo_main_sha)
+    except RuntimeError as exc:
+        console.print(f"[error]{exc}[/error]")
+        raise typer.Exit(code=1) from exc
     _write_handoff(inp)
     _verify_onboarding(inp)
     _emit_summary(inp)

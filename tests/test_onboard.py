@@ -29,6 +29,7 @@ import typer
 import spi.onboard as onboard_module
 from spi.onboard import (
     DEPLOY_DATA_ACTIONS,
+    EXPECTED_VALIDATION_JOBS,
     FEDERATED_CREDENTIAL_LIMIT,
     NO_DATA_ACCESS_IDENTITY_NAME,
     OSDU_BRANCHES,
@@ -36,19 +37,27 @@ from spi.onboard import (
     VALIDATION_WORKFLOW,
     OnboardInputs,
     ServiceDescriptor,
+    WorkflowJob,
     WorkflowRun,
     _derive_stack_coordinates,
+    _desired_repository_variables,
+    _determine_material_environment_change,
     _discover_environment_facts,
     _dispatch_workflow,
     _ensure_custom_deploy_role,
     _ensure_flux_read_rbac,
+    _ensure_rbac,
     _extract_entitlement_domain,
     _fetch_service_descriptor,
     _gh_delete_variable,
-    _gh_get_variable,
+    _github_repo_slug,
+    _load_canonical_descriptor_validator,
     _no_data_access_federated_credentials,
     _parse_service_descriptor,
     _remove_no_data_access_federated_credentials,
+    _remove_unused_keyvault_role,
+    _require_validation_jobs,
+    _resolve_descriptor_and_coordinates,
     _resolve_no_data_access_profile,
     _select_dispatched_run,
     _service_federated_credentials,
@@ -111,14 +120,9 @@ def test_no_data_access_profile_allows_explicit_override():
     assert inp.resolved_no_data_access_token_env == "CUSTOM_NO_ACCESS_TOKEN"
 
 
-def test_no_data_access_profile_uses_descriptor_not_existing_repo_value(monkeypatch):
+def test_no_data_access_profile_uses_descriptor():
     inp = _inputs()
     inp.descriptor_no_data_access_token_env = "DESCRIPTOR_NO_ACCESS_TOKEN"
-    monkeypatch.setattr(
-        onboard_module,
-        "_gh_get_variable",
-        lambda *_args: pytest.fail("repo variables must not define descriptor behavior"),
-    )
 
     _resolve_no_data_access_profile(inp)
 
@@ -319,29 +323,6 @@ def test_disabling_profile_removes_repo_federated_credentials(monkeypatch):
     assert "spi-no-data-partition-pull-request" in calls[0]
 
 
-def test_repo_variable_lookup_treats_only_404_as_missing(monkeypatch):
-    monkeypatch.setattr(
-        onboard_module,
-        "run_process",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=1, stdout="", stderr="gh: variable not found (HTTP 404)"
-        ),
-    )
-    assert _gh_get_variable(_inputs(), "MISSING") == ""
-
-
-def test_repo_variable_lookup_surfaces_non_404_errors(monkeypatch):
-    monkeypatch.setattr(
-        onboard_module,
-        "run_process",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=1, stdout="", stderr="gh: service unavailable (HTTP 503)"
-        ),
-    )
-    with pytest.raises(typer.Exit):
-        _gh_get_variable(_inputs(), "BROKEN")
-
-
 def test_repo_variable_delete_attempts_empty_values_and_ignores_404(monkeypatch):
     calls = []
     responses = iter(
@@ -395,16 +376,30 @@ def test_env_derivation_and_explicit_overrides():
         _derive_stack_coordinates("", "", "cluster-rg", "identity-rg")
 
 
-def test_raw_descriptor_read_uses_main_and_github_raw_media_type(monkeypatch):
+class _CanonicalValidator:
+    @staticmethod
+    def parse(raw):
+        return json.loads(raw)
+
+    @staticmethod
+    def validate(_document, _schema):
+        return []
+
+
+def test_raw_descriptor_read_uses_exact_sha_and_github_raw_media_type(monkeypatch):
     commands = []
-    raw = """
-schemaVersion: 2
-service:
-  name: partition
-tests:
-  acceptance:
-    noDataAccessTokenEnv: NO_DATA_ACCESS_TESTER_ACCESS_TOKEN
-"""
+    raw = json.dumps(
+        {
+            "schemaVersion": 2,
+            "service": {"name": "partition"},
+            "tests": {
+                "acceptance": {
+                    "noDataAccessTokenEnv": "NO_DATA_ACCESS_TESTER_ACCESS_TOKEN",
+                    "keyVaultBindings": {"CLIENT_SECRET": "acceptance-secret"},
+                }
+            },
+        }
+    )
 
     def fake_run_process(command, **_kwargs):
         commands.append(command)
@@ -412,12 +407,18 @@ tests:
 
     monkeypatch.setattr(onboard_module, "run_process", fake_run_process)
 
-    descriptor = _fetch_service_descriptor("yuchen-osdu/partition", verify=True)
+    descriptor = _fetch_service_descriptor(
+        "yuchen-osdu/partition",
+        "abc123",
+        validator=_CanonicalValidator,
+        schema={"supportedSchemaVersions": [2]},
+    )
 
     assert descriptor == ServiceDescriptor(
         schema_version=2,
         service_name="partition",
         no_data_access_token_env="NO_DATA_ACCESS_TESTER_ACCESS_TOKEN",
+        has_keyvault_bindings=True,
     )
     assert commands == [
         [
@@ -425,66 +426,180 @@ tests:
             "api",
             "-H",
             "Accept: application/vnd.github.raw+json",
-            "repos/yuchen-osdu/partition/contents/.spi/service.yaml?ref=main",
+            "repos/yuchen-osdu/partition/contents/.spi/service.yaml?ref=abc123",
         ]
     ]
 
 
-def test_descriptor_v2_acceptance_and_no_data_extraction():
+def test_descriptor_v2_extracts_acceptance_no_data_and_empty_keyvault():
     descriptor = _parse_service_descriptor(
-        """
-schemaVersion: 2
-service:
-  name: storage
-tests:
-  acceptance:
-    type: maven
-    noDataAccessTokenEnv: NO_DATA_ACCESS_TESTER_ACCESS_TOKEN
-""",
-        verify=True,
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "service": {"name": "storage"},
+                "tests": {
+                    "acceptance": {
+                        "type": "maven",
+                        "noDataAccessTokenEnv": "NO_DATA_ACCESS_TESTER_ACCESS_TOKEN",
+                        "keyVaultBindings": {},
+                    }
+                },
+            }
+        ),
+        validator=_CanonicalValidator,
+        schema={"supportedSchemaVersions": [2]},
     )
 
     assert descriptor.schema_version == 2
     assert descriptor.service_name == "storage"
     assert descriptor.no_data_access_token_env == "NO_DATA_ACCESS_TESTER_ACCESS_TOKEN"
+    assert descriptor.has_keyvault_bindings is False
 
 
-def test_verify_requires_descriptor_v2():
+def test_descriptor_aware_onboarding_requires_v2():
     with pytest.raises(ValueError, match="schemaVersion: 2"):
         _parse_service_descriptor(
-            """
-schemaVersion: 1
-service:
-  name: partition
-""",
-            verify=True,
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "service": {"name": "partition"},
+                }
+            ),
+            validator=_CanonicalValidator,
+            schema={"supportedSchemaVersions": [1, 2]},
         )
 
 
+def test_canonical_validation_errors_are_reported_without_partial_fallback():
+    class Error:
+        def render(self):
+            return "service.name: invalid-value"
+
+    class RejectingValidator(_CanonicalValidator):
+        @staticmethod
+        def validate(_document, _schema):
+            return [Error()]
+
+    with pytest.raises(ValueError, match="service.name: invalid-value"):
+        _parse_service_descriptor(
+            json.dumps({"schemaVersion": 2, "service": {"name": "INVALID"}}),
+            validator=RejectingValidator,
+            schema={"supportedSchemaVersions": [2]},
+        )
+
+
+def test_canonical_validator_and_schema_load_from_same_template_sha(monkeypatch):
+    source = """
+import json
+def parse(raw):
+    return json.loads(raw)
+def validate(document, schema):
+    return [] if document["schemaVersion"] in schema["supportedSchemaVersions"] else ["bad"]
+"""
+    fetched = []
+
+    def fake_fetch(repo, path, ref):
+        fetched.append((repo, path, ref))
+        if path.endswith("descriptor.py"):
+            return source
+        return '{"supportedSchemaVersions":[2]}'
+
+    monkeypatch.setattr(onboard_module, "_fetch_github_raw", fake_fetch)
+
+    validator, schema = _load_canonical_descriptor_validator("org/template", "template-sha")
+
+    assert validator.parse('{"schemaVersion":2}') == {"schemaVersion": 2}
+    assert validator.validate({"schemaVersion": 2}, schema) == []
+    assert fetched == [
+        (
+            "org/template",
+            ".github/scripts/service-config/descriptor.py",
+            "template-sha",
+        ),
+        (
+            "org/template",
+            ".github/scripts/service-config/schema.json",
+            "template-sha",
+        ),
+    ]
+
+
 @pytest.mark.parametrize(
-    ("raw", "message"),
+    ("value", "expected"),
     [
-        ("schemaVersion: nope\nservice: {name: partition}\n", "positive integer"),
-        ("schemaVersion: 2\nservice: {}\n", "service.name"),
-        (
-            "schemaVersion: 2\nservice: {name: partition}\ntests: {acceptance: []}\n",
-            "tests.acceptance",
-        ),
-        (
-            "schemaVersion: 2\nservice: {name: partition}\n"
-            "tests: {acceptance: {noDataAccessTokenEnv: true}}\n",
-            "noDataAccessTokenEnv",
-        ),
+        ("https://github.com/yuchen-osdu/osdu-spi.git", "yuchen-osdu/osdu-spi"),
+        ("git@github.com:yuchen-osdu/osdu-spi.git", "yuchen-osdu/osdu-spi"),
+        ("yuchen-osdu/osdu-spi", "yuchen-osdu/osdu-spi"),
     ],
 )
-def test_descriptor_onboarding_fields_fail_clearly(raw, message):
-    with pytest.raises(ValueError, match=message):
-        _parse_service_descriptor(raw, verify=False)
+def test_template_repo_url_normalization(value, expected):
+    assert _github_repo_slug(value) == expected
+
+
+def test_descriptor_resolution_pins_repo_and_template_main_shas(monkeypatch):
+    inp = OnboardInputs(repo="my-org/partition", env="auto2")
+    calls = []
+    monkeypatch.setenv("TEMPLATE_REPO_URL", "https://github.com/template-org/spi.git")
+    monkeypatch.setattr(
+        onboard_module,
+        "_repo_head_sha",
+        lambda repo: {
+            "my-org/partition": "repo-sha",
+            "template-org/spi": "template-sha",
+        }[repo],
+    )
+    monkeypatch.setattr(
+        onboard_module,
+        "_load_canonical_descriptor_validator",
+        lambda repo, sha: (
+            calls.append(("validator", repo, sha))
+            or (_CanonicalValidator, {"supportedSchemaVersions": [2]})
+        ),
+    )
+    monkeypatch.setattr(
+        onboard_module,
+        "_fetch_service_descriptor",
+        lambda repo, ref, **_kwargs: (
+            calls.append(("descriptor", repo, ref)) or ServiceDescriptor(2, "partition", "", False)
+        ),
+    )
+
+    _resolve_descriptor_and_coordinates(inp)
+
+    assert inp.repo_main_sha == "repo-sha"
+    assert inp.template_main_sha == "template-sha"
+    assert inp.service == "partition"
+    assert calls == [
+        ("validator", "template-org/spi", "template-sha"),
+        ("descriptor", "my-org/partition", "repo-sha"),
+    ]
+
+
+def test_canonical_descriptor_failure_stops_before_preconditions_or_mutations(monkeypatch):
+    inp = OnboardInputs(repo="my-org/partition", env="auto2")
+
+    def fail_validation(_inp):
+        raise typer.Exit(code=1)
+
+    monkeypatch.setattr(
+        onboard_module,
+        "_resolve_descriptor_and_coordinates",
+        fail_validation,
+    )
+    monkeypatch.setattr(
+        onboard_module,
+        "_check_preconditions",
+        lambda _inp: pytest.fail("canonical validation must run first"),
+    )
+
+    with pytest.raises(typer.Exit):
+        onboard_module.onboard(inp)
 
 
 def test_configmap_discovery_populates_environment_facts(monkeypatch):
     inp = _inputs()
     inp.partition = "tenant1"
+    inp.descriptor_has_keyvault_bindings = True
 
     def fake_configmap(name, namespace):
         if (namespace, name) == ("osdu-flux", "spi-ingress-config"):
@@ -493,6 +608,7 @@ def test_configmap_discovery_populates_environment_facts(monkeypatch):
         return {
             "KEYVAULT_NAME": "stack-kv",
             "PRIMARY_STORAGE_ACCOUNT_NAME": "stackstorage",
+            "DOMAIN": "contoso.osdu.example",
         }
 
     monkeypatch.setattr(onboard_module, "_read_configmap_data", fake_configmap)
@@ -503,10 +619,12 @@ def test_configmap_discovery_populates_environment_facts(monkeypatch):
     assert inp.keyvault == "stack-kv"
     assert inp.storage_account_name == "stackstorage"
     assert inp.data_partition_id == "tenant1"
+    assert inp.expected_entitlement_domain == "contoso.osdu.example"
 
 
 def test_configmap_discovery_preserves_explicit_overrides(monkeypatch):
     inp = _inputs()
+    inp.descriptor_has_keyvault_bindings = True
     inp.gateway_url = "https://override.example.test/"
     inp.keyvault = "override-kv"
     monkeypatch.setattr(
@@ -529,6 +647,24 @@ def test_configmap_discovery_preserves_explicit_overrides(monkeypatch):
     assert inp.storage_account_name == "stackstorage"
 
 
+def test_no_secret_contract_skips_keyvault_discovery(monkeypatch):
+    inp = _inputs()
+    inp.keyvault = "ignored-explicit-vault"
+    monkeypatch.setattr(
+        onboard_module,
+        "_read_configmap_data",
+        lambda name, _namespace: (
+            {"INGRESS_FQDN": "stack.example.test"}
+            if name == "spi-ingress-config"
+            else {"PRIMARY_STORAGE_ACCOUNT_NAME": "stackstorage"}
+        ),
+    )
+
+    _discover_environment_facts(inp)
+
+    assert inp.keyvault is None
+
+
 def test_entitlement_domain_is_captured_from_seed_output():
     logs = """
 Seeding entitlements member 'client' into partition 'opendes'
@@ -542,6 +678,10 @@ def _ready_inputs(*, verify=False, dry_run=False):
     inp = _inputs()
     inp.verify = verify
     inp.dry_run = dry_run
+    inp.repo_main_sha = "abc123"
+    inp.template_repo = "yuchen-osdu/osdu-spi"
+    inp.template_main_sha = "template123"
+    inp.descriptor_has_keyvault_bindings = True
     inp.subscription_id = "subscription-id"
     inp.tenant_id = "tenant-id"
     inp.identity_client_id = "service-client-id"
@@ -561,8 +701,6 @@ def test_handoff_writes_environment_owned_variables(monkeypatch):
     secrets = {}
     variables = {}
     deleted = []
-    monkeypatch.setattr(onboard_module, "_gh_get_variable", lambda *_args: "")
-    monkeypatch.setattr(onboard_module, "_secret_present", lambda *_args: False)
     monkeypatch.setattr(
         onboard_module,
         "_gh_set_secret",
@@ -593,16 +731,163 @@ def test_handoff_writes_environment_owned_variables(monkeypatch):
     assert variables["KEYVAULT_NAME"] == "stack-kv"
     assert variables["GATEWAY_URL"] == "https://stack.example.test"
     assert variables["DEPLOY_VALIDATED"] == "false"
-    assert set(deleted) == {
-        "NO_DATA_ACCESS_TESTER_CLIENT_ID",
-        "NO_DATA_ACCESS_TESTER_PRINCIPAL_ID",
-        "NO_DATA_ACCESS_TESTER_IDENTITY_NAME",
-        "NO_DATA_ACCESS_TOKEN_ENV",
+    assert deleted == []
+
+
+def test_noop_no_verify_preserves_validated_true_without_repo_mutations(monkeypatch):
+    inp = _ready_inputs()
+    inp.existing_variables = {
+        **_desired_repository_variables(inp),
+        "DEPLOY_VALIDATED": "true",
     }
+    inp.existing_secret_names = {
+        "AZURE_CLIENT_ID",
+        "AZURE_TENANT_ID",
+        "AZURE_SUBSCRIPTION_ID",
+    }
+    monkeypatch.setattr(
+        onboard_module,
+        "_gh_set_secret",
+        lambda *_args: pytest.fail("no-op must not write secrets"),
+    )
+    monkeypatch.setattr(
+        onboard_module,
+        "_gh_set_variable",
+        lambda *_args: pytest.fail("no-op must not write variables"),
+    )
+    monkeypatch.setattr(
+        onboard_module,
+        "_gh_delete_variable",
+        lambda *_args: pytest.fail("no-op must not delete variables"),
+    )
+
+    _write_handoff(inp)
+
+    assert _determine_material_environment_change(inp) is False
+    assert inp.existing_variables["DEPLOY_VALIDATED"] == "true"
 
 
-def _workflow_run(workflow, *, status="queued", conclusion=""):
+def test_material_change_resets_validated_before_first_repo_mutation(monkeypatch):
+    inp = _ready_inputs()
+    inp.existing_variables = {
+        **_desired_repository_variables(inp),
+        "GATEWAY_URL": "https://old.example.test",
+        "DEPLOY_VALIDATED": "true",
+    }
+    inp.existing_secret_names = {
+        "AZURE_CLIENT_ID",
+        "AZURE_TENANT_ID",
+        "AZURE_SUBSCRIPTION_ID",
+    }
+    events = []
+    monkeypatch.setattr(onboard_module, "_gh_set_secret", lambda *_args: None)
+    monkeypatch.setattr(
+        onboard_module,
+        "_gh_set_variable",
+        lambda _inp, name, value: events.append(("set", name, value)),
+    )
+    monkeypatch.setattr(
+        onboard_module,
+        "_gh_delete_variable",
+        lambda _inp, name: events.append(("delete", name)),
+    )
+
+    _write_handoff(inp)
+
+    assert events[0] == ("set", "DEPLOY_VALIDATED", "false")
+    assert ("set", "GATEWAY_URL", "https://stack.example.test") in events
+
+
+def test_no_secret_contract_removes_variable_and_exact_keyvault_role(monkeypatch):
+    inp = _ready_inputs()
+    inp.descriptor_has_keyvault_bindings = False
+    inp.keyvault = None
+    inp.existing_variables = {
+        **_desired_repository_variables(inp),
+        "KEYVAULT_NAME": "old-vault",
+        "DEPLOY_VALIDATED": "true",
+    }
+    inp.existing_secret_names = {
+        "AZURE_CLIENT_ID",
+        "AZURE_TENANT_ID",
+        "AZURE_SUBSCRIPTION_ID",
+    }
+    repo_events = []
+    role_commands = []
+
+    def fake_az_json(args, **_kwargs):
+        if args[:2] == ["keyvault", "show"]:
+            return {
+                "id": "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/old"
+            }
+        if args[:3] == ["role", "assignment", "list"]:
+            return [
+                {"id": "/subscriptions/sub/providers/Microsoft.Authorization/roleAssignments/1"}
+            ]
+        pytest.fail(f"unexpected Azure lookup: {args}")
+
+    monkeypatch.setattr(onboard_module, "_az_json", fake_az_json)
+    monkeypatch.setattr(
+        onboard_module,
+        "_run",
+        lambda command, **_kwargs: role_commands.append(command),
+    )
+    monkeypatch.setattr(onboard_module, "_gh_set_secret", lambda *_args: None)
+    monkeypatch.setattr(
+        onboard_module,
+        "_gh_set_variable",
+        lambda _inp, name, value: repo_events.append(("set", name, value)),
+    )
+    monkeypatch.setattr(
+        onboard_module,
+        "_gh_delete_variable",
+        lambda _inp, name: repo_events.append(("delete", name)),
+    )
+
+    _remove_unused_keyvault_role(inp)
+    _write_handoff(inp)
+
+    assert role_commands == [
+        [
+            "az",
+            "role",
+            "assignment",
+            "delete",
+            "--ids",
+            "/subscriptions/sub/providers/Microsoft.Authorization/roleAssignments/1",
+        ]
+    ]
+    assert ("delete", "KEYVAULT_NAME") in repo_events
+    assert not any(event[:2] == ("set", "KEYVAULT_NAME") for event in repo_events)
+
+
+def test_no_secret_contract_never_grants_keyvault_role(monkeypatch):
+    inp = _ready_inputs()
+    inp.descriptor_has_keyvault_bindings = False
+    inp.keyvault = None
+    assignments = []
+    monkeypatch.setattr(
+        onboard_module,
+        "_assign_role",
+        lambda _inp, role, *_args: assignments.append(role),
+    )
+    monkeypatch.setattr(onboard_module, "_ensure_custom_deploy_role", lambda _inp: None)
+    monkeypatch.setattr(onboard_module, "_ensure_flux_read_rbac", lambda _inp: None)
+    monkeypatch.setattr(
+        onboard_module,
+        "_az_json",
+        lambda args, **_kwargs: pytest.fail(f"unexpected Key Vault lookup: {args}"),
+    )
+
+    _ensure_rbac(inp)
+
+    assert "Key Vault Secrets User" not in assignments
+
+
+def _workflow_run(workflow, *, status="queued", conclusion="", jobs=None):
     run_id = 101 if workflow == VALIDATION_WORKFLOW else 202
+    if jobs is None and workflow == VALIDATION_WORKFLOW and status == "completed":
+        jobs = tuple(WorkflowJob(name, "completed", "success") for name in EXPECTED_VALIDATION_JOBS)
     return WorkflowRun(
         database_id=run_id,
         url=f"https://github.test/runs/{run_id}",
@@ -610,14 +895,19 @@ def _workflow_run(workflow, *, status="queued", conclusion=""):
         conclusion=conclusion,
         created_at="2026-08-27T18:00:00Z",
         head_sha="abc123",
+        jobs=jobs or (),
     )
 
 
 def test_verify_lifecycle_and_settings_apply_ordering(monkeypatch):
     inp = _ready_inputs(verify=True)
     events = []
-    monkeypatch.setattr(onboard_module, "_gh_get_variable", lambda *_args: "")
-    monkeypatch.setattr(onboard_module, "_secret_present", lambda *_args: True)
+    monkeypatch.setattr(onboard_module, "_assert_repo_main_unchanged", lambda *_args: None)
+    inp.existing_secret_names = {
+        "AZURE_CLIENT_ID",
+        "AZURE_TENANT_ID",
+        "AZURE_SUBSCRIPTION_ID",
+    }
     monkeypatch.setattr(onboard_module, "_gh_set_secret", lambda *_args: None)
     monkeypatch.setattr(onboard_module, "_gh_delete_variable", lambda *_args: None)
     monkeypatch.setattr(
@@ -653,18 +943,21 @@ def test_verify_lifecycle_and_settings_apply_ordering(monkeypatch):
         "freeze",
         f"dispatch:{VALIDATION_WORKFLOW}",
         f"wait:{VALIDATION_WORKFLOW}",
+        f"dispatch:{SETTINGS_APPLY_WORKFLOW}",
+        f"wait:{SETTINGS_APPLY_WORKFLOW}",
         "set:true",
         f"dispatch:{SETTINGS_APPLY_WORKFLOW}",
         f"wait:{SETTINGS_APPLY_WORKFLOW}",
     ]
     assert inp.validation_result == "success"
-    assert inp.settings_apply_result == "success"
+    assert inp.settings_apply_results == ["success", "success"]
 
 
 def test_verify_validation_failure_leaves_validated_false(monkeypatch):
     inp = _ready_inputs(verify=True)
     flags = []
     dispatched = []
+    monkeypatch.setattr(onboard_module, "_assert_repo_main_unchanged", lambda *_args: None)
     monkeypatch.setattr(onboard_module, "_freeze_flux_for_verification", lambda _inp: None)
     monkeypatch.setattr(
         onboard_module,
@@ -693,9 +986,25 @@ def test_verify_validation_failure_leaves_validated_false(monkeypatch):
     assert dispatched == [VALIDATION_WORKFLOW]
 
 
+def test_validation_requires_named_deploy_lane_jobs():
+    incomplete = _workflow_run(
+        VALIDATION_WORKFLOW,
+        status="completed",
+        conclusion="success",
+        jobs=(
+            WorkflowJob("🚀 Deploy to spi-stack", "completed", "success"),
+            WorkflowJob("🧪 Integration Tests", "completed", "failure"),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="Deploy, Test & Restore.*missing"):
+        _require_validation_jobs(incomplete)
+
+
 def test_verify_settings_failure_rolls_validated_back(monkeypatch):
     inp = _ready_inputs(verify=True)
     flags = []
+    monkeypatch.setattr(onboard_module, "_assert_repo_main_unchanged", lambda *_args: None)
     monkeypatch.setattr(onboard_module, "_freeze_flux_for_verification", lambda _inp: None)
     monkeypatch.setattr(
         onboard_module,
@@ -708,9 +1017,13 @@ def test_verify_settings_failure_rolls_validated_back(monkeypatch):
         lambda _repo, workflow, **_kwargs: _workflow_run(workflow),
     )
 
+    calls = 0
+
     def wait(_repo, run):
+        nonlocal calls
         workflow = VALIDATION_WORKFLOW if run.database_id == 101 else SETTINGS_APPLY_WORKFLOW
-        conclusion = "success" if workflow == VALIDATION_WORKFLOW else "failure"
+        calls += 1
+        conclusion = "failure" if calls == 3 else "success"
         return _workflow_run(workflow, status="completed", conclusion=conclusion)
 
     monkeypatch.setattr(onboard_module, "_wait_for_workflow_run", wait)
@@ -720,7 +1033,7 @@ def test_verify_settings_failure_rolls_validated_back(monkeypatch):
 
     assert flags == ["true", "false"]
     assert inp.validation_result == "success"
-    assert inp.settings_apply_result == "failure"
+    assert inp.settings_apply_results == ["success", "failure"]
 
 
 def test_dispatched_run_selection_excludes_old_and_wrong_sha_runs():
@@ -741,6 +1054,21 @@ def test_dispatched_run_selection_excludes_old_and_wrong_sha_runs():
 
     assert selected is not None
     assert selected.database_id == 4
+
+
+def test_dispatched_run_selection_rejects_ambiguous_candidates():
+    runs = [
+        WorkflowRun(4, "one", "queued", "", "2026-08-27T18:00:01Z", "abc"),
+        WorkflowRun(5, "two", "queued", "", "2026-08-27T18:00:02Z", "abc"),
+    ]
+
+    with pytest.raises(RuntimeError, match="Ambiguous workflow dispatch"):
+        _select_dispatched_run(
+            runs,
+            previous_run_ids=set(),
+            head_sha="abc",
+            dispatched_after=datetime(2026, 8, 27, 18, 0, tzinfo=timezone.utc),
+        )
 
 
 def test_workflow_dispatch_uses_main_inputs_and_returns_new_run(monkeypatch):
@@ -771,6 +1099,7 @@ def test_workflow_dispatch_uses_main_inputs_and_returns_new_run(monkeypatch):
     selected = _dispatch_workflow(
         "my-org/partition",
         VALIDATION_WORKFLOW,
+        expected_sha="abc123",
         inputs={"force_full_pipeline": "true"},
         discovery_timeout=5,
         poll_interval=0,
@@ -791,6 +1120,23 @@ def test_workflow_dispatch_uses_main_inputs_and_returns_new_run(monkeypatch):
             "force_full_pipeline=true",
         ]
     ]
+
+
+def test_workflow_dispatch_fails_if_main_moved(monkeypatch):
+    monkeypatch.setattr(onboard_module, "_list_workflow_runs", lambda *_args: [])
+    monkeypatch.setattr(onboard_module, "_repo_head_sha", lambda _repo: "new-sha")
+    monkeypatch.setattr(
+        onboard_module,
+        "run_process",
+        lambda *_args, **_kwargs: pytest.fail("dispatch must not run after main moves"),
+    )
+
+    with pytest.raises(RuntimeError, match="moved from expected-sha to new-sha"):
+        _dispatch_workflow(
+            "my-org/partition",
+            VALIDATION_WORKFLOW,
+            expected_sha="expected-sha",
+        )
 
 
 def test_workflow_polling_waits_until_completion(monkeypatch):
@@ -814,6 +1160,38 @@ def test_workflow_polling_waits_until_completion(monkeypatch):
     )
 
 
+def test_workflow_timeout_cancels_and_waits_for_terminal_state(monkeypatch):
+    queued = _workflow_run(VALIDATION_WORKFLOW)
+    cancelled = _workflow_run(
+        VALIDATION_WORKFLOW,
+        status="completed",
+        conclusion="cancelled",
+    )
+    commands = []
+    monotonic = iter([0.0, 1.0, 2.0, 3.0])
+    monkeypatch.setattr(onboard_module.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(onboard_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(onboard_module, "_read_workflow_run", lambda *_args: cancelled)
+    monkeypatch.setattr(
+        onboard_module,
+        "run_process",
+        lambda command, **_kwargs: (
+            commands.append(command) or SimpleNamespace(returncode=0, stdout="", stderr="")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="cancellation was requested"):
+        _wait_for_workflow_run(
+            "my-org/partition",
+            queued,
+            completion_timeout=0,
+            cancel_timeout=5,
+            poll_interval=0,
+        )
+
+    assert commands == [["gh", "run", "cancel", "101", "-R", "my-org/partition"]]
+
+
 def test_dry_run_performs_reads_but_no_mutations(monkeypatch):
     inp = OnboardInputs(
         repo="my-org/partition",
@@ -822,23 +1200,24 @@ def test_dry_run_performs_reads_but_no_mutations(monkeypatch):
         dry_run=True,
     )
     process_commands = []
-    visible_commands = []
-    descriptor = """
-schemaVersion: 2
-service:
-  name: partition
-tests:
-  acceptance: {}
-"""
 
     def result(returncode=0, stdout="", stderr=""):
         return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
+    def resolve_inputs(resolved):
+        resolved.aks_cluster = "spi-stack-auto2"
+        resolved.aks_rg = "spi-stack-auto2"
+        resolved.identities_rg = "spi-stack-auto2"
+        resolved.service = "partition"
+        resolved.descriptor_service_name = "partition"
+        resolved.descriptor_schema_version = 2
+        resolved.repo_main_sha = "abc123"
+        resolved.template_repo = "yuchen-osdu/osdu-spi"
+        resolved.template_main_sha = "template123"
+
     def fake_run_process(command, **_kwargs):
         process_commands.append(command)
         joined = " ".join(command)
-        if "/contents/.spi/service.yaml?ref=main" in joined:
-            return result(stdout=descriptor)
         if command[:3] == ["az", "account", "show"]:
             return result(
                 stdout=json.dumps({"id": "sub", "tenantId": "tenant", "name": "subscription"})
@@ -858,17 +1237,12 @@ tests:
             return result(stdout='{"viewerPermission":"WRITE"}')
         if "actions/oidc/customization/sub" in joined:
             return result(stdout='{"use_default":true,"sub_claim_prefix":"repo:my-org/partition"}')
-        if command[:4] == ["kubectl", "get", "deployment", "osdu-partition"]:
-            return result(
-                stdout=json.dumps(
-                    {
-                        "metadata": {"name": "osdu-partition"},
-                        "spec": {
-                            "template": {"spec": {"containers": [{"name": "osdu-partition"}]}}
-                        },
-                    }
-                )
-            )
+        if command[:3] == ["gh", "variable", "list"]:
+            return result(stdout="[]")
+        if command[:3] == ["gh", "secret", "list"]:
+            return result(stdout="[]")
+        if command[:3] == ["gh", "api", "repos/my-org/partition/commits/main"]:
+            return result(stdout="abc123\n")
         if command[:3] == ["az", "identity", "show"]:
             return result(returncode=1, stderr="not found")
         if command[:3] == ["az", "identity", "federated-credential"]:
@@ -877,34 +1251,19 @@ tests:
             return result(stdout="[]")
         if command[:3] == ["az", "role", "definition"]:
             return result(stdout="[]")
-        if command[:3] == ["az", "keyvault", "show"]:
-            return result(stdout='{"id":"/subscriptions/sub/keyVaults/stack-kv"}')
-        if command[:3] == ["gh", "api", "repos/my-org/partition/actions/variables/AZURE_CLIENT_ID"]:
-            return result(returncode=1, stderr="HTTP 404")
-        if command[:3] == ["gh", "secret", "list"]:
-            return result(stdout="")
         pytest.fail(f"unexpected process command: {command}")
 
-    def fake_visible_run(command, **_kwargs):
-        visible_commands.append(command)
-        assert command[:3] == ["kubectl", "get", "configmap"]
-        name = command[3]
-        data = (
-            {"INGRESS_FQDN": "stack.example.test"}
-            if name == "spi-ingress-config"
-            else {
-                "KEYVAULT_NAME": "stack-kv",
-                "PRIMARY_STORAGE_ACCOUNT_NAME": "stackstorage",
-            }
-        )
-        return result(stdout=json.dumps({"data": data}))
-
+    monkeypatch.setattr(onboard_module, "_resolve_descriptor_and_coordinates", resolve_inputs)
     monkeypatch.setattr(onboard_module, "run_process", fake_run_process)
-    monkeypatch.setattr(onboard_module, "_run", fake_visible_run)
+    monkeypatch.setattr(
+        onboard_module,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("dry-run must not invoke visible mutation commands"),
+    )
 
     onboard_module.onboard(inp)
 
-    assert visible_commands
+    assert not any(command and command[0] == "kubectl" for command in process_commands)
     mutations = (
         ("az", "aks", "get-credentials"),
         ("az", "identity", "create"),
@@ -918,6 +1277,6 @@ tests:
     )
     assert not any(
         tuple(command[: len(prefix)]) == prefix
-        for command in process_commands + visible_commands
+        for command in process_commands
         for prefix in mutations
     )

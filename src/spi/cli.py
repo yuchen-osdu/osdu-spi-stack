@@ -1443,7 +1443,7 @@ def onboard(
     keyvault: Optional[str] = typer.Option(
         None,
         "--keyvault",
-        help="Override KEYVAULT_NAME discovered from osdu/osdu-config.",
+        help="Override KEYVAULT_NAME when descriptor keyVaultBindings are non-empty.",
     ),
     gateway_url: Optional[str] = typer.Option(
         None,
@@ -1461,7 +1461,7 @@ def onboard(
     verify: bool = typer.Option(
         False,
         "--verify/--no-verify",
-        help="Freeze Flux and run Validation plus Settings Apply; disabled by default.",
+        help="Freeze Flux and run immutable Validation plus Settings Apply checks.",
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan without making changes."),
     force_rewrite_secrets: bool = typer.Option(
@@ -1472,11 +1472,12 @@ def onboard(
 ):
     """Grant a GitHub service-fork repo permission to deploy into this cluster.
 
-    Reads .spi/service.yaml from the target repo's main branch, discovers Stack facts,
-    creates or reconciles identities, federation, RBAC, Entitlements, and environment-owned
-    repository settings. The service Deployment must already exist in Stack. Re-running is
-    idempotent; a different environment re-homes the repo. Use --verify for the first full
-    Validation and Settings Apply sequence, or --dry-run to preview without mutation.
+    Resolves target and template main SHAs, canonically validates the schema v2 service
+    descriptor, discovers Stack facts, then reconciles identities, federation, RBAC,
+    Entitlements, and environment-owned repository settings. The service Deployment must
+    already exist in Stack. Re-running is idempotent; a different environment re-homes the
+    repo. Use --verify for immutable Validation and Settings Apply checks, or --dry-run to
+    preview without reading the active kubectl context.
     """
     from .onboard import OnboardInputs
     from .onboard import onboard as _run_onboard
