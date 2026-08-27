@@ -27,6 +27,7 @@ from .bootstrap import create_istio_revision_configmap
 from .checks import PREREQ_TOOLS, check_prerequisites
 from .config import BASE_NAME, Config, IngressMode, Profile
 from .console import console, display_result, display_yaml
+from .deploy import _prepare_schema_load_upgrade
 from .guard import (
     DEFAULT_FLUX_NAMESPACE,
     SPI_GITREPOSITORY,
@@ -1057,6 +1058,7 @@ def reconcile(
         _backfill_schema_load_lock(image_branch or DEFAULT_IMAGE_BRANCH)
 
     if resume:
+        _prepare_schema_load_upgrade()
         ns = resolve_flux_namespace()
         console.print(f"\n[bold]Resuming Flux reconciliation in '{ns}'...[/bold]")
         _set_flux_suspend(ns, False)
@@ -1140,6 +1142,8 @@ def reconcile(
                 f"  [warning]{name} stays pinned to MR !{pin.mr} ({pin.tag[:12]}); "
                 f"release with 'spi service reset {name}'[/warning]"
             )
+
+    _prepare_schema_load_upgrade()
 
     # Default: force reconcile
     if get_suspend_status():

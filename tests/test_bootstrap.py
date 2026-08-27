@@ -162,6 +162,7 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.verify_spi_cluster", return_value="spi-test"),
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli._backfill_schema_load_lock"),
+            patch("spi.cli._prepare_schema_load_upgrade") as schema_preflight,
             patch("spi.cli._flux_resource_names", return_value=[]),
             patch(
                 "spi.cli.run_command",
@@ -173,16 +174,22 @@ class TestReconcileRefreshesClusterConfig:
         ):
             result = runner.invoke(cli.app, ["reconcile", *args])
         assert result.exit_code == 0, result.output
-        return configmap
+        return configmap, schema_preflight
 
     def test_default_reconcile_writes_configmap(self):
-        self._invoke().assert_called_once_with()
+        configmap, schema_preflight = self._invoke()
+        configmap.assert_called_once_with()
+        schema_preflight.assert_called_once_with()
 
     def test_resume_writes_configmap(self):
-        self._invoke("--resume").assert_called_once_with()
+        configmap, schema_preflight = self._invoke("--resume")
+        configmap.assert_called_once_with()
+        schema_preflight.assert_called_once_with()
 
     def test_suspend_leaves_configmap_alone(self):
-        self._invoke("--suspend").assert_not_called()
+        configmap, schema_preflight = self._invoke("--suspend")
+        configmap.assert_not_called()
+        schema_preflight.assert_not_called()
 
     def test_refresh_images_exits_on_resolution_error(self):
         """A registry lookup failure has to abort before annotating anything,
@@ -278,6 +285,7 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.live_pins", return_value={}),
             patch("spi.cli.render_lock_with_pins", return_value="kind: ConfigMap\n"),
             patch("spi.cli.kubectl_apply_yaml"),
+            patch("spi.cli._prepare_schema_load_upgrade") as schema_preflight,
             patch(
                 "spi.cli._flux_resource_names",
                 return_value=[
@@ -291,6 +299,7 @@ class TestReconcileRefreshesClusterConfig:
             result = runner.invoke(cli.app, ["reconcile", "--refresh-images"])
 
         assert result.exit_code == 0, result.output
+        schema_preflight.assert_called_once_with()
         reconciled = []
         for call in run_command.call_args_list:
             args = call.args[0]
@@ -336,12 +345,14 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.live_pins", return_value={}),
             patch("spi.cli.render_lock_with_pins", return_value="kind: ConfigMap\n"),
             patch("spi.cli.kubectl_apply_yaml"),
+            patch("spi.cli._prepare_schema_load_upgrade") as schema_preflight,
             patch("spi.cli._flux_resource_names", return_value=[]),
             patch("spi.cli.run_command", side_effect=_run_command) as run_command,
         ):
             result = runner.invoke(cli.app, ["reconcile", "--refresh-images"])
 
         assert result.exit_code == 0, result.output
+        schema_preflight.assert_called_once_with()
         reconciled = [
             call.args[0][3]
             for call in run_command.call_args_list
@@ -381,12 +392,14 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
             patch("spi.cli._backfill_schema_load_lock"),
+            patch("spi.cli._prepare_schema_load_upgrade") as schema_preflight,
             patch("spi.cli._flux_resource_names", return_value=[]),
             patch("spi.cli.run_command", side_effect=_run_command),
         ):
             result = runner.invoke(cli.app, ["reconcile"])
 
         assert result.exit_code == 0, result.output
+        schema_preflight.assert_called_once_with()
 
 
 class TestSchemaLoadImageLockBackfill:
@@ -430,6 +443,7 @@ class TestSchemaLoadImageLockBackfill:
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
             lock_patcher as lock_patch,
+            patch("spi.cli._prepare_schema_load_upgrade"),
             patch("spi.cli._flux_resource_names", return_value=[]),
             patch("spi.cli.run_command", side_effect=_run_command) as run_command,
         ):
@@ -507,3 +521,42 @@ class TestSchemaLoadImageLockBackfill:
             if args[:3] == ["kubectl", "patch", "gitrepository"]
         )
         assert configmap_patch < gitrepository_patch
+
+    @pytest.mark.parametrize(
+        ("args", "source_event"),
+        [
+            ((), "annotate-source"),
+            (("--resume",), "resume-source"),
+        ],
+    )
+    def test_preflight_runs_before_source_can_advance(self, args, source_event):
+        events = []
+        runner = CliRunner()
+
+        def fake_run(command, **_kwargs):
+            if command[:3] == ["kubectl", "get", "configmap"]:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            if command[:3] == ["kubectl", "annotate", "--overwrite"]:
+                events.append("annotate-source")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with (
+            patch("spi.cli.verify_spi_cluster", return_value="spi-test"),
+            patch("spi.cli.get_suspend_status", return_value=False),
+            patch("spi.cli.create_istio_revision_configmap"),
+            patch(
+                "spi.cli._prepare_schema_load_upgrade",
+                side_effect=lambda: events.append("schema-preflight"),
+            ),
+            patch("spi.cli.resolve_flux_namespace", return_value="osdu-flux"),
+            patch(
+                "spi.cli._set_flux_suspend",
+                side_effect=lambda _ns, _suspend: events.append("resume-source"),
+            ),
+            patch("spi.cli._flux_resource_names", return_value=[]),
+            patch("spi.cli.run_command", side_effect=fake_run),
+        ):
+            result = runner.invoke(cli.app, ["reconcile", *args])
+
+        assert result.exit_code == 0, result.output
+        assert events.index("schema-preflight") < events.index(source_event)
