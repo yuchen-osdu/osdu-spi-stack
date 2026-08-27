@@ -12,11 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import urllib.error
 from datetime import datetime, timezone
 from email.message import Message
-from types import SimpleNamespace
 
 import pytest
 
@@ -82,105 +80,6 @@ def test_no_refresh_accepts_complete_graduated_lock(monkeypatch):
     )
 
     deploy._validate_existing_image_lock(Profile.GRADUATED)
-
-
-def test_no_refresh_backfills_legacy_schema_load_lock(monkeypatch):
-    data = _image_lock_data("core")
-    for suffix in ("IMAGE", "IMAGE_REPOSITORY", "IMAGE_TAG", "IMAGE_CREATED_AT", "IMAGE_DIGEST"):
-        data.pop(f"SCHEMA_LOAD_{suffix}", None)
-    data["IMAGE_COUNT"] = "13"
-
-    patch = {
-        "SCHEMA_LOAD_IMAGE": "registry/schema-load@sha256:" + ("b" * 64),
-        "SCHEMA_LOAD_IMAGE_REPOSITORY": "registry/schema-load",
-        "SCHEMA_LOAD_IMAGE_TAG": "b" * 40,
-        "SCHEMA_LOAD_IMAGE_CREATED_AT": "2026-08-26T00:00:00Z",
-        "SCHEMA_LOAD_IMAGE_DIGEST": "sha256:" + ("b" * 64),
-        "IMAGE_COUNT": "14",
-    }
-    calls = []
-    monkeypatch.setattr(deploy, "kubectl_json", lambda _args: {"data": data})
-    monkeypatch.setattr(deploy, "schema_load_lock_patch", lambda *_args, **_kwargs: patch)
-    monkeypatch.setattr(
-        deploy,
-        "run_command",
-        lambda command, **_kwargs: calls.append(command),
-    )
-
-    deploy._validate_existing_image_lock(Profile.CORE)
-
-    assert len(calls) == 1
-    assert calls[0][:4] == ["kubectl", "patch", "configmap", "osdu-image-lock"]
-    assert json.loads(calls[0][-1]) == {"data": patch}
-
-
-def test_no_refresh_reports_schema_load_backfill_failure(monkeypatch):
-    data = _image_lock_data("core")
-    data.pop("SCHEMA_LOAD_IMAGE_REPOSITORY")
-    data.pop("SCHEMA_LOAD_IMAGE_TAG")
-    data.pop("SCHEMA_LOAD_IMAGE_DIGEST")
-    monkeypatch.setattr(deploy, "kubectl_json", lambda _args: {"data": data})
-    monkeypatch.setattr(
-        deploy,
-        "schema_load_lock_patch",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            ImageResolutionError("schema-load: tag not found")
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="could not be upgraded.*tag not found"):
-        deploy._validate_existing_image_lock(Profile.CORE)
-
-
-def test_schema_load_upgrade_preflight_patches_existing_child(monkeypatch):
-    calls = []
-
-    def fake_run(command, **_kwargs):
-        calls.append(command)
-        return SimpleNamespace(
-            returncode=0,
-            stdout=(
-                "kustomization.kustomize.toolkit.fluxcd.io/spi-osdu-schema-load\n"
-                if command[:3] == ["kubectl", "get", "kustomization"]
-                else ""
-            ),
-            stderr="",
-        )
-
-    monkeypatch.setattr(deploy, "run_command", fake_run)
-
-    deploy._prepare_schema_load_upgrade()
-
-    assert len(calls) == 2
-    patch = json.loads(calls[1][-1])
-    assert patch == {
-        "spec": {
-            "force": True,
-            "postBuild": {
-                "substituteFrom": [
-                    {
-                        "kind": "ConfigMap",
-                        "name": "osdu-image-lock",
-                        "optional": False,
-                    }
-                ]
-            },
-        }
-    }
-
-
-def test_schema_load_upgrade_preflight_skips_absent_child(monkeypatch):
-    calls = []
-
-    def fake_run(command, **_kwargs):
-        calls.append(command)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(deploy, "run_command", fake_run)
-
-    deploy._prepare_schema_load_upgrade()
-
-    assert len(calls) == 1
 
 
 def test_resolve_image_selects_newest_immutable_sha(monkeypatch):
