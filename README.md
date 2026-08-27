@@ -156,6 +156,36 @@ See [Ingress modes](docs/architecture.md#ingress-profiles) and
 New environments default to public `yuchen-osdu` `main-snapshot` service images,
 resolved atomically to immutable digests before provisioning.
 
+## Onboard a Service Repository
+
+Initialize the service repository and complete its `.spi/service.yaml` descriptor first.
+The Stack profile must already contain the service Deployment, because onboarding reads the
+live Deployment and container names rather than creating workload manifests.
+
+From a Stack checkout, onboard and run the first canary verification with one command:
+
+```bash
+uv run spi onboard --repo yuchen-osdu/partition --env auto2 --verify
+```
+
+`--env auto2` derives the AKS cluster, AKS resource group, and identity resource group as
+`spi-stack-auto2`. The command reads the descriptor from the target repository's `main`
+branch, discovers the gateway, Key Vault, Storage account, partition, and Entitlements
+domain from the live Stack, then reconciles identity, federation, RBAC, Entitlements, and
+environment-owned GitHub Actions settings. Explicit `--service`, `--aks-cluster`,
+`--aks-rg`, `--identities-rg`, `--keyvault`, and `--gateway-url` values override discovery.
+
+Verification is opt-in. `--verify` requires descriptor schema version 2, freezes the Flux
+GitRepository, Kustomizations, and HelmReleases, runs the target repository's Validation
+workflow with `force_full_pipeline=true`, marks `DEPLOY_VALIDATED=true` only after success,
+then runs Settings Apply. The cluster remains frozen for CI mode. A failure leaves
+`DEPLOY_VALIDATED=false`. The command grants Key Vault access when a vault exists, but
+does not require or populate test secret values.
+
+Use `--dry-run` to inspect the plan without changing Azure, Kubernetes, GitHub, or the local
+kubeconfig. Re-running against another environment re-homes the repository and resets
+`DEPLOY_VALIDATED=false` before optional verification.
+
 ## Common Commands
 
 | Command | Purpose |

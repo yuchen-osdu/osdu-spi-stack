@@ -968,7 +968,6 @@ def _set_flux_suspend(namespace: str, suspend: bool) -> None:
             run_command(
                 ["kubectl", "patch", kind, name, "-n", namespace, "--type=merge", "-p", patch],
                 description=f"{verb} {kind}/{name}",
-                check=False,
             )
 
 
@@ -1400,16 +1399,33 @@ def update(
 
 @app.command()
 def onboard(
-    service: str = typer.Option(..., "--service", help="Service short name (e.g. partition)."),
     repo: str = typer.Option(
         ..., "--repo", help="Target GitHub repo as org/repo (e.g. my-org/partition)."
     ),
-    aks_cluster: str = typer.Option(
-        ..., "--aks-cluster", help="AKS cluster name to grant deploy access to."
+    env: str = typer.Option(
+        "",
+        "--env",
+        help="Stack environment suffix; defaults cluster and resource groups to spi-stack-<env>.",
     ),
-    aks_rg: str = typer.Option(..., "--aks-rg", help="Resource group of the AKS cluster."),
+    service: str = typer.Option(
+        "",
+        "--service",
+        help="Override service.name from .spi/service.yaml.",
+    ),
+    aks_cluster: str = typer.Option(
+        "",
+        "--aks-cluster",
+        help="Override the AKS cluster name derived from --env.",
+    ),
+    aks_rg: str = typer.Option(
+        "",
+        "--aks-rg",
+        help="Override the AKS resource group derived from --env.",
+    ),
     identities_rg: str = typer.Option(
-        ..., "--identities-rg", help="Resource group for the CI managed identity."
+        "",
+        "--identities-rg",
+        help="Override the CI identity resource group derived from --env.",
     ),
     namespace: str = typer.Option(
         "osdu", "--namespace", help="Kubernetes namespace the service Deployment lives in."
@@ -1427,21 +1443,25 @@ def onboard(
     keyvault: Optional[str] = typer.Option(
         None,
         "--keyvault",
-        help="Key Vault name to grant Secrets User on (for acceptance-test secrets).",
+        help="Override KEYVAULT_NAME discovered from osdu/osdu-config.",
     ),
     gateway_url: Optional[str] = typer.Option(
         None,
         "--gateway-url",
-        help="Cluster ingress base URL; written as the GATEWAY_URL repo variable when provided.",
+        help="Override GATEWAY_URL discovered from osdu-flux/spi-ingress-config.",
     ),
     no_data_access_token_env: Optional[str] = typer.Option(
         None,
         "--no-data-access-token-env",
         help=(
-            "Opt this repo into a no-data-access token and choose its test env name. "
-            "Storage defaults to NO_DATA_ACCESS_TESTER_ACCESS_TOKEN; an existing repo "
-            "profile value is reused. Pass an empty value to disable."
+            "Override tests.acceptance.noDataAccessTokenEnv from .spi/service.yaml. "
+            "Pass an empty value to disable."
         ),
+    ),
+    verify: bool = typer.Option(
+        False,
+        "--verify/--no-verify",
+        help="Freeze Flux and run Validation plus Settings Apply; disabled by default.",
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan without making changes."),
     force_rewrite_secrets: bool = typer.Option(
@@ -1452,20 +1472,20 @@ def onboard(
 ):
     """Grant a GitHub service-fork repo permission to deploy into this cluster.
 
-    Cluster-side half of CI/CD onboarding (design SS9.4.A): creates a managed identity +
-    federated credentials + Azure RBAC and, for test profiles that opt in, creates or reuses
-    the shared no-data-access identity without RBAC or entitlements. It then writes the
-    AZURE_* secrets and repo->cluster link variables onto the target repo. Idempotent on
-    re-run; running it against a NEW cluster seamlessly re-homes the repo. Use --dry-run
-    to preview.
+    Reads .spi/service.yaml from the target repo's main branch, discovers Stack facts,
+    creates or reconciles identities, federation, RBAC, Entitlements, and environment-owned
+    repository settings. The service Deployment must already exist in Stack. Re-running is
+    idempotent; a different environment re-homes the repo. Use --verify for the first full
+    Validation and Settings Apply sequence, or --dry-run to preview without mutation.
     """
     from .onboard import OnboardInputs
     from .onboard import onboard as _run_onboard
 
     _run_onboard(
         OnboardInputs(
-            service=service,
             repo=repo,
+            service=service,
+            env=env,
             aks_cluster=aks_cluster,
             aks_rg=aks_rg,
             identities_rg=identities_rg,
@@ -1475,6 +1495,7 @@ def onboard(
             keyvault=keyvault,
             gateway_url=gateway_url,
             no_data_access_token_env=no_data_access_token_env,
+            verify=verify,
             dry_run=dry_run,
             force_rewrite_secrets=force_rewrite_secrets,
         )
