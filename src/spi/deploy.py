@@ -40,16 +40,13 @@ from .bootstrap import (
 from .config import Config, IngressMode, Profile
 from .console import console, display_result, display_yaml
 from .images import (
-    DEFAULT_IMAGE_BRANCH,
     IMAGE_LOCK_CONFIGMAP,
     IMAGE_LOCK_NAMESPACE,
     ImageResolutionError,
     ResolvedImage,
     image_lock_key,
-    image_lock_missing_schema_load,
     image_lock_names,
     resolve_image_lock,
-    schema_load_lock_patch,
 )
 from .ingress import (
     create_ingress_config,
@@ -69,7 +66,6 @@ from .templates import (
 )
 
 GITREPO_NAME = "osdu-spi-stack-system"
-SCHEMA_LOAD_KUSTOMIZATION = "spi-osdu-schema-load"
 OSDU_CONFIG_ROLLOUT_ANNOTATION = "spi.osdu/config-rollout-hash"
 
 INFRA_FLUX_BICEP = INFRA_ROOT / "flux.bicep"
@@ -271,32 +267,6 @@ def _validate_existing_image_lock(profile: Profile) -> None:
             f"{IMAGE_LOCK_NAMESPACE}/{IMAGE_LOCK_CONFIGMAP} ConfigMap"
         )
 
-    if image_lock_missing_schema_load(data):
-        console.print("\n[bold]Backfilling schema-load into the existing image lock...[/bold]")
-        try:
-            patch = schema_load_lock_patch(data, branch=DEFAULT_IMAGE_BRANCH)
-        except ImageResolutionError as exc:
-            raise RuntimeError(
-                "The existing image lock predates schema-load and could not be upgraded: "
-                f"{exc}. Re-run without --no-refresh-images."
-            ) from exc
-        run_command(
-            [
-                "kubectl",
-                "patch",
-                "configmap",
-                IMAGE_LOCK_CONFIGMAP,
-                "-n",
-                IMAGE_LOCK_NAMESPACE,
-                "--type=merge",
-                "-p",
-                json.dumps({"data": patch}),
-            ],
-            description=f"Backfill schema-load entries in {IMAGE_LOCK_CONFIGMAP}",
-        )
-        data.update(patch)
-        display_result(f"{IMAGE_LOCK_CONFIGMAP} ConfigMap updated with schema-load")
-
     required_keys = {
         f"{image_lock_key(name)}_{suffix}"
         for name in image_lock_names(profile.value)
@@ -308,64 +278,6 @@ def _validate_existing_image_lock(profile: Profile) -> None:
             f"The existing image lock does not cover profile {profile.value!r}; "
             f"missing keys: {', '.join(missing)}. Re-run without --no-refresh-images."
         )
-
-
-def _prepare_schema_load_upgrade() -> None:
-    """Make the live schema-load child safe before the Git source advances.
-
-    An existing Flux configuration can reconcile a new source artifact before
-    its parent Kustomization has applied the new child spec. Preinstall the
-    substitution and force-replacement fields so that transition cannot render
-    the new Job with literal image placeholders or retain its immutable old pod
-    template.
-    """
-    result = run_command(
-        [
-            "kubectl",
-            "get",
-            "kustomization",
-            SCHEMA_LOAD_KUSTOMIZATION,
-            "-n",
-            IMAGE_LOCK_NAMESPACE,
-            "--ignore-not-found",
-            "-o",
-            "name",
-        ],
-        description=f"Check Kustomization exists ({SCHEMA_LOAD_KUSTOMIZATION})",
-        display=False,
-    )
-    if not result.stdout.strip():
-        return
-
-    patch = {
-        "spec": {
-            "force": True,
-            "postBuild": {
-                "substituteFrom": [
-                    {
-                        "kind": "ConfigMap",
-                        "name": IMAGE_LOCK_CONFIGMAP,
-                        "optional": False,
-                    }
-                ]
-            },
-        }
-    }
-    run_command(
-        [
-            "kubectl",
-            "patch",
-            "kustomization",
-            SCHEMA_LOAD_KUSTOMIZATION,
-            "-n",
-            IMAGE_LOCK_NAMESPACE,
-            "--type=merge",
-            "-p",
-            json.dumps(patch),
-        ],
-        description="Prepare schema-load Kustomization for source upgrade",
-    )
-    display_result("schema-load Kustomization prepared for source upgrade")
 
 
 def _wait_for_namespace(namespace: str, timeout_seconds: int = 300) -> None:
@@ -655,8 +567,6 @@ def deploy_azure(
             )
     elif config.profile in {Profile.CORE, Profile.GRADUATED}:
         _validate_existing_image_lock(config.profile)
-    if config.profile in {Profile.CORE, Profile.GRADUATED}:
-        _prepare_schema_load_upgrade()
     _create_osdu_config(config, infra_outputs)
     _create_istio_auth(config, infra_outputs)
     _create_spi_init_values(config)
