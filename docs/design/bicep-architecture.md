@@ -48,16 +48,18 @@ The full rationale is in [ADR-008](../decisions/008-bicep-for-azure-provisioning
 |---|---|---|
 | `identity.bicep` | UAMI `<cluster>-osdu-identity`, federated credentials | Federated to `workload-identity-sa` across the fixed OSDU namespace set (8, incl. `osdu` and `platform`) |
 | `keyvault.bicep` | Key Vault resource only | RBAC lives in `rbac.bicep`; secret values are declared in `main.bicep` (runtime secrets land later via CLI) |
-| `acr.bicep` | Container Registry (Basic SKU) | UAMI gets `AcrPull` |
+| `acr.bicep` | Container Registry (Basic SKU) | Role assignments live in `rbac.bicep` |
 | `cosmos-gremlin.bicep` | Cosmos DB Gremlin account + graph DB | Entitlements graph; shared across partitions |
 | `partition.bicep` | Per-partition: local-auth-disabled Cosmos SQL account + 24 containers, local-auth-disabled Service Bus namespace + 14 topics + 14 subscriptions, Storage account + service containers, and endpoint/placeholder KV secrets | Looped from `main.bicep` over `dataPartitions` |
 | `storage-common.bicep` | Common Storage account (legal tags, cross-partition data) | One per environment, not per partition |
-| `rbac.bicep` | RBAC role assignments scoped per resource | Key Vault Secrets User, Storage Blob/Table Data Contributor, Azure Service Bus Data Owner, AcrPull |
+| `rbac.bicep` | Standard Azure role assignments scoped per resource | Data roles for the workload UAMI; AcrPull for the UAMI and kubelet identity |
 | `vnet.bicep` | VNet + private subnet + NAT gateway | Consumed by `aks.bicep` (BYO VNet for AKS egress), not `main.bicep` |
 | `external-dns-identity.bicep` | Second UAMI (`<cluster>-external-dns`) + federated credential to ExternalDNS SA | Conditional on `--ingress-mode dns` |
 | `external-dns-role.bicep` | `DNS Zone Contributor` role on the DNS zone | Deploys into the zone's RG; the role binds to the zone. Conditional on `--ingress-mode dns` |
 
-`partition.bicep` is the only looped module today. Adding a partition is `spi up --env <env> --partition p1 --partition p2`; `main.bicep` renders one partition module per name.
+`partition.bicep` is the only looped module. Adding a partition is
+`spi up --env <env> --partition p1 --partition p2`; `main.bicep` renders one
+partition module per name.
 
 ## Imperative seams in the CLI
 
@@ -67,7 +69,12 @@ Five things Bicep cannot or will not do; the CLI handles them with `az`:
 2. **Soft-delete Key Vault recovery.** `az keyvault list-deleted | jq` + `az keyvault recover`. ARM cannot branch on a live query, so the CLI checks before submitting `main.bicep` and runs `recover` if needed.
 3. **`az aks get-credentials`.** Kubeconfig merge is a client-side operation, not a resource.
 4. **`az aks mesh enable-istio-cni`.** The AKS resource provider rejects `proxyRedirectionMechanism` at create time. The CLI patches it imperatively after `aks.bicep` lands.
-5. **Runtime Key Vault secrets.** The in-cluster middleware secrets (`redis-*`, `{p}-elastic-*`) are not declarable in Bicep. The CLI writes them with `az keyvault secret set` from the generated seed passwords — no wait for middleware Ready, since the values are known once infra is up. See [ADR-010](../decisions/010-keyvault-secret-management.md) and the [secret lifecycle](secret-lifecycle.md) doc for the full handoff.
+5. **Runtime Key Vault secrets.** The in-cluster middleware secrets
+   (`redis-*`, `{p}-elastic-*`) are not declarable in Bicep. The CLI writes
+   them with `az keyvault secret set` from the generated seed passwords, with
+   no wait for middleware Ready because the values are known once infra is up.
+   See [ADR-010](../decisions/010-keyvault-secret-management.md) and the
+   [secret lifecycle](secret-lifecycle.md) doc for the full handoff.
 
 These seams are explicit and small. Adding to them is a smell: most "Bicep cannot do this" answers turn out to be missing schema or API details.
 

@@ -99,7 +99,7 @@ corresponding `<mode>-graduated` overlay, which adds the public Wellbore route
 at Layer 7 while leaving the worker internal. See
 [ADR-007](decisions/007-layered-kustomization-ordering.md),
 [ADR-012](decisions/012-ingress-profiles.md), and
-[ADR-039](decisions/039-graduated-wellbore-profile.md).
+[ADR-034](decisions/034-graduated-wellbore-profile.md).
 
 ## Stack Profiles
 
@@ -118,7 +118,7 @@ the fuller profiles. Because `minimal` never creates `spi-osdu-services`, it
 pairs with the `<mode>-minimal` ingress trees, which omit the OSDU HTTPRoute
 Kustomization that would otherwise stall on that dependency. See
 [ADR-021](decisions/021-middleware-only-minimal-profile.md) and
-[ADR-039](decisions/039-graduated-wellbore-profile.md).
+[ADR-034](decisions/034-graduated-wellbore-profile.md).
 
 ## AKS Automatic
 
@@ -147,9 +147,7 @@ templates:
 - Resource requests and limits defined
 - Liveness and readiness probes defined
 
-See [ADR-002](decisions/002-aks-automatic.md),
-[ADR-031](decisions/031-kubernetes-136-minimum.md),
-[ADR-040](decisions/040-aks-automatic-only.md), and
+See [ADR-002](decisions/002-aks-automatic.md) and
 [ADR-004](decisions/004-local-helm-chart-safeguards.md).
 
 ## Ingress Profiles
@@ -243,11 +241,18 @@ A single User-Assigned Managed Identity (`osdu-identity`) is shared by all OSDU 
 |------|-------|---------|
 | Key Vault Secrets User | Vault | Read secrets |
 | Storage Blob Data Contributor | Common + per-partition accounts | Blob operations |
-| Storage Table Data Contributor | Common + per-partition accounts | Table operations |
-| Azure Service Bus Data Owner | Per-partition namespace | Publish/consume events and support Service Bus management clients |
-| AcrPull | ACR | Pull container images |
+| Storage Table Data Contributor | Common account | Table operations |
+| Azure Service Bus Data Sender | Per-partition namespace | Publish events |
+| Azure Service Bus Data Receiver | Per-partition namespace | Consume events |
+| AcrPull | ACR | Assigned to the UAMI and kubelet identity; the kubelet performs pod pulls |
 
-A second UAMI (`external-dns-identity`, scoped `DNS Zone Contributor` on the zone's resource group) is provisioned conditionally when the ingress mode is `dns`. See [ADR-005](decisions/005-workload-identity.md) and [ADR-012](decisions/012-ingress-profiles.md).
+A second UAMI (`external-dns-identity`, scoped `DNS Zone Contributor` on the
+zone's resource group) is provisioned conditionally when the ingress mode is
+`dns`. Cosmos data grants use native Cosmos role-assignment resources rather
+than standard Azure RBAC. See
+[ADR-005](decisions/005-workload-identity.md),
+[ADR-012](decisions/012-ingress-profiles.md), and
+[ADR-037](decisions/037-azure-data-plane-rbac-paths.md).
 
 ## Reconciliation Lifecycle
 
@@ -272,13 +277,18 @@ refresh the configured selector. `--image-source community` retains the prior
 OSDU GitLab resolver as an explicit fallback.
 The refresh reconciles services, schema-load, then reference services in
 dependency order. Community fleets match schema-load to the selected
-schema-service SHA. GHCR fleets resolve the current community loader because
+schema-service SHA. GHCR fleets resolve the community `master` loader because
 the SPI schema repository publishes only the service package. A plain
 `spi reconcile` preserves pins and backfills loader entries into legacy locks.
 
 ### Suspend and resume
 
-`spi reconcile --suspend` patches `spec.suspend: true` on the `GitRepository`; Flux stops fetching new revisions. `spi reconcile` (no flag) triggers a one-shot reconcile. `spi reconcile --resume` unpins the source. `spi status` and `spi info` surface a suspend warning when the source is pinned.
+`spi reconcile --suspend` patches `spec.suspend: true` on the GitRepository
+and every Kustomization and HelmRelease in `osdu-flux`. This freezes Flux for
+the direct deploy, test, and restore lane in ADR-032. `spi reconcile --resume`
+clears the same flags. A plain `spi reconcile` triggers one reconciliation
+without changing the suspended state. `spi status` and `spi info` surface a
+warning while the source is pinned.
 
 ## Configuration and Secret Model
 

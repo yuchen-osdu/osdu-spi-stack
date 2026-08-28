@@ -2,42 +2,44 @@
 
 ## Context
 
-A Kubernetes workload graph has hard ordering constraints: CRDs before CRs, operators before instances, cert-manager before certs, middleware before consumers. Applying everything at once surfaces as CrashLoopBackOff and CRD-not-found errors that resolve eventually but obscure real failures.
-
-Flux Kustomizations with explicit `dependsOn` encode those constraints once, in Git, where the graph is reviewable.
+The workload graph requires CRDs before custom resources, operators before
+instances, middleware before services, and tenant initialization before schema
+loading. A flat apply order does not express health-gated dependencies and
+turns expected startup races into deployment noise.
 
 ## Decision
 
-The core profile (`software/stacks/osdu/profiles/core/stack.yaml`) defines a set of ordered layers (0a through 6) wired by explicit `dependsOn`, including two one-shot Jobs (`spi-osdu-init`, `spi-osdu-schema-load`). Kustomizations within the same layer reconcile in parallel when they have no mutual dependency.
+Encode the dependency graph as Flux Kustomizations with explicit `dependsOn`
+and `wait: true`. `software/stacks/osdu/profiles/core/stack.yaml` defines the
+core layers; the graduated profile adds Layer 7.
 
-| Layer | Kustomization(s) | Depends on |
+| Layer | Kustomizations | Dependency |
 |---|---|---|
-| 0a | `spi-namespaces` | none |
-| 0b | `spi-nodepools` | 0a |
-| 1 | `spi-cert-manager`, `spi-trust-manager`, `spi-eck-operator`, `spi-cnpg-operator` | 0a (trust-manager also on cert-manager) |
-| 2 | `spi-elasticsearch`, `spi-redis`, `spi-postgresql` | matching L1 operator + 0b |
-| 3 | `spi-airflow` | `spi-postgresql` |
-| 4a | `spi-osdu-config` | 0a |
-| 4b | `spi-bootstrap` (trust-manager Bundles + Redis DestinationRule, ADR-011) | trust-manager, ES, Redis, osdu-config |
-| 5 | `spi-osdu-services` (core services) | 4b, 0b |
-| 5a | `spi-osdu-init` (partition + entitlements bootstrap, ADR-015) | `spi-osdu-services` |
-| 5b | `spi-osdu-schema-load` (one-shot Job, ADR-013) | `spi-osdu-init` |
-| 6 | `spi-osdu-reference` (reference services) | 5, 5b |
+| 0a | namespaces | none |
+| 0b | Karpenter NodePools | 0a |
+| 1 | cert-manager, trust-manager, ECK, CNPG | 0a; trust-manager also depends on cert-manager |
+| 2 | Elasticsearch, Redis, PostgreSQL | Layer 1 and NodePools |
+| 3 | Airflow | PostgreSQL |
+| 4a | OSDU configuration | namespaces |
+| 4b | CA bundles and Redis mesh policy | trust-manager, Elasticsearch, Redis, configuration |
+| 5 | core OSDU services | Layer 4b and NodePools |
+| 5a | partition and Entitlements initialization | core services |
+| 5b | schema load | initialization |
+| 6 | reference services | core services and schema load |
+| 7 | Wellbore services | reference services |
 
-The ingress profile (`software/stacks/osdu/ingress/<mode>/stack.yaml`, ADR-012) attaches additional Kustomizations at Layer 1 (the Gateway rendering, for which the selected ingress tree is the sole Flux owner per ADR-025, plus cert issuers, ExternalDNS, TLS overlays) and Layer 6 (`spi-middleware-routes`, `spi-osdu-routes`). The two profiles reconcile independently under one `fluxConfigurations` resource (ADR-009).
+The selected ingress tree owns the Gateway and adds route Kustomizations at
+the matching service layers. Kustomizations without a dependency between them
+reconcile in parallel. Layer timeouts match the slowest workload, including
+155 minutes for schema load.
 
-The `minimal` profile (ADR-021) declares layers 0a through 4b verbatim and stops, pairing with the `<mode>-minimal` ingress trees so no `dependsOn` is left unsatisfiable.
-
-The cumulative `graduated` profile adds Layer 7 Wellbore services and the
-matching ingress route overlay after the core graph is healthy.
-
-All Kustomizations use `wait: true` so each layer's Ready gate reflects actual workload health; per-layer `timeout` is tuned to the slowest workload in that layer (15 min for Elasticsearch and Airflow, 30 min for the OSDU service layers; schema-load's 155 min tracks the Job's `activeDeadlineSeconds` of 9000 s, a pod-startup allowance plus the cold-cluster wait and the throttled load, with headroom for reconcile overhead).
-
-Rejected: one flat Kustomization with an implicit apply order. Apply order in kustomize is not a dependency graph; it gives no ordering guarantees across independent sources.
+Rejected: one flat Kustomization is shorter, but apply order does not provide health-gated dependencies across operators and workloads.
 
 ## Consequences
 
-- Later layers start only when earlier layers report `Ready`. Spurious CRD-not-found startup noise is gone.
-- The graph is reviewable in one file and surfaces in `flux get kustomizations` and `spi status`.
-- Adding a new middleware means inserting a Kustomization at the right layer and wiring `dependsOn`; the cost is one file and one edit to the profile `stack.yaml`.
-- `wait: true` on middleware layers is a trade-off: a slow-starting operator delays everything behind it. Timeouts are tuned per layer.
+- A failed layer blocks its consumers and identifies the dependency that did
+  not become Ready.
+- The graph is visible in profile `stack.yaml` files and `flux get
+  kustomizations`.
+- Adding a component requires a Kustomization and dependency wiring; a slow
+  dependency delays every downstream layer.

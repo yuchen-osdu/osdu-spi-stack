@@ -20,7 +20,9 @@ This split is the decision in [ADR-010](../decisions/010-keyvault-secret-managem
 
 There are no Class 1 secrets. The OSDU services authenticate to Cosmos, Service Bus, Storage, and Key Vault using AAD bearer tokens minted via Workload Identity (see [workload-identity](workload-identity.md)). Tokens are short-lived, refreshed automatically by the Azure SDK, and never written to disk.
 
-Service Bus local authentication is disabled. `{partition}-sb-connection` is kept only as a schema-compatible `"DISABLED"` placeholder; Service Bus clients must use Workload Identity and the UAMI's `Azure Service Bus Data Owner` role.
+Service Bus local authentication is disabled. `{partition}-sb-connection` is
+kept only as a schema-compatible `"DISABLED"` placeholder; Service Bus clients
+must use Workload Identity and the UAMI's Data Sender and Data Receiver roles.
 The default SPI GHCR fleet supplies a Workload-Identity-capable
 indexer-queue. The explicit community fallback may still require a newer
 upstream `core-lib-azure`; it never receives a SAS key.
@@ -41,11 +43,12 @@ Most KV secrets are declared in Bicep, where the source value is Azure itself. T
 | `{p}-storage-account-blob-endpoint` | Resource `.properties` | `partition.bicep` |
 | `{p}-cosmos-primary-key`, `{p}-cosmos-connection`, `{p}-storage-account-key`, `{p}-sb-connection` | `"DISABLED"` placeholder; local auth is disabled on the Cosmos and Service Bus accounts, so services authenticate through Workload Identity (ADR-023) | `partition.bicep` |
 
-Bicep writes are atomic with the rest of the deploy: the KV secret either lands with the resource or the whole deploy fails. ARM is idempotent on secret writes (a re-deploy with the same value is a no-op).
-
-Cosmos and Service Bus local authentication is disabled. SPI Stack does not
-write usable data-plane keys; services authenticate with Microsoft Entra
-Workload Identity and the data-plane assignments declared in Bicep.
+Bicep writes are atomic with the rest of the deploy: the KV secret either lands
+with the resource or the whole deploy fails. ARM is idempotent on secret writes
+(a re-deploy with the same value is a no-op). Cosmos uses native data-plane
+role resources while Service Bus, Storage, and Key Vault use standard Azure
+role assignments; [ADR-037](../decisions/037-azure-data-plane-rbac-paths.md)
+records that split.
 
 ### Writer B: the CLI (post-handoff)
 

@@ -2,46 +2,41 @@
 
 ## Context
 
-Provisioning an SPI Stack deploys on the order of 50 Azure resources: UAMI and federated credentials, Key Vault and its secrets, ACR, Cosmos DB Gremlin and per-partition SQL with 24 containers, per-partition Service Bus with 14 topics and 14 subscriptions, common and per-partition Storage with containers and tables, and a scoped RBAC set. An imperative `az` CLI orchestrator for this resource graph grows past a thousand lines and ships ordering bugs that ARM would reject at submit time.
-
-Bicep inherits ARM's idempotency and parallel orchestration without a state file. It gives us `what-if` preview and deployment history as first-class features.
+The stack provisions an AKS cluster and a resource graph spanning identity,
+networking, Key Vault, ACR, Cosmos DB, Service Bus, Storage, Flux, and scoped
+role assignments. Declarative ARM dependencies provide idempotency and
+parallelism without an external state file; several client-side operations
+remain outside the ARM resource model.
 
 ## Decision
 
-All Azure resources are declared in Bicep. The Python CLI is a thin orchestrator that calls `az deployment group create` twice and handles the seams Bicep cannot cover.
+Declare Azure resources in three Bicep entrypoints:
 
-Layout:
+- `infra/aks.bicep` uses raw `Microsoft.ContainerService/managedClusters`
+  Bicep because the required `hostedSystemProfile` surface is absent from the
+  pinned AVM module.
+- `infra/main.bicep` composes the hand-written modules under `infra/modules/`
+  for PaaS, identities, and role assignments.
+- `infra/flux.bicep` creates the AKS Flux extension and its
+  `fluxConfigurations` resource.
 
-- `infra/aks.bicep`. AKS Automatic 1.36 with hosted managed-system pools,
-  automatic node provisioning, BYO networking, and managed Istio as raw
-  `Microsoft.ContainerService/managedClusters` Bicep (ADR-031, ADR-040). Raw
-  Bicep is used because the required `hostedSystemProfile` surface is not
-  exposed by the pinned AVM AKS module.
-- `infra/main.bicep`. Every other PaaS resource as hand-written Bicep under `infra/modules/` (identity, keyvault, acr, cosmos-gremlin, partition, storage-common, rbac, external-dns-*, vnet). Raw Bicep is simpler than AVM passthrough modules for resources where AVM adds no material defaults.
-- `infra/flux.bicep`. AKS Flux extension and `fluxConfigurations` resource (ADR-009), deployed after K8s bootstrap.
+The CLI handles only operations that depend on client state or live queries:
+resource-group creation, soft-deleted Key Vault recovery, kubeconfig merge,
+Istio CNI enablement, Kubernetes bootstrap, and runtime Key Vault secrets
+derived from the generated middleware seed. `spi up --dry-run` runs ARM
+what-if against `infra/aks.bicep` and `infra/main.bicep`.
 
-Imperative in the CLI (via `az`), not Bicep:
+Rejected: Terraform provides a mature plan workflow, but adds a state store and a second lifecycle model.
 
-- `az group create`. Bicep cannot create the resource group it deploys into.
-- Soft-deleted Key Vault precheck and `az keyvault recover`. ARM cannot branch on a live query.
-- `az aks get-credentials`. Kubeconfig merge, not a resource.
-- `az aks mesh enable-istio-cni`. The AKS resource provider rejects `proxyRedirectionMechanism` at create time.
-- Key Vault runtime secrets that depend on in-cluster seed passwords (Redis, Elasticsearch per-partition credentials). Written post-handoff by the CLI after middleware is Ready (ADR-010).
-- K8s bootstrap: namespaces, StorageClasses, ServiceAccount, `osdu-config` ConfigMap.
+Rejected: a pure `az` orchestrator keeps logic in Python, but must reimplement ARM ordering, idempotency, and what-if.
 
-`spi up --dry-run` runs `az deployment group what-if` against `aks.bicep` and `main.bicep`, giving an ARM-level diff before any resource provisioning.
-
-AKS API versions are pinned explicitly; upgrades are manual and reviewed.
-
-Rejected:
-- **Terraform.** Adds a state file and a plan/apply cycle the stack does not need. A sister repo (`../osdu-spi-infra`) uses Terraform at production scope; the SPI Stack targets dev/test.
-- **Full AVM adoption.** AVM's passthrough modules for Key Vault, ACR, Storage, Cosmos, Service Bus, Managed Identity, and AKS do not currently improve over raw Bicep enough to justify a module-version axis.
-- **Pure `az` CLI orchestrator.** The imperative codebase grew past a thousand lines and kept shipping ordering bugs that ARM rejects at submit time.
+Rejected: full AVM adoption standardizes interfaces, but omits the required AKS network surface and adds module versioning.
 
 ## Consequences
 
-- The Python infra orchestrator is small: it resolves names, runs the Bicep deployments, and handles the imperative seams above.
-- `spi up --dry-run` is a first-class preview; no equivalent exists in an imperative implementation.
-- Debugging a failed deploy shifts from per-command stderr to ARM deployment operation logs. The CLI streams operations in verbose mode.
-- Bicep ships with recent `az` CLI versions; `spi check` verifies `az bicep version`.
-- Adding a new Azure resource is a Bicep module plus a `main.bicep` wiring change. The CLI does not have to learn the resource.
+- ARM deployment operations become the primary diagnostic record, while the
+  CLI remains responsible for the explicit imperative seams.
+- AKS API versions and raw resource shapes require review when Azure changes
+  the Automatic contract.
+- Adding a PaaS resource changes Bicep wiring rather than the CLI orchestration
+  sequence.

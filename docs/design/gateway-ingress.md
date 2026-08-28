@@ -139,7 +139,7 @@ Same drill, plus one: **ExternalDNS wrote the A record.** `kubectl logs deploy/e
 
 ## Related ADRs
 
-- [ADR-040](../decisions/040-aks-automatic-only.md) -- AKS Automatic and managed Istio
+- [ADR-002](../decisions/002-aks-automatic.md) -- AKS Automatic and managed Istio
 - [ADR-005](../decisions/005-workload-identity.md) -- Workload Identity (second UAMI for ExternalDNS)
 - [ADR-006](../decisions/006-three-namespace-model.md) -- Three-namespace model (Gateway in `aks-istio-ingress`)
 - [ADR-012](../decisions/012-ingress-profiles.md) -- Three Ingress Profiles

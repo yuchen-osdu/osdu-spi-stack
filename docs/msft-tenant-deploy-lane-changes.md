@@ -22,7 +22,7 @@ every change is explicit.
 
 | Thing | Value |
 | --- | --- |
-| Template repo | `yuchen-osdu/osdu-spi` (fork of `Azure/osdu-spi`) — canonical Dockerfile + workflows/actions (ADR‑037) |
+| Template repo | `yuchen-osdu/osdu-spi` (fork of `Azure/osdu-spi`), canonical Dockerfile + workflows/actions (`osdu-spi` ADR‑037) |
 | Stack repo | `yuchen-osdu/osdu-spi-stack` — Azure infra (Bicep) + `spi` Python CLI + Flux manifests |
 | Service forks | `yuchen-osdu/{partition, entitlements, legal, storage}` |
 | Public Flux mirror | `yuchen-wang99/osdu-spi-stack-aksauto` (Flux GitOps source; avoids private‑repo auth) |
@@ -78,7 +78,7 @@ _Audited 2026‑07‑06._
 
 | Repo | Visibility | Purpose | Our changes merged to `main`? | Daniel access |
 | --- | --- | --- | --- | --- |
-| `yuchen-osdu/osdu-spi` | Public | Template — canonical Dockerfile + workflows/actions | **Yes** — #25, #26, #16 (ADR‑038) | Public (view/clone) |
+| `yuchen-osdu/osdu-spi` | Public | Template, canonical Dockerfile + workflows/actions | **Yes**: #25, #26, #16 (`osdu-spi` ADR‑038) | Public (view/clone) |
 | `yuchen-osdu/osdu-spi-stack` | **Private** | Azure infra (Bicep) + `spi` CLI + Flux manifests | **Yes** — #2–#6 **and #7 (full MSFT‑tenant infra)** | **Collaborator invite sent (write, pending accept)** |
 | `yuchen-osdu/partition` | Public | Service fork | **#16 open (reconsider)** — its Dockerfile `--chmod=0755` fix is already in the template (reaches the fork via the sync bot); its Istio `x-payload` tweak is an **internal‑testing artifact** (partition is internal/controlled in ADME), so #16 carries nothing that must merge. Blocked by the fork ruleset regardless. | Public (view/clone) |
 | `yuchen-osdu/legal` | Public | Service fork | **#15 closed** (obsolete revert); ADME test‑suite re‑raised clean as **#19** (`fix/adme-legal-test-azure` — federated token + skip COO blob, no revert) | Public |
@@ -99,7 +99,7 @@ _Audited 2026‑07‑06._
 - **Each service fork has its own `build/Dockerfile`** (`partition/build/Dockerfile`,
   `storage/build/Dockerfile`, `legal/build/Dockerfile`, …). There is not a single
   shared Dockerfile in `osdu-spi` that services import at build time.
-- **But the `osdu-spi` template is canonical (ADR‑037).** The template holds the
+- **But the `osdu-spi` template is canonical (`osdu-spi` ADR‑037).** The template holds the
   reference Dockerfile; forks inherit/refresh it through the SPI sync mechanism.
   So a fix made in the **template** propagates to **all** forks on sync — that is
   the "fix that benefits all."
@@ -560,7 +560,7 @@ deploy lane green but don't belong to Dockerfile / stack / lane.
 | `lua-identity` per‑identity auth | **partial** | Committed + deployed on dev5; the **positive path is already validated** — legal/storage pass E2E with the per‑identity federated token. Remaining: a targeted test isolating the token‑`appid` mapping to guard against a regression to the old service‑account bypass. |
 
 **Merge state (`merge-state`, updated 2026‑07‑06):**
-- **Merged to `main`:** `osdu-spi-stack` **#2–#6** (onboard, per‑identity ADR‑016/019/020, CI‑mode reconcile) **and #7** (full MSFT‑tenant infra — Base+NAP, Cosmos/SB WI, Gremlin MSI, blockers, App Insights; feature ADRs renumbered 021–024); `osdu-spi` **#25** (template: chmod, digest‑capture, token std, concurrency), **#26** (aks‑deploy suspend assertion), **#16** (ADR‑038, defer extra‑file Docker support).
+- **Merged to `main`:** `osdu-spi-stack` **#2–#6** (onboard, per‑identity, the then-numbered ADR‑016/019/020, and CI-mode reconcile) **and #7** (full MSFT‑tenant infra: Base+NAP, Cosmos/SB WI, Gremlin MSI, blockers, App Insights; feature ADRs renumbered 021–024); `osdu-spi` **#25** (template: chmod, digest-capture, token std, concurrency), **#26** (aks-deploy suspend assertion), **#16** (`osdu-spi` ADR‑038, defer extra-file Docker support).
 - **Open (reconsider):** `partition #16` — Dockerfile chmod (already in the template) + an Istio `x-payload` tweak that turned out to be an **internal‑testing artifact** (partition is internal/controlled in ADME; only our external‑token test exposure hit it). Nothing here must merge; can be closed. Blocked by the fork ruleset regardless.
 - **Closed (abandoned) 2026‑07‑06, test work re‑raised clean:** `legal #15`, `storage #13` — the os‑core‑common 7.1.0 reverts are obsolete (upstream fixed; forks get it via the "⬆️ Sync with upstream" bot PR). The **non‑revert test‑suite work was split out onto fresh branches off `main`**: legal → **PR #19** (`fix/adme-legal-test-azure`: federated `INTEGRATION_TESTER_ACCESS_TOKEN` + skip COO‑blob upload, cherry‑picked, no revert); storage had **no test‑code** to re‑raise (its alignment is via repo variables + already‑upstream `AzureTestUtils`; the deploy‑lane/docker commits are already canonical in the template). Original revert branches preserved.
 - All other open PRs in the forks are **bots** (dependabot deps bumps, the `yuchen-osdu-spi-bot` template/upstream sync + release), not our changes.
@@ -583,4 +583,4 @@ forks (not yet created).
 | ADR‑016 | Per‑identity auth (Lua maps token `appid`) |
 | ADR‑020 | Entitlements Gremlin‑MSI image requirement |
 | ADR‑032 | CI mode (all reconcilers suspended) |
-| ADR‑037 | `osdu-spi` template is the canonical Dockerfile/workflow source |
+| `osdu-spi` ADR‑037 | `osdu-spi` template is the canonical Dockerfile/workflow source |

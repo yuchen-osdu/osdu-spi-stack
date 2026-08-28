@@ -124,13 +124,18 @@ The substitution is not marked `optional`. A missing ConfigMap fails `spi-namesp
 | Command | Effect | Suspended after? |
 |---|---|---|
 | `spi reconcile` | One-shot reconcile (annotates the source + stack Kustomization with `reconcile.fluxcd.io/requestedAt`) | yes (unchanged) |
-| `spi reconcile --suspend` | Set `spec.suspend: true` if not already | yes |
-| `spi reconcile --resume` | Set `spec.suspend: false` (Flux resumes 10-min polling) | no |
+| `spi reconcile --suspend` | Suspend the GitRepository and every Kustomization and HelmRelease in `osdu-flux` | yes |
+| `spi reconcile --resume` | Resume the same GitRepository, Kustomizations, and HelmReleases | no |
 | `spi reconcile --refresh-images` | Re-resolve `osdu-image-lock`, re-apply (active pins overlaid), then reconcile service Kustomizations | yes (unchanged) |
 | `spi service pin <name> --mr <iid>` | Overwrite one service's lock entries with an MR pipeline image, then reconcile its consumers in dependency order | yes (unchanged) |
 | `spi service reset <name>` | Restore the pinned service's canonical lock entries, then reconcile its consumers | yes (unchanged) |
 
 `spi status` and `spi info` both show a yellow `SUSPENDED` banner when the source is pinned.
+
+The broader freeze belongs to the direct deploy, test, and restore boundary in
+[ADR-032](../decisions/032-deploy-test-restore-lane.md). `spi up` still
+suspends only the GitRepository after deployment so child reconcilers can
+finish against the cached artifact.
 
 ## Worked example: debug a stuck service
 
