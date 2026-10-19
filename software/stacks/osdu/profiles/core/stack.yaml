@@ -289,7 +289,8 @@ spec:
   sourceRef:
     kind: GitRepository
     name: osdu-spi-stack-system
-  path: ./software/components/airflow
+  # The base release plus the pinned OSDU DAGs and libraries (ADR-043).
+  path: ./software/components/airflow-osdu
   prune: true
   wait: true
   timeout: 15m

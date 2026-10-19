@@ -11,19 +11,19 @@ The core profile loads pinned DAG files and hash-locked libraries into the stock
 - **LocalExecutor for every profile that runs Airflow.** `software/components/airflow/release.yaml` sets `executor: LocalExecutor`. Tasks run as scheduler subprocesses, so no task pod exists and no per-task image, identity, or admission contract has to hold. The scheduler's requests and limits carry the task load, and `core.parallelism` caps concurrent tasks.
   - `workers.persistence.enabled` stays `false`. Under LocalExecutor the chart applies it to the scheduler, and `true` would make the scheduler a StatefulSet with a log volume claim.
   - `core.hostname_callable` records the scheduler pod's IP, because the API server fetches task logs from that host and a Deployment pod's name does not resolve.
-- **DAG sources are pinned file by file.** `software/components/airflow/osdu/dag-sources.yaml` names each DAG family:
+- **DAG sources are pinned file by file.** `software/components/airflow-osdu/dag-sources.yaml` names each DAG family:
   - its repository, which is the SPI fork once one exists and community GitLab otherwise;
   - the commit;
   - every file with its sha256;
   - the DAG IDs the family defines.
 
   The first families are `spi-smoke` (`Echo_DAG` and `airflow_monitoring`, shipped in a ConfigMap) and `core-ingestion` (`Osdu_ingest` and `manifest_ingestion` from ingestion-dags `v0.30.0`, commit `193f921e`).
-- **The loader fails closed.** An init container on the scheduler and the dag-processor runs on the pinned Airflow image. It fetches each file at its commit, verifies the sha256, and writes it under `/opt/airflow/dags/<family>/` with its source path preserved. A fetch or hash failure exits non-zero and holds the pod in init.
+- **The loader fails closed.** An init container on the scheduler and the dag-processor runs on the pinned Airflow image. It fetches each file at its commit, verifies the sha256, and writes it under `/opt/airflow/dags/<family>/`, keeping its path below the family's source prefix. A fetch or hash failure exits non-zero and holds the pod in init.
 - **Libraries install from a hash-locked requirements file.**
   - `_PIP_ADDITIONAL_REQUIREMENTS` on the scheduler and dag-processor installs `osdu-api==1.2.4`, `osdu-airflow==0.30.9`, `osdu-ingestion==0.30.2`, and their resolved dependencies with `--require-hashes`.
   - Packages come from the GitLab package pages through `--find-links`, with no extra index.
   - `osdu-api` installs without its `[azure]` extra, whose pins would downgrade the image's Azure SDKs. `osdu-airflow` installs without `[AF3]`, which requires Airflow 3.3.
-- **Only the core profile loads DAGs.** `profiles/core/stack.yaml` points `spi-airflow` at `software/components/airflow/osdu`, an overlay on the base component. `minimal` keeps the base component with no loader, libraries, or OSDU settings, and `bare` runs no Airflow.
+- **Only the core profile loads DAGs.** `profiles/core/stack.yaml` points `spi-airflow` at `software/components/airflow-osdu`, an overlay on the base component. `minimal` keeps the base component with no loader, libraries, or OSDU settings, and `bare` runs no Airflow.
 - **Tasks authenticate with Workload Identity.**
   - The scheduler runs as `platform/workload-identity-sa` with the `azure.workload.identity/use` label.
   - `CLOUD_PROVIDER=azure`, `AZURE_ENABLE_WORKLOAD_IDENTITY=true`, and `AZURE_RESOURCE_ID` set to the audience `spi.info.token_audience` derives make `osdu-api` request `<audience>/.default`.
@@ -58,6 +58,7 @@ Rejected: per-partition workflow registration. Each partition gets its own recor
 - Tasks share the scheduler pod's CPU and memory. A memory-heavy ingestion can take the scheduler down with it, so the scheduler's limits and `core.parallelism` bound concurrent work, and isolation between tasks is a process boundary, not a pod.
 - An Airflow pod start depends on community GitLab and its package registry. A failed fetch holds the pod in init with a named error, and while the scheduler is held no task runs.
 - The commit pin and per-file hashes make the parsed DAG set identical across restarts. A DAG or library change is a reviewed edit to `dag-sources.yaml` or the requirements file and ships in a stack release.
+- Editing any file the loader reads restarts the scheduler and the dag-processor. A hashed copy of those files in `osdu-flux` stamps its name into a pod annotation, because Kustomize rewrites a generated name only within one namespace.
 - `_PIP_ADDITIONAL_REQUIREMENTS` is the Airflow image's development path. Every scheduler and dag-processor start pays the install.
 - `osdu-airflow` 0.30.9 runs on Airflow 3.2.2, below the 3.3 floor its `[AF3]` extra declares. The DAG tests exercise that combination, not the declared one.
 - DAG code runs as the OSDU identity, which holds service-account rights in every partition. The trust boundary is the reviewed, commit-pinned source list.
