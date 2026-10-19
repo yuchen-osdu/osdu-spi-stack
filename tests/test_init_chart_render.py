@@ -565,11 +565,12 @@ _GROUPS = {
     "users.datalake.admins": "users.datalake.admins@opendes.dataservices.energy",
     "users.data.root": "users.data.root@opendes.dataservices.energy",
     "users.datalake.delegation": "users.datalake.delegation@opendes.dataservices.energy",
+    "users.datalake.impersonation": "users.datalake.impersonation@opendes.dataservices.energy",
 }
-# Created by the Job when the listing lacks them; only delegation takes members.
+# Created by the Job when the listing lacks them; the deploy identity joins both.
 _CREATED_GROUPS = {
     "users.datalake.delegation": _GROUPS["users.datalake.delegation"],
-    "users.datalake.impersonation": "users.datalake.impersonation@opendes.dataservices.energy",
+    "users.datalake.impersonation": _GROUPS["users.datalake.impersonation"],
 }
 _BOOTSTRAP_GROUPS = tuple(n for n in _GROUPS if n not in _CREATED_GROUPS)
 
@@ -668,14 +669,14 @@ def test_members_seeds_every_root_group_and_verifies(init_scripts, monkeypatch, 
     assert "entitlements-members outcome: seeded" in result.stdout
     assert result.routed("create") == []
     posts = result.routed("post")
-    assert len(posts) == 10
+    assert len(posts) == 2 * len(_GROUPS)
     assert {json.loads(p.body)["email"] for p in posts} == {"a-id", "b-id"}
     assert {json.loads(p.body)["role"] for p in posts} == {"MEMBER"}
     assert {p.url.rsplit("/groups/", 1)[1].removesuffix("/members") for p in posts} == set(
         _GROUPS.values()
     )
     assert all(p.headers["Data-partition-id"] == "opendes" for p in posts)
-    assert len(result.routed("get")) == 5
+    assert len(result.routed("get")) == len(_GROUPS)
 
 
 def test_members_seeds_member_users_into_the_user_groups_and_storage_admin_only(
@@ -748,7 +749,8 @@ def test_members_creates_the_impersonation_groups_the_bootstrap_lacks(
         p.url.rsplit("/groups/", 1)[1].removesuffix("/members") for p in result.routed("post")
     }
     assert _CREATED_GROUPS["users.datalake.delegation"] in posted_to
-    assert _CREATED_GROUPS["users.datalake.impersonation"] not in posted_to
+    # An ingestion DAG the deploy identity starts acts on its behalf.
+    assert _CREATED_GROUPS["users.datalake.impersonation"] in posted_to
 
 
 def test_members_derives_the_created_group_email_when_the_service_omits_it(

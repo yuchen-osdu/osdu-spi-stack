@@ -410,10 +410,11 @@ a template revision that includes
 
 The deploy identity is the positive caller: the `entitlements-members` Job
 adds its client id to `users`,
-`users.datalake.ops`, `users.datalake.admins`, `users.data.root`, and
-`users.datalake.delegation` for every partition, creating the delegation group
-and `users.datalake.impersonation` first when the Azure tenant bootstrap has
-not. A new Job runs when the environment is built, the identity changes, or
+`users.datalake.ops`, `users.datalake.admins`, `users.data.root`,
+`users.datalake.delegation`, and `users.datalake.impersonation` for every
+partition, creating both impersonation groups first when the Azure tenant
+bootstrap has not. Impersonation membership lets an ingestion DAG the deploy
+identity starts call the services on its behalf (ADR-043). A new Job runs when the environment is built, the identity changes, or
 the chart's seed generation is bumped. `spi info --json` reports
 `entitlements_domain` from `SERVICE_DOMAIN_NAME` on the live
 `osdu-entitlements` Deployment, with an empty value before that Deployment
