@@ -257,6 +257,33 @@ def test_deploy_skips_tester_accounts_without_identity_outputs():
     assert applied.count("kind: ServiceAccount") == 2
 
 
+def _applied_airflow_config(outputs: dict) -> str:
+    with (
+        patch("spi.deploy.display_yaml"),
+        patch("spi.deploy.kubectl_apply_yaml") as apply_yaml,
+    ):
+        deploy._create_osdu_config(Config.from_env("dev1"), outputs)
+    applied = [call.args[0] for call in apply_yaml.call_args_list]
+    return next(y for y in applied if "name: spi-airflow-osdu\n" in y)
+
+
+def test_airflow_tasks_mint_for_the_management_audience_by_default(monkeypatch):
+    monkeypatch.delenv("AAD_CLIENT_ID", raising=False)
+
+    applied = _applied_airflow_config({"identity_client_id": "uami-id"})
+
+    assert "namespace: platform\n" in applied
+    assert 'AZURE_RESOURCE_ID: "https://management.azure.com"' in applied
+
+
+def test_airflow_tasks_mint_for_an_overridden_app_registration(monkeypatch):
+    monkeypatch.setenv("AAD_CLIENT_ID", "app-registration-id")
+
+    applied = _applied_airflow_config({"identity_client_id": "uami-id"})
+
+    assert 'AZURE_RESOURCE_ID: "app-registration-id"' in applied
+
+
 def test_workload_identity_sa_default_name_is_unchanged():
     assert "name: workload-identity-sa\n" in workload_identity_sa("osdu", "c", "t")
 

@@ -131,6 +131,26 @@ metadata:
 """
 
 
+def airflow_osdu_configmap(azure_resource_id: str) -> str:
+    """Environment settings the core profile's Airflow scheduler reads.
+
+    AZURE_RESOURCE_ID is the resource osdu-api requests task tokens for, so it
+    must be an audience the osdu jwtRules accept: the one spi.info's
+    token_audience derives for every other caller outside the services.
+    """
+    return f"""\
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spi-airflow-osdu
+  namespace: platform
+  labels:
+  app.kubernetes.io/managed-by: osdu-spi-stack
+data:
+  AZURE_RESOURCE_ID: "{azure_resource_id}"
+"""
+
+
 def istio_auth_resources(
     namespace: str,
     tenant_id: str,

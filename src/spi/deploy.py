@@ -49,6 +49,7 @@ from .images import (
     ResolvedImage,
     resolve_image_lock,
 )
+from .info import token_audience
 from .ingress import (
     create_ingress_config,
     discover_dns_zone,
@@ -62,6 +63,7 @@ from .shell import kubectl_apply_yaml, run_command, run_process
 from .templates import (
     TESTER_NAMESPACE,
     TESTER_SERVICE_ACCOUNTS,
+    airflow_osdu_configmap,
     istio_auth_resources,
     osdu_config_configmap,
     spi_init_values_configmap,
@@ -107,6 +109,11 @@ def _create_osdu_config(config: Config, infra_outputs: dict) -> None:
     display_yaml(yaml_content, "ConfigMap: osdu-config")
     kubectl_apply_yaml(yaml_content, "apply osdu-config ConfigMap")
     display_result("osdu-config ConfigMap created")
+
+    # Every profile writes it so a later switch to core finds it in place.
+    airflow_yaml = airflow_osdu_configmap(token_audience(aad_client_id, identity_client_id))
+    display_yaml(airflow_yaml, "ConfigMap: spi-airflow-osdu")
+    kubectl_apply_yaml(airflow_yaml, "apply spi-airflow-osdu ConfigMap")
 
     for ns in ["platform", "osdu"]:
         sa_yaml = workload_identity_sa(
