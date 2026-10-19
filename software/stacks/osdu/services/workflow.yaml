@@ -73,8 +73,21 @@ spec:
         value: OBSOLETE
       - name: OSDU_AIRFLOW_URL
         value: http://airflow-api-server.platform.svc.cluster.local:8080/airflow
-      - name: OSDU_AIRFLOW_VERSION2_ENABLED
-        value: "true"
+      # Runs go to the Airflow 3 API with a JWT from /auth/token (ADR-043).
+      - name: OSDU_AIRFLOW_VERSION
+        value: airflow3
+      - name: OSDU_AIRFLOW_AIRFLOW3_URL
+        value: http://airflow-api-server.platform.svc.cluster.local:8080/airflow
+      - name: OSDU_AIRFLOW_AIRFLOW3_USERNAME
+        valueFrom:
+          secretKeyRef:
+            name: workflow-airflow-credentials
+            key: username
+      - name: OSDU_AIRFLOW_AIRFLOW3_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: workflow-airflow-credentials
+            key: password
       - name: DP_AIRFLOW_FOR_SYSTEM_DAG
         value: "false"
       - name: IGNORE_DAGCONTENT

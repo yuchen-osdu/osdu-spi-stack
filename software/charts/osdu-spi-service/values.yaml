@@ -57,6 +57,8 @@ resources:
     cpu: "1"
     memory: 1536Mi
 
+# -- Container env. Each item takes a `value`, or a `valueFrom` for a Secret
+# or ConfigMap key.
 env: []
 
 initContainers: []

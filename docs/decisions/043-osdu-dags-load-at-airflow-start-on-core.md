@@ -60,7 +60,7 @@ Rejected: per-partition workflow registration. Each partition gets its own recor
 - The commit pin and per-file hashes make the parsed DAG set identical across restarts. A DAG or library change is a reviewed edit to `dag-sources.yaml` or the requirements file and ships in a stack release.
 - Editing any file the loader reads restarts the scheduler and the dag-processor. A hashed copy of those files in `osdu-flux` stamps its name into a pod annotation, because Kustomize rewrites a generated name only within one namespace.
 - `_PIP_ADDITIONAL_REQUIREMENTS` is the Airflow image's development path. Every scheduler and dag-processor start pays the install.
-- `osdu-airflow` 0.30.9 runs on Airflow 3.2.2, below the 3.3 floor its `[AF3]` extra declares. The DAG tests exercise that combination, not the declared one.
+- `osdu-airflow` 0.30.9 runs on Airflow 3.2.2, below the 3.3 floor its `[AF3]` extra declares. Only a live environment exercises that combination: the repository tests check the loader and the lock, not DAG import or execution.
 - DAG code runs as the OSDU identity, which holds service-account rights in every partition. The trust boundary is the reviewed, commit-pinned source list.
 - The chart binds pod launch rights to the scheduler's ServiceAccount, so `platform/workload-identity-sa` can create, delete, and exec into pods in `platform`. Nothing else in `platform` runs as that ServiceAccount.
 - Task logs live on the scheduler pod and do not survive its restart.
