@@ -25,6 +25,7 @@ from subprocess import CompletedProcess
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from spi import deploy, token
 from spi.bootstrap import ensure_namespaces
@@ -35,6 +36,7 @@ from spi.templates import (
     MEMBER_SERVICE_ACCOUNT,
     NO_ACCESS_SERVICE_ACCOUNT,
     TESTER_NAMESPACE,
+    airflow_osdu_configmap,
     workload_identity_sa,
 )
 
@@ -310,6 +312,17 @@ def test_reconcile_leaves_airflow_config_alone_without_osdu_config():
         deploy.refresh_airflow_osdu_config()
 
     apply_yaml.assert_not_called()
+
+
+def test_airflow_config_is_a_well_formed_configmap():
+    manifest = yaml.safe_load(airflow_osdu_configmap("https://management.azure.com"))
+
+    assert manifest["metadata"] == {
+        "name": "spi-airflow-osdu",
+        "namespace": "platform",
+        "labels": {"app.kubernetes.io/managed-by": "osdu-spi-stack"},
+    }
+    assert manifest["data"] == {"AZURE_RESOURCE_ID": "https://management.azure.com"}
 
 
 def test_workload_identity_sa_default_name_is_unchanged():
