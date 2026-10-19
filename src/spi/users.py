@@ -35,14 +35,24 @@ from .info import collect_endpoint, read_entitlements_domain
 from .templates import parse_init_values
 
 ELEMENTARY_GROUP = "users"
+# osdu-api forwards the run's userId as on-behalf-of on every service call an
+# ingestion DAG makes, and entitlements honours it only for a member of this group.
+IMPERSONATION_GROUP = "users.datalake.impersonation"
 
 ROLE_PRESETS = {
     "viewer": (ELEMENTARY_GROUP, "users.datalake.viewers"),
-    "editor": (ELEMENTARY_GROUP, "users.datalake.editors"),
+    # Every role whose group is in service.workflow.creator can start a run, so
+    # each is impersonable; a viewer cannot start one.
+    "editor": (ELEMENTARY_GROUP, "users.datalake.editors", IMPERSONATION_GROUP),
     # Only the ops group reaches legal and schema admin and lets a caller manage members.
-    "admin": (ELEMENTARY_GROUP, "users.datalake.admins", "users.datalake.ops"),
+    "admin": (
+        ELEMENTARY_GROUP,
+        "users.datalake.admins",
+        "users.datalake.ops",
+        IMPERSONATION_GROUP,
+    ),
     # The data root is what lets ops create and reassign data groups.
-    "ops": (ELEMENTARY_GROUP, "users.data.root", "users.datalake.ops"),
+    "ops": (ELEMENTARY_GROUP, "users.data.root", "users.datalake.ops", IMPERSONATION_GROUP),
 }
 DEFAULT_ROLE = "admin"
 ROLE_GROUPS = tuple(

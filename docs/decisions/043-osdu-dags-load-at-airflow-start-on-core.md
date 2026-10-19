@@ -31,7 +31,7 @@ The core profile loads pinned DAG files and hash-locked libraries into the stock
 - **A run's caller must be impersonable.**
   - `osdu-api` sends `on-behalf-of` and `x-on-behalf-of` with the run's `userId` on every service call, unless the ID ends in `@service.local` or starts with `service-account-`.
   - Entitlements accepts the header only when the token's identity is in `users.datalake.delegation` and the named user is in `users.datalake.impersonation`. The OSDU identity is in both.
-  - The `entitlements-members` Job (ADR-015) adds the deploy identity to `users.datalake.impersonation`, so an ingestion run it starts through the workflow service can read schemas and write records.
+  - The `entitlements-members` Job (ADR-015) adds the deploy identity to `users.datalake.impersonation`, so an ingestion run it starts through the workflow service can read schemas and write records. The `spi users add` roles that can start a run add a person to it too (ADR-039).
 - **Variables are environment-backed.** `AIRFLOW_VAR_CORE__SERVICE__*` carry `http://<service>.osdu.svc.cluster.local/api/...` on both components, because operators read some of them when the DAG file is parsed.
 - **The workflow service uses its Airflow 3 engine.**
   - `software/stacks/osdu/services/workflow.yaml` sets `OSDU_AIRFLOW_VERSION=airflow3` and `OSDU_AIRFLOW_AIRFLOW3_URL=http://airflow-api-server.platform.svc.cluster.local:8080/airflow`.
@@ -68,7 +68,7 @@ Rejected: per-partition workflow registration. Each partition gets its own recor
 - `osdu-airflow` 0.30.9 runs on Airflow 3.2.2, below the 3.3 floor its `[AF3]` extra declares. Only a live environment exercises that combination: the repository tests check the loader and the lock, not DAG import or execution.
 - DAG code runs as the OSDU identity, which holds service-account rights in every partition. The trust boundary is the reviewed, commit-pinned source list.
 - DAG code can act as the deploy identity. That adds no rights, because the OSDU identity it runs as already holds service-account rights.
-- No `spi users add` role (ADR-039) puts a person in `users.datalake.impersonation`, so an ingestion run a person starts fails its first service call with 401. Until a role grants it, the deploy identity starts ingestion runs.
+- A person starts an ingestion run with their own token once `spi users add` has given them `editor`, `admin`, or `ops`, each of which holds `users.datalake.impersonation` (ADR-039). A `viewer` cannot start a run.
 - The chart binds pod launch rights to the scheduler's ServiceAccount, so `platform/workload-identity-sa` can create, delete, and exec into pods in `platform`. Nothing else in `platform` runs as that ServiceAccount.
 - Task logs live on the scheduler pod and do not survive its restart.
 - The workflow service sends the `osdu-workflow` password and then a bearer token to the Airflow API over plain HTTP. The hop stays inside the cluster, but `platform` has no Istio sidecar, so nothing encrypts it. Requiring HTTPS means terminating TLS on the API server.

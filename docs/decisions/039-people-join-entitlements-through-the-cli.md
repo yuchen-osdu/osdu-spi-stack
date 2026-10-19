@@ -32,6 +32,10 @@ from the CLI, and `spi token --me` prints the person's own bearer.
   `service.schema-service.admin` and lets only its members manage other
   groups' members, so an admin without it cannot delete a legal tag or add a
   colleague. `ops` is `users`, `users.data.root`, and `users.datalake.ops`.
+  `editor`, `admin`, and `ops` also hold `users.datalake.impersonation`: their
+  groups are in `service.workflow.creator`, and an ingestion DAG a person
+  starts calls each service on that person's behalf, which entitlements
+  allows only for an impersonable user (ADR-043). A viewer cannot start a run.
   The default is `admin`. Running `add` again with another role removes the
   other presets' groups, then adds that preset's groups; `users` stays. When
   an addition fails, the preset's groups the person did not hold before the
@@ -80,6 +84,13 @@ one command can write and verify.
 
 - Membership lives only in entitlements. An environment reset or a new
   partition drops it, and each person runs `spi users add --me` again.
+- Impersonation is what lets the platform act as a person. Every member of
+  `users.datalake.delegation` (the OSDU and deploy identities) may call any
+  service as an `editor`, `admin`, or `ops` member, which adds nothing to the
+  root-level rights those identities already hold.
+- A member added before the roles carried `users.datalake.impersonation` lists
+  as `custom` and cannot start an ingestion run; `spi users add` with the same
+  role adds the group.
 - The id belongs to one token shape. A person added with a v1 token is not a
   member when they present a v2 token, for which the filter writes `oid`;
   changing `AAD_CLIENT_ID` to an app registration means running `add --me`
