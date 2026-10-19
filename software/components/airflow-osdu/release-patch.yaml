@@ -13,6 +13,20 @@ spec:
         # The registration Job unpauses exactly the declared DAG IDs.
         dags_are_paused_at_creation: "True"
 
+    # Adds the workflow service's login beside the admin (see the base args).
+    createUserJob:
+      env:
+        - name: AIRFLOW_ADMIN_PW
+          valueFrom:
+            secretKeyRef:
+              name: airflow-api-credentials
+              key: password
+        - name: AIRFLOW_WORKFLOW_PW
+          valueFrom:
+            secretKeyRef:
+              name: airflow-api-credentials
+              key: workflow-password
+
     scheduler:
       podAnnotations:
         spi-dag-config-revision: airflow-osdu-dags-revision

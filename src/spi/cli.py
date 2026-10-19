@@ -71,6 +71,7 @@ from .pins import (
     trusted_canonical_sources,
     verify_service_image,
 )
+from .secrets import refresh_workflow_airflow_credentials
 from .shell import run_command
 from .templates import TESTER_NAMESPACE
 
@@ -2126,6 +2127,7 @@ def reconcile(
     create_istio_revision_configmap()
     refresh_spi_init_values()
     refresh_airflow_osdu_config()
+    refresh_workflow_airflow_credentials()
 
     if not refresh_images:
         _backfill_schema_load_lock(image_branch)

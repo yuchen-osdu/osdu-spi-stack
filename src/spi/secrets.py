@@ -40,7 +40,13 @@ SEED_KEYS = [
     "airflow_api_secret_key",
     "airflow_jwt_secret",
     "airflow_fernet_key",
+    "airflow_workflow_password",
 ]
+
+# The Airflow login the workflow service triggers and reads DAG runs with;
+# createUserJob creates it on core (ADR-043).
+WORKFLOW_AIRFLOW_USER = "osdu-workflow"
+WORKFLOW_AIRFLOW_SECRET = "workflow-airflow-credentials"
 
 
 def _generate_password(length: int = 24) -> str:
@@ -165,6 +171,10 @@ def _create_platform_secrets(s: dict):
         },
     )
     # Key names are fixed by the Airflow chart; 'password' is the admin user.
+    _create_airflow_api_credentials(s)
+
+
+def _create_airflow_api_credentials(s: dict):
     _kubectl_apply_secret(
         "platform",
         "airflow-api-credentials",
@@ -173,6 +183,18 @@ def _create_platform_secrets(s: dict):
             "api-secret-key": s["airflow_api_secret_key"],
             "jwt-secret": s["airflow_jwt_secret"],
             "fernet-key": s["airflow_fernet_key"],
+            "workflow-password": s["airflow_workflow_password"],
+        },
+    )
+
+
+def _create_workflow_airflow_credentials(s: dict):
+    _kubectl_apply_secret(
+        "osdu",
+        WORKFLOW_AIRFLOW_SECRET,
+        {
+            "username": WORKFLOW_AIRFLOW_USER,
+            "password": s["airflow_workflow_password"],
         },
     )
 
@@ -191,6 +213,7 @@ def _create_osdu_secrets(s: dict):
                 "ELASTIC_PASS_SYSTEM": s["elastic_password"],
             },
         )
+    _create_workflow_airflow_credentials(s)
 
 
 def ensure_secrets():
@@ -200,3 +223,23 @@ def ensure_secrets():
     _create_platform_secrets(seed)
     _create_osdu_secrets(seed)
     console.print("  [ready]All secrets configured[/ready]")
+
+
+def refresh_workflow_airflow_credentials() -> None:
+    """Backfill the workflow service's Airflow login on an existing cluster.
+
+    ``spi reconcile`` can move an environment onto a commit that reads it
+    without the ``spi up`` that writes it. Only a readable, complete seed is
+    extended: generating one in place of an unreadable seed would rotate
+    every password it holds, the PostgreSQL ones included.
+    """
+    seed = _get_seed()
+    known = [k for k in SEED_KEYS if k != "airflow_workflow_password"]
+    if not seed or not all(k in seed for k in known):
+        console.print("  [dim]Seed secret not readable; skipping workflow Airflow login[/dim]")
+        return
+    if "airflow_workflow_password" not in seed:
+        seed["airflow_workflow_password"] = _generate_password()
+        _create_seed(seed)
+    _create_airflow_api_credentials(seed)
+    _create_workflow_airflow_credentials(seed)
