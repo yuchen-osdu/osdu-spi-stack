@@ -31,6 +31,7 @@ The core profile loads pinned DAG files and hash-locked libraries into the stock
 - **Variables are environment-backed.** `AIRFLOW_VAR_CORE__SERVICE__*` carry `http://<service>.osdu.svc.cluster.local/api/...` on both components, because operators read some of them when the DAG file is parsed.
 - **The workflow service uses its Airflow 3 engine.**
   - `software/stacks/osdu/services/workflow.yaml` sets `OSDU_AIRFLOW_VERSION=airflow3` and `OSDU_AIRFLOW_AIRFLOW3_URL=http://airflow-api-server.platform.svc.cluster.local:8080/airflow`.
+  - It also sets `FEATURE_FLAG_ALLOW_HTTP_AIRFLOW=true`. Without it the Azure provider stops at startup with `External Airflow URL must use HTTPS`, because its shared properties default the flag to false.
   - The username and password reach the service through `valueFrom` on `osdu/workflow-airflow-credentials`.
   - The CLI writes that Secret from the same seed `createUserJob` uses to create the `osdu-workflow` Airflow user.
 - **Registration follows import.** DAGs are created paused. `spi-osdu-workflow-registration` runs a Job in `platform`, beside the DAG declaration and the Airflow login, as `platform/workload-identity-sa`, which federates to the same OSDU identity. It runs once Airflow and OSDU initialization are Ready, and again whenever the loaded DAG set changes. The Job:
@@ -64,5 +65,6 @@ Rejected: per-partition workflow registration. Each partition gets its own recor
 - DAG code runs as the OSDU identity, which holds service-account rights in every partition. The trust boundary is the reviewed, commit-pinned source list.
 - The chart binds pod launch rights to the scheduler's ServiceAccount, so `platform/workload-identity-sa` can create, delete, and exec into pods in `platform`. Nothing else in `platform` runs as that ServiceAccount.
 - Task logs live on the scheduler pod and do not survive its restart.
+- The workflow service sends the `osdu-workflow` password and then a bearer token to the Airflow API over plain HTTP. The hop stays inside the cluster, but `platform` has no Istio sidecar, so nothing encrypts it. Requiring HTTPS means terminating TLS on the API server.
 - The workflow service's run limit calls `activeDagRuns/`, which Airflow 3 does not serve. The failure is logged and the limit is not enforced.
 - A family whose services the profile does not run is never declared. CSV needs a Workload Identity csv-parser worker, by-reference ingestion needs the Dataset service, and SEG-Y and EDS arrive with their add-ons.

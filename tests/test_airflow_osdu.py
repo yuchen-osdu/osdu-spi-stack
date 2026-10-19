@@ -187,3 +187,18 @@ def test_committed_lock_hashes_every_pin_and_matches_its_input():
     assert len(pinned) == len(re.findall(r"^\S+==", text, re.M))
     for requirement in ("osdu-api==1.2.4", "osdu-airflow==0.30.9", "osdu-ingestion==0.30.2"):
         assert requirement in pinned
+
+
+def test_workflow_service_allows_its_in_cluster_http_airflow_url():
+    release = yaml.safe_load(
+        (REPO_ROOT / "software" / "stacks" / "osdu" / "services" / "workflow.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    env = {item["name"]: item for item in release["spec"]["values"]["env"]}
+
+    assert env["OSDU_AIRFLOW_VERSION"]["value"] == "airflow3"
+    url = env["OSDU_AIRFLOW_AIRFLOW3_URL"]["value"]
+    assert url.startswith("http://") and ".svc.cluster.local:" in url
+    # The provider refuses a non-HTTPS URL at startup unless the flag is on.
+    assert env["FEATURE_FLAG_ALLOW_HTTP_AIRFLOW"]["value"] == "true"

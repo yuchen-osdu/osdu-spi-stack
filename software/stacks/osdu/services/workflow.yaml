@@ -78,6 +78,10 @@ spec:
         value: airflow3
       - name: OSDU_AIRFLOW_AIRFLOW3_URL
         value: http://airflow-api-server.platform.svc.cluster.local:8080/airflow
+      # The Azure provider refuses a plain-HTTP Airflow URL at startup unless this
+      # flag is set; the API server is reached only in-cluster (ADR-043).
+      - name: FEATURE_FLAG_ALLOW_HTTP_AIRFLOW
+        value: "true"
       - name: OSDU_AIRFLOW_AIRFLOW3_USERNAME
         valueFrom:
           secretKeyRef:
