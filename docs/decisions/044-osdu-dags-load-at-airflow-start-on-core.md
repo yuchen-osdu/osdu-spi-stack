@@ -33,10 +33,10 @@ The core profile loads pinned DAG files and hash-locked libraries into the stock
   - `software/stacks/osdu/services/workflow.yaml` sets `OSDU_AIRFLOW_VERSION=airflow3` and `OSDU_AIRFLOW_AIRFLOW3_URL=http://airflow-api-server.platform.svc.cluster.local:8080/airflow`.
   - The username and password reach the service through `valueFrom` on `osdu/workflow-airflow-credentials`.
   - The CLI writes that Secret from the same seed `createUserJob` uses to create the `osdu-workflow` Airflow user.
-- **Registration follows import.** DAGs are created paused. `spi-osdu-workflow-registration` runs a Job as `osdu/workload-identity-sa` once the workflow service and Airflow are Ready. The Job:
-  1. requires Airflow's parsed DAG IDs to equal the declared set, with no import errors;
-  2. registers each ID through `POST /api/workflow/v1/workflow/system`;
-  3. compares a 409 response against the expected registration;
+- **Registration follows import.** DAGs are created paused. `spi-osdu-workflow-registration` runs a Job in `platform`, beside the DAG declaration and the Airflow login, as `platform/workload-identity-sa`, which federates to the same OSDU identity. It runs once Airflow and OSDU initialization are Ready, and again whenever the loaded DAG set changes. The Job:
+  1. waits until Airflow's parsed DAG IDs equal the declared set, with no import errors in the declared families;
+  2. registers each ID through `POST /api/workflow/v1/workflow/system`, with the DAG ID as the workflow name, which is the DAG the Azure engine triggers;
+  3. treats a 409 response as already registered;
   4. unpauses exactly those IDs.
 
 Rejected: an Airflow image built with the libraries and rendered DAGs, pinned by digest. It removes every network fetch from pod start, but the stack would publish an image built from its own sources.

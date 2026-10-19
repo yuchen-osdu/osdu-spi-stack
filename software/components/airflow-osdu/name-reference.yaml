@@ -6,3 +6,5 @@ nameReference:
         path: spec/values/scheduler/podAnnotations/spi-dag-config-revision
       - kind: HelmRelease
         path: spec/values/dagProcessor/podAnnotations/spi-dag-config-revision
+      - kind: ConfigMap
+        path: data/DAG_CONFIG_REVISION

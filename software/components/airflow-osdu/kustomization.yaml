@@ -28,6 +28,14 @@ configMapGenerator:
       - requirements.txt
       - echo_dag.py
       - airflow_monitoring.py
+  # Carries the same hashed name to spi-osdu-workflow-registration through
+  # postBuild substitution, so a new DAG set re-runs registration too.
+  - name: airflow-osdu-dags-state
+    namespace: osdu-flux
+    options:
+      disableNameSuffixHash: true
+    literals:
+      - DAG_CONFIG_REVISION=airflow-osdu-dags-revision
 
 patches:
   - path: release-patch.yaml

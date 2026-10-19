@@ -207,3 +207,40 @@ spec:
   prune: true
   wait: true
   timeout: 30m
+
+---
+# Layer 6: registers the loaded DAGs as system workflows and unpauses them
+# (ADR-043). Non-gating: a failed registration leaves ingestion unavailable
+# but blocks nothing else, and spi status reports it.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: spi-osdu-workflow-registration
+  namespace: osdu-flux
+  labels:
+    spi-stack.layer: "6"
+    spi-stack.gating: "false"
+spec:
+  interval: 10m
+  dependsOn:
+    - name: spi-airflow
+    - name: spi-osdu-init
+  sourceRef:
+    kind: GitRepository
+    name: osdu-spi-stack-system
+  path: ./software/stacks/osdu/workflow-registration
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: airflow-osdu-dags-state
+  # A new DAG revision changes the Job Pod template, an immutable field.
+  force: true
+  prune: true
+  wait: true
+  # The Job's 2400s activeDeadlineSeconds plus reconcile headroom.
+  timeout: 45m
+  healthChecks:
+    - apiVersion: batch/v1
+      kind: Job
+      name: osdu-workflow-registration
+      namespace: platform

@@ -62,6 +62,7 @@ additional ordering.
 | `spi-osdu-init` | Core services |
 | `spi-osdu-schema-load`, `spi-osdu-legal`, `spi-osdu-members` | Initialization |
 | `spi-osdu-reference` | Core services, schema load |
+| `spi-osdu-workflow-registration` (core only) | Airflow, initialization |
 
 Names are shortened in the dependency column; the full definitions are in
 the [minimal](../../software/stacks/osdu/profiles/minimal/stack.yaml) stack,
@@ -72,8 +73,9 @@ tree reconciles under `minimal`.
 
 Legal-tag and entitlements-member seeding are non-gating branches:
 reference services wait for schema load, without depending on
-`spi-osdu-legal` or `spi-osdu-members`. Fork RBAC is also independent of
-the middleware and service readiness chain.
+`spi-osdu-legal` or `spi-osdu-members`. Workflow registration is non-gating
+too: its Job re-runs when the loaded DAG set changes (ADR-043). Fork RBAC is
+also independent of the middleware and service readiness chain.
 
 A downstream error may name only its direct dependency. Follow that dependency
 upstream rather than assuming the last blocked service is the root cause.
