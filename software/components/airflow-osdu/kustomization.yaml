@@ -1,0 +1,36 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The core profile's Airflow: the base release plus the pinned OSDU DAGs, the
+# hash-locked libraries, and the settings tasks need to reach OSDU (ADR-043).
+resources:
+  - ../airflow
+
+# Kustomize rewrites a generated name only in the same namespace, and the pods
+# mount from platform while the release lives in osdu-flux. So the mounted
+# copy keeps a fixed name, and a hashed copy in osdu-flux exists only to stamp
+# its name into a pod annotation: any file change restarts the loading pods.
+configMapGenerator:
+  - name: airflow-osdu-dags
+    namespace: platform
+    options:
+      disableNameSuffixHash: true
+    files:
+      - load_dags.py
+      - dag-sources.yaml
+      - requirements.txt
+      - echo_dag.py
+      - airflow_monitoring.py
+  - name: airflow-osdu-dags-revision
+    namespace: osdu-flux
+    files:
+      - load_dags.py
+      - dag-sources.yaml
+      - requirements.txt
+      - echo_dag.py
+      - airflow_monitoring.py
+
+patches:
+  - path: release-patch.yaml
+
+configurations:
+  - name-reference.yaml
