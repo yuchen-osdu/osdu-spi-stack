@@ -818,13 +818,14 @@ def image_lock_missing_schema_load(lock_data: Mapping[str, str]) -> bool:
     A lock missing the composed ref counts as missing even when it already
     carries repository/tag: the schema-load Job substitutes the single
     ``_IMAGE_REF`` key, so a lock recorded before that key existed
-    still needs backfilling.
+    still needs backfilling. A digest pin records no tag, so its digest
+    stands in for one.
     """
 
     key = image_lock_key(SCHEMA_LOAD_SERVICE_NAME)
     return not (
         lock_data.get(f"{key}_IMAGE_REPOSITORY")
-        and lock_data.get(f"{key}_IMAGE_TAG")
+        and (lock_data.get(f"{key}_IMAGE_TAG") or lock_data.get(f"{key}_IMAGE_DIGEST"))
         and lock_data.get(f"{key}_IMAGE_REF")
     )
 
@@ -851,8 +852,8 @@ def schema_load_lock_patch(
     key = image_lock_key(SCHEMA_LOAD_SERVICE_NAME)
     existing_repository = lock_data.get(f"{key}_IMAGE_REPOSITORY", "")
     existing_tag = lock_data.get(f"{key}_IMAGE_TAG", "")
-    if existing_repository and existing_tag:
-        existing_digest = lock_data.get(f"{key}_IMAGE_DIGEST", "")
+    existing_digest = lock_data.get(f"{key}_IMAGE_DIGEST", "")
+    if existing_repository and (existing_tag or existing_digest):
         return {
             f"{key}_IMAGE_REF": image_ref(
                 existing_repository,

@@ -464,6 +464,36 @@ def test_image_lock_missing_schema_load_detects_legacy_lock():
     assert images.image_lock_missing_schema_load(current) is False
 
 
+def test_image_lock_missing_schema_load_accepts_a_digest_pin():
+    digest = "sha256:" + "b" * 64
+    pinned = {
+        "SCHEMA_LOAD_IMAGE_REPOSITORY": "ghcr.io/o/schema-load",
+        "SCHEMA_LOAD_IMAGE_TAG": "",
+        "SCHEMA_LOAD_IMAGE_DIGEST": digest,
+        "SCHEMA_LOAD_IMAGE_REF": f"ghcr.io/o/schema-load@{digest}",
+    }
+    no_ref = {key: value for key, value in pinned.items() if key != "SCHEMA_LOAD_IMAGE_REF"}
+
+    assert images.image_lock_missing_schema_load(pinned) is False
+    assert images.image_lock_missing_schema_load(no_ref) is True
+
+
+def test_schema_load_lock_patch_composes_a_digest_pin_ref(monkeypatch):
+    def fail(url: str):
+        raise AssertionError(f"registry must not be queried to compose a pinned image: {url}")
+
+    monkeypatch.setattr(images, "gitlab_get", fail)
+    patch = images.schema_load_lock_patch(
+        {
+            "SCHEMA_LOAD_IMAGE_REPOSITORY": "ghcr.io/o/schema-load",
+            "SCHEMA_LOAD_IMAGE_TAG": "",
+            "SCHEMA_LOAD_IMAGE_DIGEST": "sha256:loader",
+        }
+    )
+
+    assert patch == {"SCHEMA_LOAD_IMAGE_REF": "ghcr.io/o/schema-load@sha256:loader"}
+
+
 def test_schema_load_lock_patch_resolves_from_recorded_schema_tag(monkeypatch):
     """Backfilling a legacy lock has to reuse the schema tag it already pins,
     so the loader matches the running service instead of jumping to master."""

@@ -1180,6 +1180,22 @@ class TestApplySchemaLoadBackfill:
         monkeypatch.setattr(pins, "run_command", fail_run_command)
         assert pins.apply_schema_load_backfill("master") is False
 
+    def test_returns_false_after_a_paired_digest_pin(self, monkeypatch):
+        """A run-owned schema pin pairs the loader by digest and records no tag
+        for either, so a later reconcile must keep the pair instead of failing."""
+        data = pins._lock_entry_patch("schema", "ghcr.io/o/s", "", "", "sha256:" + "1" * 64)
+        data.update(
+            pins._lock_entry_patch("schema-load", "ghcr.io/o/s-load", "", "", "sha256:" + "2" * 64)
+        )
+        lock = _lock(data=data)
+        monkeypatch.setattr(pins, "read_lock", lambda required=True: lock)
+
+        def fail_run_command(*args, **kwargs):
+            pytest.fail("a digest-pinned loader must not be patched")
+
+        monkeypatch.setattr(pins, "run_command", fail_run_command)
+        assert pins.apply_schema_load_backfill("master") is False
+
     def test_backfills_legacy_lock(self, monkeypatch):
         lock = _lock(data=_canonical_data("schema"))
         calls = _wire_lock(monkeypatch, lock)
