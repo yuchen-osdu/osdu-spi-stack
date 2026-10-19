@@ -140,7 +140,9 @@ def test_declared_sources_are_pinned_and_shipped():
 
     kustomization = yaml.safe_load((OVERLAY / "kustomization.yaml").read_text(encoding="utf-8"))
     expected = {"load_dags.py", "dag-sources.yaml", "requirements.txt", *local_files}
-    for generator in kustomization["configMapGenerator"]:
+    file_generators = [g for g in kustomization["configMapGenerator"] if "files" in g]
+    assert len(file_generators) == 2
+    for generator in file_generators:
         assert set(generator["files"]) == expected, generator["name"]
         for name in generator["files"]:
             assert (OVERLAY / name).is_file(), name

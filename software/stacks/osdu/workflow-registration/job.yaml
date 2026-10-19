@@ -1,0 +1,88 @@
+# Registers the DAGs dag-sources.yaml declares as system workflows and
+# unpauses them (ADR-043). It runs in platform, beside the ConfigMap that
+# declares the DAGs and the Airflow login, as the OSDU workload identity that
+# platform/workload-identity-sa federates to. The DAG configuration revision
+# in the Pod template changes with any loaded file, and the Kustomization's
+# force replaces the Job, so a new DAG set registers without a manual re-run.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: osdu-workflow-registration
+  namespace: platform
+  labels:
+    app.kubernetes.io/managed-by: osdu-spi-stack
+    app.kubernetes.io/component: workflow-registration
+spec:
+  backoffLimit: 3
+  # Covers the script's 20 minute wait for Airflow to parse the new set.
+  activeDeadlineSeconds: 2400
+  # No ttlSecondsAfterFinished: Flux would re-apply a deleted Job.
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: osdu-spi-stack
+        app.kubernetes.io/component: workflow-registration
+        azure.workload.identity/use: "true"
+      annotations:
+        spi-dag-config-revision: "${DAG_CONFIG_REVISION}"
+    spec:
+      serviceAccountName: workload-identity-sa
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+        spi-pool: platform
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: "platform"
+          effect: NoSchedule
+      containers:
+        - name: register
+          # The pinned Airflow image: Python and PyYAML, no other dependency.
+          image: apache/airflow:3.2.2
+          command: ["python", "/opt/spi/register/register_workflows.py"]
+          env:
+            - name: AIRFLOW_URL
+              value: http://airflow-api-server.platform.svc.cluster.local:8080/airflow
+            - name: AIRFLOW_USERNAME
+              value: osdu-workflow
+            - name: AIRFLOW_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-api-credentials
+                  key: workflow-password
+            - name: WORKFLOW_URL
+              value: http://workflow.osdu.svc.cluster.local/api/workflow/v1
+            - name: AZURE_RESOURCE_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: spi-airflow-osdu
+                  key: AZURE_RESOURCE_ID
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: dag-config
+              mountPath: /opt/spi/osdu
+              readOnly: true
+            - name: script
+              mountPath: /opt/spi/register
+              readOnly: true
+      volumes:
+        - name: dag-config
+          configMap:
+            name: airflow-osdu-dags
+        - name: script
+          configMap:
+            name: osdu-workflow-registration
