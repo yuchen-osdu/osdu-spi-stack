@@ -145,7 +145,7 @@ metadata:
   name: spi-airflow-osdu
   namespace: platform
   labels:
-  app.kubernetes.io/managed-by: osdu-spi-stack
+    app.kubernetes.io/managed-by: osdu-spi-stack
 data:
   AZURE_RESOURCE_ID: "{azure_resource_id}"
 """
