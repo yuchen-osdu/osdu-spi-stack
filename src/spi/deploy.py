@@ -38,6 +38,7 @@ from .bootstrap import (
     deploy_identity_facts,
     ensure_namespaces,
     install_gateway_api_crds,
+    read_workload_identity_client_id,
 )
 from .config import Config, IngressMode, Profile
 from .console import console, display_result, display_yaml
@@ -58,7 +59,7 @@ from .ingress import (
 from .paths import INFRA_ROOT
 from .pins import ServicePin, apply_image_lock, describe_pin, read_lock
 from .secrets import ensure_secrets, get_or_create_seed
-from .shell import kubectl_apply_yaml, run_command, run_process
+from .shell import kubectl_apply_yaml, kubectl_json, run_command, run_process
 from .sizing import apply_sizing, check_storage
 from .templates import (
     TESTER_NAMESPACE,
@@ -136,6 +137,22 @@ def _create_osdu_config(config: Config, infra_outputs: dict) -> None:
         display_yaml(sa_yaml, f"ServiceAccount: {sa_name} in {TESTER_NAMESPACE}")
         kubectl_apply_yaml(sa_yaml, f"apply {sa_name} in {TESTER_NAMESPACE}")
     display_result("Workload Identity ServiceAccounts created")
+
+
+def refresh_airflow_osdu_config() -> None:
+    """Re-derive spi-airflow-osdu from the live osdu-config and identity.
+
+    ``spi reconcile`` can move an environment onto a commit whose core
+    Airflow reads this ConfigMap, without the ``spi up`` that writes it. An
+    environment with no osdu-config is left alone; ``spi up`` writes both.
+    """
+    osdu = kubectl_json(["get", "configmap", "osdu-config", "-n", "osdu"])
+    if not osdu:
+        console.print("  [dim]osdu-config not found; skipping spi-airflow-osdu refresh[/dim]")
+        return
+    aad_client_id = (osdu.get("data") or {}).get("AAD_CLIENT_ID", "")
+    audience = token_audience(aad_client_id, read_workload_identity_client_id())
+    kubectl_apply_yaml(airflow_osdu_configmap(audience), "apply spi-airflow-osdu ConfigMap")
 
 
 def _create_istio_auth(config: Config, infra_outputs: dict) -> None:
