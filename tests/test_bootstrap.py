@@ -327,6 +327,7 @@ class TestReconcileRefreshesClusterConfig:
             ),
             patch("spi.cli.create_istio_revision_configmap") as configmap,
             patch("spi.cli.refresh_spi_init_values") as init_values,
+            patch("spi.cli.refresh_airflow_osdu_config") as airflow_config,
             # Reads the live lock through pins.run_process, which the
             # spi.cli.run_command patch above does not intercept; without
             # this the default reconcile path shells out to real kubectl.
@@ -336,19 +337,23 @@ class TestReconcileRefreshesClusterConfig:
             result = runner.invoke(cli.app, ["reconcile", *args])
         assert result.exit_code == 0, result.output
         self.init_values = init_values
+        self.airflow_config = airflow_config
         return configmap
 
     def test_default_reconcile_writes_configmap(self):
         self._invoke().assert_called_once_with()
         self.init_values.assert_called_once_with()
+        self.airflow_config.assert_called_once_with()
 
     def test_resume_writes_configmap(self):
         self._invoke("--resume").assert_called_once_with()
         self.init_values.assert_called_once_with()
+        self.airflow_config.assert_called_once_with()
 
     def test_suspend_leaves_configmap_alone(self):
         self._invoke("--suspend").assert_not_called()
         self.init_values.assert_not_called()
+        self.airflow_config.assert_not_called()
 
     def test_refresh_images_exits_on_resolution_error(self):
         """A registry lookup failure has to abort before annotating anything,
@@ -359,6 +364,7 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
             patch("spi.cli.refresh_spi_init_values"),
+            patch("spi.cli.refresh_airflow_osdu_config"),
             patch("spi.cli.read_lock", return_value=None),
             patch(
                 "spi.cli.resolve_image_lock",
@@ -394,6 +400,7 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
             patch("spi.cli.refresh_spi_init_values"),
+            patch("spi.cli.refresh_airflow_osdu_config"),
             patch("spi.cli.read_lock", return_value=None),
             patch("spi.cli.resolve_image_lock", return_value=resolved),
             patch("spi.cli.apply_image_lock", side_effect=PinError("could not read lock")),
@@ -423,6 +430,7 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
             patch("spi.cli.refresh_spi_init_values"),
+            patch("spi.cli.refresh_airflow_osdu_config"),
             patch("spi.cli.read_lock", return_value=lock),
             patch(
                 "spi.cli.resolve_image_lock",
@@ -463,6 +471,7 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
             patch("spi.cli.refresh_spi_init_values"),
+            patch("spi.cli.refresh_airflow_osdu_config"),
             patch("spi.cli.read_lock", return_value=None),
             patch("spi.cli.resolve_image_lock", return_value=resolved),
             patch("spi.cli.apply_image_lock", return_value={}),
@@ -510,6 +519,7 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
             patch("spi.cli.refresh_spi_init_values"),
+            patch("spi.cli.refresh_airflow_osdu_config"),
             patch("spi.cli.read_lock", return_value=None),
             patch("spi.cli.resolve_image_lock", return_value=resolved),
             patch("spi.cli.apply_image_lock", return_value={}),
@@ -558,6 +568,7 @@ class TestReconcileRefreshesClusterConfig:
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
             patch("spi.cli.refresh_spi_init_values"),
+            patch("spi.cli.refresh_airflow_osdu_config"),
             patch("spi.cli.run_command", side_effect=_run_command),
             patch("spi.cli.apply_schema_load_backfill", return_value=False),
             patch("spi.status.resettable_helmreleases", return_value=[]),
@@ -587,6 +598,7 @@ class TestReconcileResetsStalledHelmReleases:
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
             patch("spi.cli.refresh_spi_init_values"),
+            patch("spi.cli.refresh_airflow_osdu_config"),
             patch("spi.cli.run_command", side_effect=_run_command),
             patch("spi.cli.apply_schema_load_backfill", return_value=False),
             patch("spi.status.resettable_helmreleases", return_value=stalled),
@@ -633,6 +645,7 @@ class TestReconcileResetsStalledHelmReleases:
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
             patch("spi.cli.refresh_spi_init_values"),
+            patch("spi.cli.refresh_airflow_osdu_config"),
             patch("spi.cli.run_command", return_value=SimpleNamespace(returncode=0, stdout="")),
             patch("spi.cli.apply_schema_load_backfill", return_value=False),
             patch(
@@ -662,6 +675,7 @@ class TestReconcileResetsStalledHelmReleases:
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
             patch("spi.cli.refresh_spi_init_values"),
+            patch("spi.cli.refresh_airflow_osdu_config"),
             patch("spi.cli.run_command", side_effect=_run_command),
             patch("spi.cli.apply_schema_load_backfill", return_value=False),
             patch("spi.status.resettable_helmreleases", return_value=[("osdu-flux", "partition")]),
@@ -697,6 +711,7 @@ class TestSchemaLoadImageLockBackfill:
             patch("spi.cli.get_suspend_status", return_value=False),
             patch("spi.cli.create_istio_revision_configmap"),
             patch("spi.cli.refresh_spi_init_values"),
+            patch("spi.cli.refresh_airflow_osdu_config"),
             patch("spi.cli.apply_schema_load_backfill", side_effect=_backfill) as backfill,
             patch("spi.cli.run_command", side_effect=_run_command) as run_command,
             patch("spi.status.resettable_helmreleases", return_value=[]),

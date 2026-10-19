@@ -37,6 +37,7 @@ from .build import BuildError, build_image
 from .checks import PREREQ_TOOLS, check_prerequisites
 from .config import Config, IngressMode, Profile
 from .console import console, display_result, error_console
+from .deploy import refresh_airflow_osdu_config
 from .environment import Declared
 from .guard import get_suspend_status, verify_spi_cluster
 from .images import (
@@ -2124,6 +2125,7 @@ def reconcile(
     console.print("\n[bold]Refreshing cluster config for Flux substitution...[/bold]")
     create_istio_revision_configmap()
     refresh_spi_init_values()
+    refresh_airflow_osdu_config()
 
     if not refresh_images:
         _backfill_schema_load_lock(image_branch)

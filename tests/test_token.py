@@ -284,6 +284,34 @@ def test_airflow_tasks_mint_for_an_overridden_app_registration(monkeypatch):
     assert 'AZURE_RESOURCE_ID: "app-registration-id"' in applied
 
 
+@pytest.mark.parametrize(
+    ("aad_client_id", "audience"),
+    [("uami-id", "https://management.azure.com"), ("app-registration-id", "app-registration-id")],
+)
+def test_reconcile_rederives_the_airflow_audience_from_live_config(aad_client_id, audience):
+    with (
+        patch(
+            "spi.deploy.kubectl_json",
+            return_value={"data": {"AAD_CLIENT_ID": aad_client_id}},
+        ),
+        patch("spi.deploy.read_workload_identity_client_id", return_value="uami-id"),
+        patch("spi.deploy.kubectl_apply_yaml") as apply_yaml,
+    ):
+        deploy.refresh_airflow_osdu_config()
+
+    assert f'AZURE_RESOURCE_ID: "{audience}"' in apply_yaml.call_args.args[0]
+
+
+def test_reconcile_leaves_airflow_config_alone_without_osdu_config():
+    with (
+        patch("spi.deploy.kubectl_json", return_value=None),
+        patch("spi.deploy.kubectl_apply_yaml") as apply_yaml,
+    ):
+        deploy.refresh_airflow_osdu_config()
+
+    apply_yaml.assert_not_called()
+
+
 def test_workload_identity_sa_default_name_is_unchanged():
     assert "name: workload-identity-sa\n" in workload_identity_sa("osdu", "c", "t")
 
