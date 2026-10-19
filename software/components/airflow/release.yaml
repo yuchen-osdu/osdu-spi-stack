@@ -28,12 +28,14 @@ spec:
     airflowVersion: "3.2.2"
     defaultAirflowTag: "3.2.2"
 
-    executor: KubernetesExecutor
+    # Tasks run as scheduler subprocesses, so no task pod needs its own DAGs,
+    # libraries, identity or admission-compliant template (ADR-043).
+    executor: LocalExecutor
 
     postgresql:
       enabled: false
-    # KubernetesExecutor needs no broker; this also stops the chart rendering
-    # an unused redis-password secret.
+    # LocalExecutor needs no broker; this also stops the chart rendering an
+    # unused redis-password secret.
     redis:
       enabled: false
     data:
@@ -46,6 +48,8 @@ spec:
     jwtSecretName: airflow-api-credentials
     fernetKeySecretName: airflow-api-credentials
 
+    # Under LocalExecutor the chart reads this as the scheduler's: enabled
+    # turns the scheduler into a StatefulSet with a log volume claim.
     workers:
       persistence:
         enabled: false
@@ -285,6 +289,11 @@ spec:
         enabled: false
 
     config:
+      core:
+        # Task logs stay on the scheduler pod. The API server fetches them
+        # from the recorded hostname, and a Deployment pod's name does not
+        # resolve, so record its IP instead.
+        hostname_callable: "airflow.utils.net.get_host_ip_address"
       api:
         # Path-only: this becomes the FastAPI root_path, so the UI and API
         # serve under /airflow without a gateway rewrite. A scheme and host
