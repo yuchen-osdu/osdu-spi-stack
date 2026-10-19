@@ -8,7 +8,9 @@ The workflow service hands every OSDU workflow run to Airflow, and the stack's A
 
 The core profile loads pinned DAG files and hash-locked libraries into the stock Airflow image when the scheduler and dag-processor start, runs tasks inside the scheduler, and registers exactly the declared DAGs with the workflow service.
 
-- **LocalExecutor for every profile that runs Airflow.** `software/components/airflow/release.yaml` sets `executor: LocalExecutor` and drops the `workers` block. Tasks run as scheduler subprocesses, so no task pod exists and no per-task image, identity, or admission contract has to hold. The scheduler's requests and limits carry the task load, and `core.parallelism` caps concurrent tasks.
+- **LocalExecutor for every profile that runs Airflow.** `software/components/airflow/release.yaml` sets `executor: LocalExecutor`. Tasks run as scheduler subprocesses, so no task pod exists and no per-task image, identity, or admission contract has to hold. The scheduler's requests and limits carry the task load, and `core.parallelism` caps concurrent tasks.
+  - `workers.persistence.enabled` stays `false`. Under LocalExecutor the chart applies it to the scheduler, and `true` would make the scheduler a StatefulSet with a log volume claim.
+  - `core.hostname_callable` records the scheduler pod's IP, because the API server fetches task logs from that host and a Deployment pod's name does not resolve.
 - **DAG sources are pinned file by file.** `software/components/airflow/osdu/dag-sources.yaml` names each DAG family:
   - its repository, which is the SPI fork once one exists and community GitLab otherwise;
   - the commit;
