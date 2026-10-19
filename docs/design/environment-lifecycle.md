@@ -215,7 +215,7 @@ and Key Vault recovery finds the old vault (ADR-028). Bootstrap reconciles
 credentials and source projections; the ensure step repairs test-caller
 entitlements: `spi up` and `spi reconcile` write the deploy identity's client
 id into `spi-init-values`, and the `entitlements-members` Job in the
-non-gating `spi-osdu-members` Kustomization adds it to the four root groups
+non-gating `spi-osdu-members` Kustomization adds it to the root groups
 of every partition, reporting through `entitlements_seeded` in
 `spi info --json`. A Job name carries a hash of the member list, so a
 recreated identity renders a new Job and an unchanged one is left Complete.
