@@ -32,6 +32,7 @@ from spi.bootstrap import ensure_namespaces
 from spi.config import Config
 from spi.status import STATUS_API_VERSION
 from spi.templates import (
+    AIRFLOW_SCHEDULER_SERVICE_ACCOUNT,
     DEPLOYER_SERVICE_ACCOUNT,
     MEMBER_SERVICE_ACCOUNT,
     NO_ACCESS_SERVICE_ACCOUNT,
@@ -256,7 +257,24 @@ def test_deploy_skips_tester_accounts_without_identity_outputs():
     applied = "".join(call.args[0] for call in apply_yaml.call_args_list)
 
     assert DEPLOYER_SERVICE_ACCOUNT not in applied
-    assert applied.count("kind: ServiceAccount") == 2
+    # workload-identity-sa in platform and osdu, and the core scheduler's account.
+    assert applied.count("kind: ServiceAccount") == 3
+
+
+def test_deploy_applies_the_airflow_schedulers_account_for_the_osdu_identity():
+    with (
+        patch("spi.deploy.display_yaml"),
+        patch("spi.deploy.kubectl_apply_yaml") as apply_yaml,
+    ):
+        deploy._create_osdu_config(
+            Config.from_env("dev1"), {"identity_client_id": "uami-id", "tenant_id": "tenant-id"}
+        )
+    applied = [call.args[0] for call in apply_yaml.call_args_list]
+
+    scheduler = next(y for y in applied if f"name: {AIRFLOW_SCHEDULER_SERVICE_ACCOUNT}\n" in y)
+    assert "namespace: platform\n" in scheduler
+    assert 'azure.workload.identity/client-id: "uami-id"' in scheduler
+    assert 'azure.workload.identity/tenant-id: "tenant-id"' in scheduler
 
 
 def _applied_airflow_config(outputs: dict) -> str:

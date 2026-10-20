@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +28,7 @@ from spi.environment import EnvironmentDeclarationError, load_stack_dags, load_s
 CATALOG = [
     {"name": "spi-smoke", "default": True, "dags": ["Echo_DAG"]},
     {"name": "core-ingestion", "default": True, "dags": ["Osdu_ingest"]},
-    {"name": "worker-smoke", "dags": ["osdu_worker_smoke"]},
+    {"name": "worker-smoke", "workers": True, "dags": ["osdu_worker_smoke"]},
     {"name": "by-reference", "requires": ["dataset"], "dags": ["Osdu_ingest_by_reference"]},
     {"name": "wellbore", "requires": ["storage", "search"], "dags": ["wellbore_x"]},
 ]
@@ -70,20 +71,130 @@ def test_the_stack_deploys_the_core_and_reference_services_but_no_dataset():
     assert "dataset" not in services
 
 
-def test_the_selection_is_one_watched_key():
+@pytest.mark.parametrize(
+    ("family", "refusal"),
+    [
+        (
+            {"name": "core-x", "default": True, "workers": True, "dags": ["x"]},
+            "core-x is a default family that declares workers",
+        ),
+        ({"name": "odd", "workers": "yes", "dags": ["x"]}, "odd workers must be true or false"),
+    ],
+)
+def test_a_catalog_that_would_grant_pod_launching_wrongly_is_refused(family, refusal):
+    with pytest.raises(dags.DagSelectionError, match=refusal):
+        dags.check_selection([], [*CATALOG, family], set())
+
+
+def test_only_a_selected_worker_family_launches_pods():
+    assert dags.launches_pods(("worker-smoke",), CATALOG)
+    assert dags.launches_pods(("wellbore", "worker-smoke"), CATALOG)
+    assert not dags.launches_pods(("wellbore",), CATALOG)
+    assert not dags.launches_pods((), CATALOG)
+
+
+def test_the_selection_is_two_watched_keys():
     doc = yaml.safe_load(dags.selection_configmap(("worker-smoke", "wellbore")))
     assert doc["metadata"]["name"] == "spi-dags"
     assert doc["metadata"]["namespace"] == "osdu-flux"
     assert doc["metadata"]["labels"]["reconcile.fluxcd.io/watch"] == "Enabled"
-    assert doc["data"] == {"SPI_DAG_FAMILIES": "worker-smoke,wellbore"}
+    assert doc["data"] == {
+        "SPI_DAG_FAMILIES": "worker-smoke,wellbore",
+        "SPI_AIRFLOW_POD_LAUNCHING": "false",
+    }
+    launching = yaml.safe_load(dags.selection_configmap(("worker-smoke",), pod_launching=True))
+    assert launching["data"]["SPI_AIRFLOW_POD_LAUNCHING"] == "true"
+
+
+class TestRemoval:
+    """Removing a family restarts the scheduler, which would end its runs."""
+
+    @pytest.fixture
+    def cluster(self, monkeypatch):
+        execs: list[list[str]] = []
+        state = {"selected": "worker-smoke,wellbore", "exec": None, "execs": execs}
+
+        def run_process(argv, **_kwargs):
+            if argv[1] == "get":
+                data = {"data": {"SPI_DAG_FAMILIES": state["selected"]}}
+                return SimpleNamespace(
+                    returncode=0, stdout=json.dumps(data) if state["selected"] else ""
+                )
+            execs.append(argv[argv.index("-c", argv.index("--")) + 2 :])
+            return state["exec"]
+
+        monkeypatch.setattr(dags, "run_process", run_process)
+        return state
+
+    @staticmethod
+    def _answer(rows, returncode=0):
+        log = "2026-10-20T21:36:11Z [info] setup plugin alembic\n"
+        out = log + dags.ACTIVE_RUNS_PREFIX + json.dumps(rows) + "\n"
+        return SimpleNamespace(returncode=returncode, stdout=out)
+
+    def test_a_kept_selection_asks_airflow_nothing(self, cluster):
+        dags.check_dag_removal(("worker-smoke", "wellbore", "by-reference"), CATALOG)
+        assert cluster["execs"] == []
+
+    def test_no_previous_selection_removes_nothing(self, cluster):
+        cluster["selected"] = ""
+        dags.check_dag_removal((), CATALOG)
+        assert cluster["execs"] == []
+
+    def test_a_quiet_family_is_removed(self, cluster):
+        cluster["exec"] = self._answer([])
+        dags.check_dag_removal(("wellbore",), CATALOG)
+        assert cluster["execs"] == [["osdu_worker_smoke"]]
+
+    def test_a_family_with_active_runs_is_refused(self, cluster):
+        cluster["exec"] = self._answer([["osdu_worker_smoke", "queued"]])
+        with pytest.raises(dags.DagSelectionError) as caught:
+            dags.check_dag_removal((), CATALOG)
+        assert "removal_busy: worker-smoke has active runs (osdu_worker_smoke queued)" in str(
+            caught.value
+        )
+        assert cluster["execs"] == [["osdu_worker_smoke", "wellbore_x"]]
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            SimpleNamespace(returncode=1, stdout="", stderr="pod not found"),
+            SimpleNamespace(returncode=0, stdout="no marker\n"),
+        ],
+    )
+    def test_an_unreachable_scheduler_runs_no_task_so_removal_proceeds(self, cluster, answer):
+        cluster["exec"] = answer
+        dags.check_dag_removal((), CATALOG)
+
+    def test_an_unreadable_selection_is_not_read_as_none(self, monkeypatch):
+        monkeypatch.setattr(
+            dags,
+            "run_process",
+            lambda *_a, **_k: SimpleNamespace(returncode=1, stdout="", stderr="refused"),
+        )
+        with pytest.raises(dags.DagSelectionError, match="refused"):
+            dags.check_dag_removal((), CATALOG)
+
+    def test_the_query_runs_in_the_scheduler_and_counts_only_active_states(self):
+        script = dags.ACTIVE_RUNS_SCRIPT
+        assert "DagRunState.RUNNING, DagRunState.QUEUED" in script
+        assert dags.SCHEDULER == ["-n", "platform", "deploy/airflow-scheduler", "-c", "scheduler"]
+        compile(script.replace("; ", "\n"), "active_runs", "exec")
 
 
 class TestApply:
     def test_a_selection_is_applied(self, monkeypatch):
         applied = []
         monkeypatch.setattr(dags, "kubectl_apply_yaml", lambda content, _d: applied.append(content))
-        dags.apply_dag_selection(("worker-smoke",))
-        assert "SPI_DAG_FAMILIES: worker-smoke" in applied[0]
+        dags.apply_dag_selection(("wellbore",), CATALOG)
+        assert "SPI_DAG_FAMILIES: wellbore" in applied[0]
+        assert "SPI_AIRFLOW_POD_LAUNCHING: 'false'" in applied[0]
+
+    def test_a_worker_family_lets_the_scheduler_launch_pods(self, monkeypatch):
+        applied = []
+        monkeypatch.setattr(dags, "kubectl_apply_yaml", lambda content, _d: applied.append(content))
+        dags.apply_dag_selection(("worker-smoke",), CATALOG)
+        assert "SPI_AIRFLOW_POD_LAUNCHING: 'true'" in applied[0]
 
     def test_no_selection_removes_an_existing_configmap(self, monkeypatch):
         commands = []
@@ -167,3 +278,11 @@ def test_the_shipped_by_reference_family_is_refused_without_dataset():
 def test_only_the_core_families_load_by_default():
     defaults = [f["name"] for f in dags.load_catalog() if f.get("default") is True]
     assert defaults == ["spi-smoke", "core-ingestion"]
+
+
+def test_the_example_worker_family_is_the_only_shipped_one_that_launches_pods():
+    catalog = dags.load_catalog()
+    assert [f["name"] for f in catalog if f.get("workers")] == ["osdu-worker-smoke"]
+    assert not dags.launches_pods([f["name"] for f in catalog if f.get("default")], catalog)
+    example = dags.REPO_ROOT / "examples" / "stacks" / "core-with-worker-smoke.yaml"
+    assert dags.launches_pods(load_stack_dags(example), catalog)

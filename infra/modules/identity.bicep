@@ -2,7 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 //
 // Federates the OSDU workload identity to workload-identity-sa in each
-// configured namespace, and creates the environment's three test callers:
+// configured namespace, and to the core Airflow scheduler's own account in
+// platform (ADR-044), and creates the environment's three test callers:
 // the deploy identity, the member identity, and the no-access identity. Each
 // trusts one cluster ServiceAccount, so a developer with cluster access can
 // mint the same app-only token fork CI mints through GitHub federation
@@ -41,6 +42,9 @@ param memberServiceAccountName string = 'spi-member'
 
 @description('ServiceAccount the no-access identity trusts; spi token --no-access mints through it.')
 param noAccessServiceAccountName string = 'spi-no-access'
+
+@description('platform ServiceAccount the core Airflow scheduler runs as. It alone may hold the chart pod-launcher Role, so worker pods and Jobs on workload-identity-sa never inherit it.')
+param airflowSchedulerServiceAccountName string = 'airflow-osdu-scheduler'
 
 @description('Kubernetes namespaces whose workload-identity-sa service account binds to this identity.')
 param federatedNamespaces array = [
@@ -88,6 +92,25 @@ resource federatedCredentials 'Microsoft.ManagedIdentity/userAssignedIdentities/
     ]
   }
 }]
+
+// Core's scheduler runs OSDU DAG tasks under LocalExecutor, so it needs the
+// OSDU identity; it gets its own account because the Airflow chart binds pod
+// launching to the scheduler's account. Written after the loop above: the RP
+// rejects concurrent credential writes on one identity.
+resource airflowSchedulerCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = if (!empty(oidcIssuerUrl)) {
+  parent: identity
+  name: 'federated-platform-${airflowSchedulerServiceAccountName}'
+  properties: {
+    issuer: oidcIssuerUrl
+    subject: 'system:serviceaccount:platform:${airflowSchedulerServiceAccountName}'
+    audiences: [
+      'api://AzureADTokenExchange'
+    ]
+  }
+  dependsOn: [
+    federatedCredentials
+  ]
+}
 
 // The onboard roster projection ignores these three credentials by issuer, but
 // they count against the twenty-credential cap on each identity.

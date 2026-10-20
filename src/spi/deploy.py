@@ -42,7 +42,7 @@ from .bootstrap import (
 )
 from .config import Config, IngressMode, Profile
 from .console import console, display_result, display_yaml
-from .dags import apply_dag_selection
+from .dags import apply_dag_selection, check_dag_removal
 from .deploy_record import upsert_deploy_record
 from .environment import Declared
 from .images import (
@@ -63,6 +63,7 @@ from .secrets import ensure_secrets, get_or_create_seed
 from .shell import kubectl_apply_yaml, kubectl_json, run_command, run_process
 from .sizing import apply_sizing, check_storage
 from .templates import (
+    AIRFLOW_SCHEDULER_SERVICE_ACCOUNT,
     TESTER_NAMESPACE,
     TESTER_SERVICE_ACCOUNTS,
     airflow_osdu_configmap,
@@ -128,6 +129,16 @@ def _create_osdu_config(config: Config, infra_outputs: dict) -> None:
         )
         display_yaml(sa_yaml, f"ServiceAccount: workload-identity-sa in {ns}")
         kubectl_apply_yaml(sa_yaml, f"apply workload-identity-sa in {ns}")
+    # Every profile writes it, like spi-airflow-osdu, so a later switch to core
+    # finds the scheduler's account in place.
+    sa_yaml = workload_identity_sa(
+        namespace="platform",
+        client_id=infra_outputs.get("identity_client_id", ""),
+        tenant_id=infra_outputs.get("tenant_id", ""),
+        name=AIRFLOW_SCHEDULER_SERVICE_ACCOUNT,
+    )
+    display_yaml(sa_yaml, f"ServiceAccount: {AIRFLOW_SCHEDULER_SERVICE_ACCOUNT} in platform")
+    kubectl_apply_yaml(sa_yaml, f"apply {AIRFLOW_SCHEDULER_SERVICE_ACCOUNT} in platform")
     for sa_name, output_key in TESTER_SERVICE_ACCOUNTS:
         client_id = infra_outputs.get(output_key, "")
         if not client_id:
@@ -696,6 +707,9 @@ def deploy_azure(
     sizes = sizing is not None and config.profile is Profile.CORE
     if sizes:
         check_storage(sizing)
+    # Before any cluster write: removing a family must not end its runs.
+    if dags is not None and config.profile is Profile.CORE:
+        check_dag_removal(dags)
     istio_revision = ensure_namespaces()
     create_istio_revision_configmap(
         istio_revision,

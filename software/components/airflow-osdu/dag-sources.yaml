@@ -34,6 +34,11 @@
 #               fails the load, as does any {| in a family without render.
 #   dags        the DAG IDs the family must yield; registration checks the
 #               parsed set against it and registers only these with Workflow
+#   workers     optional, false when absent: true when the family's DAGs start
+#               KubernetesPodOperator pods. Selecting one lets the scheduler's
+#               own account launch pods in platform (spi up writes
+#               SPI_AIRFLOW_POD_LAUNCHING); otherwise it holds no launch rights.
+#               A default family may not declare it, so core grants none.
 families:
   - name: spi-smoke
     default: true
@@ -72,6 +77,7 @@ families:
   - name: osdu-worker-smoke
     requires:
       - entitlements
+    workers: true
     source:
       type: archive
       host: github

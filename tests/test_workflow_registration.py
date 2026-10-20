@@ -34,6 +34,7 @@ register = _load_module("register_workflows", REGISTRATION / "register_workflows
 AIRFLOW = "http://airflow/airflow"
 WORKFLOW = "http://workflow/api/workflow/v1"
 DAGS_QUERY = "/api/v2/dags?limit=1000&exclude_stale=true"
+RUNS_QUERY = "/api/v2/dags/Optional_DAG/dagRuns?state=queued&state=running&limit=1"
 
 
 class FakeApi:
@@ -90,6 +91,14 @@ def env(monkeypatch, tmp_path):
     return sources
 
 
+def _marked(dag_id, family="x"):
+    return {
+        "workflowName": dag_id,
+        "description": f"{dag_id} from the {family} DAG family",
+        "registrationInstructions": register.owner_marker(dag_id, family),
+    }
+
+
 def _api(dag_ids, import_errors=(), register_status=201):
     return FakeApi(
         {
@@ -105,6 +114,12 @@ def _api(dag_ids, import_errors=(), register_status=201):
             ("POST", "/oauth2/v2.0/token"): (200, {"access_token": "osdu-jwt"}),
             ("POST", "/workflow/system"): (register_status, {}),
             **{("PATCH", f"/api/v2/dags/{dag_id}"): (200, {}) for dag_id in dag_ids},
+            # A 409 reads the record back; by default it is the stack's.
+            **{("GET", f"/workflow/{dag_id}"): (200, _marked(dag_id)) for dag_id in dag_ids},
+            **{
+                ("GET", f"/workflow?prefix={dag_id}"): (200, [_marked(dag_id)])
+                for dag_id in dag_ids
+            },
         }
     )
 
@@ -122,7 +137,9 @@ def _owned_workflow():
     }
 
 
-def _cleanup_api(workflow=None, *, read_status=200, pause_status=200, delete_status=204):
+def _cleanup_api(
+    workflow=None, *, read_status=200, pause_status=200, delete_status=204, active_runs=0
+):
     api = _api(["Echo_DAG", "Osdu_ingest", "Optional_DAG"])
     api.responses.update(
         {
@@ -131,6 +148,7 @@ def _cleanup_api(workflow=None, *, read_status=200, pause_status=200, delete_sta
                 _owned_workflow() if workflow is None else workflow,
             ),
             ("GET", "/workflow?prefix=Optional_DAG"): (200, [_owned_workflow()]),
+            ("GET", RUNS_QUERY): (200, {"dag_runs": [], "total_entries": active_runs}),
             ("PATCH", "/api/v2/dags/Optional_DAG"): (pause_status, {}),
             ("DELETE", "/workflow/system/Optional_DAG"): (delete_status, {}),
         }
@@ -161,6 +179,101 @@ def test_an_existing_registration_is_not_an_error(env, monkeypatch):
     monkeypatch.setattr(register, "request", _api(["Echo_DAG", "Osdu_ingest"], register_status=409))
 
     assert register.main() == 0
+
+
+def test_a_new_registration_carries_the_owner_marker(env, monkeypatch):
+    api = _api(["Echo_DAG", "Osdu_ingest"])
+    monkeypatch.setattr(register, "request", api)
+
+    assert register.main() == 0
+
+    bodies = [body for _, url, body in api.calls if url.endswith("/workflow/system")]
+    assert bodies[0]["registrationInstructions"] == {
+        "osdu-spi-stack": {"dagId": "Echo_DAG", "family": "spi-smoke"}
+    }
+    # A new record needs no read-back.
+    assert not [url for method, url, _ in api.calls if method == "GET" and url.startswith(WORKFLOW)]
+
+
+@pytest.mark.parametrize(
+    ("record", "listing"),
+    [
+        # Created by someone else under the same name.
+        ({"workflowName": "Osdu_ingest", "description": "Manually registered"}, None),
+        # Another DAG's marker.
+        (
+            {**_marked("Osdu_ingest"), "registrationInstructions": register.owner_marker("x", "y")},
+            None,
+        ),
+        # QA's tenant record shadowing the stack's system record.
+        (
+            _marked("Osdu_ingest"),
+            [_marked("Osdu_ingest"), {"workflowName": "Osdu_ingest", "description": "AutoTest"}],
+        ),
+    ],
+)
+def test_an_existing_record_that_is_not_the_stacks_is_a_conflict_and_nothing_unpauses(
+    env, monkeypatch, capsys, record, listing
+):
+    api = _api(["Echo_DAG", "Osdu_ingest"], register_status=409)
+    api.responses["GET", "/workflow/Osdu_ingest"] = (200, record)
+    api.responses["GET", "/workflow?prefix=Osdu_ingest"] = (200, listing or [record])
+    monkeypatch.setattr(register, "request", api)
+
+    assert register.main() == 1
+
+    assert "registration_conflict: Osdu_ingest" in capsys.readouterr().err
+    assert not [call for call in api.calls if call[0] == "PATCH"]
+
+
+def test_a_record_the_first_prototype_created_still_counts_as_the_stacks(env, monkeypatch):
+    api = _api(["Echo_DAG", "Osdu_ingest"], register_status=409)
+    for dag_id, family in (("Echo_DAG", "spi-smoke"), ("Osdu_ingest", "core-ingestion")):
+        legacy = {
+            "workflowName": dag_id,
+            "description": f"{dag_id} from the {family} DAG family",
+            "registrationInstructions": {},
+        }
+        api.responses["GET", f"/workflow/{dag_id}"] = (200, legacy)
+        api.responses["GET", f"/workflow?prefix={dag_id}"] = (200, [legacy])
+    monkeypatch.setattr(register, "request", api)
+
+    assert register.main() == 0
+
+
+def test_an_existing_record_cannot_be_verified_without_a_partition(env, monkeypatch, capsys):
+    monkeypatch.delenv("DATA_PARTITION")
+    api = _api(["Echo_DAG", "Osdu_ingest"], register_status=409)
+    monkeypatch.setattr(register, "request", api)
+
+    assert register.main() == 1
+
+    assert "DATA_PARTITION is required to read it back" in capsys.readouterr().err
+    assert not [call for call in api.calls if call[0] == "PATCH"]
+
+
+@pytest.mark.parametrize(
+    ("workflow", "expected"),
+    [
+        (_marked("A"), True),
+        ({**_marked("A"), "description": "edited by an operator"}, True),
+        ({**_marked("A"), "registrationInstructions": {"osdu-spi-stack": "A"}}, False),
+        ({**_marked("A"), "registrationInstructions": "A"}, False),
+        ({**_marked("A"), "registrationInstructions": {"other": 1}}, False),
+        ({"workflowName": "A", "description": "A from the f DAG family"}, True),
+        (
+            {
+                "workflowName": "A",
+                "description": "A from the f DAG family",
+                "registrationInstructions": {"other": 1},
+            },
+            False,
+        ),
+        (None, False),
+    ],
+)
+def test_ownership_follows_the_marker_and_only_falls_back_to_a_bare_description(workflow, expected):
+    assert register.owned(workflow, "A", "f") is expected
 
 
 @pytest.mark.parametrize(
@@ -387,7 +500,9 @@ def test_the_four_default_dag_output_lines_are_unchanged(env, monkeypatch, capsy
     ) == {
         "workflowName": "Echo_DAG",
         "description": "Echo_DAG from the spi-smoke DAG family",
-        "registrationInstructions": {},
+        "registrationInstructions": {
+            "osdu-spi-stack": {"dagId": "Echo_DAG", "family": "spi-smoke"}
+        },
     }
 
 
@@ -398,14 +513,15 @@ def test_cleanup_follows_all_wanted_work_and_reads_with_a_partition(env, monkeyp
 
     assert register.main() == 0
 
-    assert api.calls[-4:] == [
+    assert api.calls[-5:] == [
         ("GET", f"{WORKFLOW}/workflow/Optional_DAG", None),
         ("GET", f"{WORKFLOW}/workflow?prefix=Optional_DAG", None),
+        ("GET", f"{AIRFLOW}{RUNS_QUERY}", None),
         ("PATCH", f"{AIRFLOW}/api/v2/dags/Optional_DAG", {"is_paused": True}),
         ("DELETE", f"{WORKFLOW}/workflow/system/Optional_DAG", None),
     ]
     assert all(
-        body == {"is_paused": False} for method, _, body in api.calls[:-4] if method == "PATCH"
+        body == {"is_paused": False} for method, _, body in api.calls[:-5] if method == "PATCH"
     )
     assert capsys.readouterr().out.splitlines()[-2:] == [
         "Optional_DAG: paused",
@@ -554,6 +670,28 @@ def test_failed_pause_preserves_the_marker_for_a_retry(env, monkeypatch):
     assert len([call for call in api.calls if call[0] == "DELETE"]) == 1
 
 
+def test_a_deselected_dag_with_active_runs_is_left_alone_and_fails_the_run(
+    env, monkeypatch, capsys
+):
+    _add_family(env)
+    api = _cleanup_api(active_runs=2)
+    monkeypatch.setattr(register, "request", api)
+
+    assert register.main() == 1
+
+    captured = capsys.readouterr()
+    assert "Optional_DAG: removal_busy, 2 queued or running run(s); left registered" in captured.out
+    assert "removal_busy: Optional_DAG" in captured.err
+    assert not [call for call in api.calls if call[0] == "DELETE"]
+    assert not [call for call in api.calls if call[2] == {"is_paused": True}]
+    # The selected DAGs were still activated.
+    assert len([call for call in api.calls if call[2] == {"is_paused": False}]) == 2
+
+    api.responses["GET", RUNS_QUERY] = (200, {"dag_runs": [], "total_entries": 0})
+    assert register.main() == 0
+    assert len([call for call in api.calls if call[0] == "DELETE"]) == 1
+
+
 def test_cleanup_requires_a_partition_before_any_api_call(env, monkeypatch, capsys):
     _add_family(env)
     monkeypatch.delenv("DATA_PARTITION")
@@ -578,6 +716,7 @@ def test_wanted_only_registration_still_needs_no_partition(env, monkeypatch):
     [
         ("GET", "/workflow/Optional_DAG"),
         ("GET", "/workflow?prefix=Optional_DAG"),
+        ("GET", RUNS_QUERY),
         ("PATCH", "/api/v2/dags/Optional_DAG"),
         ("DELETE", "/workflow/system/Optional_DAG"),
     ],

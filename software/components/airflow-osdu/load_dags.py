@@ -79,7 +79,7 @@ _K8S_MODELS_IMPORT = re.compile(
     r"|import\s+.*\bk8s_models\b)",
     re.MULTILINE,
 )
-_FAMILY_KEYS = {"name", "default", "requires", "source", "files", "render", "dags"}
+_FAMILY_KEYS = {"name", "default", "requires", "source", "files", "render", "dags", "workers"}
 _HOST_KEYS = {"gitlab": {"url", "project"}, "github": {"repository"}}
 _ATTEMPTS = 4
 _TIMEOUT_SECONDS = 30
@@ -435,6 +435,10 @@ def check_family(family: dict, values: dict[str, str], pinned: bool = True) -> N
     _mapping(family, _FAMILY_KEYS, "a family")
     if not isinstance(family.get("default", False), bool):
         raise SourceError("default must be true or false")
+    if not isinstance(family.get("workers", False), bool):
+        raise SourceError("workers must be true or false")
+    if family.get("default") and family.get("workers"):
+        raise SourceError("a default family may not declare workers: core grants no pod launching")
     requires = family.get("requires") or []
     if not isinstance(requires, list) or not all(
         isinstance(service, str) and _NAME.match(service) for service in requires

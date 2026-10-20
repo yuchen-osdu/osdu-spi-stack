@@ -18,8 +18,14 @@
 Selects default families plus the comma-separated SPI_DAG_FAMILIES names.
 Waits for exactly their live DAGs, ignoring stale and deselected catalog DAGs,
 with no import errors in selected families, then registers and unpauses them.
-Deselected catalog workflows bearing this script's exact description marker
-are paused and deregistered. DATA_PARTITION is required for their read-by-name,
+Each system record this script creates carries an owner marker in its
+registrationInstructions; records the first prototype created carry the exact
+description instead, and still count as the stack's. An existing record (409)
+is read back and must be the stack's before any DAG is unpaused; otherwise
+the run fails with registration_conflict and unpauses nothing. Deselected
+catalog workflows the stack owns are paused and deregistered, unless their DAG
+still has a queued or running run: that is removal_busy, never a cancellation,
+and the run exits non-zero. DATA_PARTITION is required for the read-by-name,
 which falls back to system workflows; a listing guards against tenant records
 shadowing foreign system metadata. System writes never send that header.
 Every step is idempotent, so a re-run after a partial failure converges.
@@ -212,7 +218,64 @@ def workflow_description(dag_id: str, family: str) -> str:
     return f"{dag_id} from the {family} DAG family"
 
 
-def register(workflow_url: str, token: str, dag_id: str, family: str) -> str:
+# registrationInstructions key naming the stack as a record's owner. Workflow
+# stores the map as given and returns it from both lookups.
+OWNER_KEY = "osdu-spi-stack"
+
+
+def owner_marker(dag_id: str, family: str) -> dict:
+    return {OWNER_KEY: {"dagId": dag_id, "family": family}}
+
+
+def owned(workflow: object, dag_id: str, family: str) -> bool:
+    """Whether a Workflow record is one this script created for dag_id."""
+    if not isinstance(workflow, dict) or workflow.get("workflowName") != dag_id:
+        return False
+    instructions = workflow.get("registrationInstructions") or {}
+    if not isinstance(instructions, dict):
+        return False
+    marker = instructions.get(OWNER_KEY)
+    if marker is not None:
+        return isinstance(marker, dict) and marker.get("dagId") == dag_id
+    # Records the first prototype created carry only the exact description.
+    return not instructions and workflow.get("description") == workflow_description(dag_id, family)
+
+
+def ownership(workflow_url: str, token: str, dag_id: str, family: str, partition: str) -> str:
+    """absent, owned, or foreign: every record under the name must be the stack's."""
+    name = urllib.parse.quote(dag_id, safe="")
+    # There is no system GET; the partition-scoped lookup falls back to system metadata.
+    status, workflow = request(
+        "GET",
+        f"{workflow_url}/workflow/{name}",
+        token=token,
+        partition=partition,
+        expected=(200, 404),
+    )
+    if status == 404:
+        return "absent"
+    # A tenant record shadows system metadata in the name lookup; reject foreign collisions.
+    status, workflows = request(
+        "GET",
+        f"{workflow_url}/workflow?prefix={name}",
+        token=token,
+        partition=partition,
+        expected=(200, 404),
+    )
+    matches = (
+        [
+            item
+            for item in workflows
+            if isinstance(item, dict) and item.get("workflowName") == dag_id
+        ]
+        if status == 200 and isinstance(workflows, list)
+        else []
+    )
+    records = [workflow, *matches] if matches else [workflow, None]
+    return "owned" if all(owned(record, dag_id, family) for record in records) else "foreign"
+
+
+def register(workflow_url: str, token: str, dag_id: str, family: str, partition: str = "") -> str:
     # The Azure workflow engine triggers the DAG named by workflowName.
     status, _ = request(
         "POST",
@@ -221,11 +284,36 @@ def register(workflow_url: str, token: str, dag_id: str, family: str) -> str:
         body={
             "workflowName": dag_id,
             "description": workflow_description(dag_id, family),
-            "registrationInstructions": {},
+            "registrationInstructions": owner_marker(dag_id, family),
         },
         expected=(200, 201, 409),
     )
-    return "exists" if status == 409 else "registered"
+    if status != 409:
+        return "registered"
+    # A 409 alone is not success: the record must be the stack's.
+    if not partition:
+        raise RegistrationError(
+            f"registration_conflict: {dag_id} exists and DATA_PARTITION is required to read it back"
+        )
+    state = ownership(workflow_url, token, dag_id, family, partition)
+    if state != "owned":
+        raise RegistrationError(
+            f"registration_conflict: {dag_id} is registered, but not by the stack ({state});"
+            " it is neither adopted nor unpaused"
+        )
+    return "exists"
+
+
+def active_runs(url: str, token: str, dag_id: str) -> int:
+    """Queued or running runs of a DAG; a DAG Airflow does not know has none."""
+    status, body = request(
+        "GET",
+        f"{url}/api/v2/dags/{urllib.parse.quote(dag_id, safe='')}/dagRuns"
+        "?state=queued&state=running&limit=1",
+        token=token,
+        expected=(200, 404),
+    )
+    return int(body.get("total_entries", 0)) if status == 200 and isinstance(body, dict) else 0
 
 
 def unpause(url: str, token: str, dag_id: str) -> None:
@@ -246,41 +334,19 @@ def deregister(
     airflow_url: str,
     airflow_access_token: str,
     partition: str,
-) -> None:
+) -> bool:
+    """Pause and deregister a deselected DAG the stack owns; False when it is busy."""
     name = urllib.parse.quote(dag_id, safe="")
-    # There is no system GET; the partition-scoped lookup falls back to system metadata.
-    status, workflow = request(
-        "GET",
-        f"{workflow_url}/workflow/{name}",
-        token=token,
-        partition=partition,
-        expected=(200, 404),
-    )
-    if (
-        status == 404
-        or workflow.get("workflowName") != dag_id
-        or workflow.get("description") != workflow_description(dag_id, family)
-    ):
+    if ownership(workflow_url, token, dag_id, family, partition) != "owned":
         print(f"{dag_id}: not registered", flush=True)
-        return
-    # A tenant record shadows system metadata in the name lookup; reject foreign collisions.
-    status, workflows = request(
-        "GET",
-        f"{workflow_url}/workflow?prefix={name}",
-        token=token,
-        partition=partition,
-        expected=(200, 404),
-    )
-    matches = (
-        [workflow for workflow in workflows if workflow.get("workflowName") == dag_id]
-        if status == 200
-        else []
-    )
-    if not matches or any(
-        workflow.get("description") != workflow_description(dag_id, family) for workflow in matches
-    ):
-        print(f"{dag_id}: not registered", flush=True)
-        return
+        return True
+    busy = active_runs(airflow_url, airflow_access_token, dag_id)
+    if busy:
+        print(
+            f"{dag_id}: removal_busy, {busy} queued or running run(s); left registered",
+            flush=True,
+        )
+        return False
     # Keep the ownership marker until pausing succeeds, so interrupted cleanup can retry.
     status, _ = request(
         "PATCH",
@@ -298,6 +364,7 @@ def deregister(
         expected=(204, 404),
     )
     print(f"{dag_id}: {'deregistered' if status == 204 else 'not registered'}", flush=True)
+    return True
 
 
 def main() -> int:
@@ -315,14 +382,25 @@ def main() -> int:
             raise RegistrationError("DATA_PARTITION is required to inspect deselected workflows")
         wait_for_parse(airflow_url, set(wanted), set(families), set(deselected))
         workflow_token = osdu_token()
+        conflicts = []
         for dag_id, family in sorted(wanted.items()):
-            print(f"{dag_id}: {register(workflow_url, workflow_token, dag_id, family)}", flush=True)
+            try:
+                outcome = register(workflow_url, workflow_token, dag_id, family, partition)
+            except RegistrationError as error:
+                conflicts.append(str(error))
+                continue
+            print(f"{dag_id}: {outcome}", flush=True)
+        # Verify every record before activating any of them.
+        if conflicts:
+            raise RegistrationError("; ".join(conflicts))
         api_token = airflow_token(airflow_url)
         for dag_id in sorted(wanted):
             unpause(airflow_url, api_token, dag_id)
             print(f"{dag_id}: unpaused", flush=True)
-        for dag_id, family in sorted(deselected.items()):
-            deregister(
+        busy = [
+            dag_id
+            for dag_id, family in sorted(deselected.items())
+            if not deregister(
                 workflow_url,
                 workflow_token,
                 dag_id,
@@ -330,6 +408,11 @@ def main() -> int:
                 airflow_url=airflow_url,
                 airflow_access_token=api_token,
                 partition=partition,
+            )
+        ]
+        if busy:
+            raise RegistrationError(
+                f"removal_busy: {', '.join(busy)} still queued or running; nothing was cancelled"
             )
     except (RegistrationError, OSError, KeyError, yaml.YAMLError) as error:
         print(f"Workflow registration failed: {error}", file=sys.stderr, flush=True)

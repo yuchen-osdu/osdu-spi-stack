@@ -106,6 +106,10 @@ TESTER_SERVICE_ACCOUNTS = (
     (NO_ACCESS_SERVICE_ACCOUNT, "no_access_identity_client_id"),
 )
 
+# The platform account identity.bicep federates to the OSDU identity for the
+# core Airflow scheduler (ADR-044); core's overlay names it.
+AIRFLOW_SCHEDULER_SERVICE_ACCOUNT = "airflow-osdu-scheduler"
+
 
 def workload_identity_sa(
     namespace: str, client_id: str, tenant_id: str, name: str = "workload-identity-sa"
@@ -114,7 +118,10 @@ def workload_identity_sa(
 
     The default name is what every OSDU pod binds; the deploy, member, and
     no-access identities each trust a differently named account in the same namespace,
-    which spi token mints through and an in-cluster test Job can run as.
+    which spi token mints through and an in-cluster test Job can run as. The
+    core Airflow scheduler has its own account federated to the OSDU identity
+    (AIRFLOW_SCHEDULER_SERVICE_ACCOUNT), so the chart's pod-launcher Role is
+    never bound to workload-identity-sa.
     """
     return f"""\
 apiVersion: v1

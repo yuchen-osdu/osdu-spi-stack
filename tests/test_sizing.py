@@ -50,7 +50,11 @@ def _manifest(component: str) -> Path:
 def _sizing_placeholders(path: Path) -> dict:
     found: dict = {}
     for key, default in PLACEHOLDER.findall(path.read_text(encoding="utf-8")):
-        if key.endswith("_DO_NOT_DISRUPT") or key == "SPI_DAG_FAMILIES":
+        # The DAG selection and pod launching come from spi-dags, not sizing.
+        if key.endswith("_DO_NOT_DISRUPT") or key in {
+            "SPI_DAG_FAMILIES",
+            "SPI_AIRFLOW_POD_LAUNCHING",
+        }:
             continue
         assert found.setdefault(key, default) == default, f"{path.name}: {key} has two defaults"
     return found

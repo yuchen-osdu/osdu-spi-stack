@@ -5,7 +5,9 @@
 #
 # They describe the worker pods KubernetesPodOperator starts from the
 # scheduler. Workers run beside it in platform, on its nodes, as
-# workload-identity-sa, the OSDU Workload Identity. platform injects no Istio sidecar, and the AKS
+# workload-identity-sa, the OSDU Workload Identity, which holds no pod-launch
+# rights: only the scheduler's own account does, and only while a selected
+# family declares workers. platform injects no Istio sidecar, and the AKS
 # Automatic Deployment Safeguards require requests, limits and a restricted
 # security context. worker_env holds Jinja that reads Airflow Variables when
 # the task runs, because KubernetesPodOperator templates env_vars.

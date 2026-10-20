@@ -13,6 +13,11 @@ spec:
         # The registration Job unpauses exactly the declared DAG IDs.
         dags_are_paused_at_creation: "True"
 
+    # The chart binds pod launching to the scheduler's (and triggerer's)
+    # account. Only a selected family that declares workers turns it on; spi up
+    # writes the flag beside the family selection (spi-dags).
+    allowPodLaunching: ${SPI_AIRFLOW_POD_LAUNCHING:=false}
+
     # Airflow Variables the DAGs read, for every Airflow container: the stack's
     # map in airflow-variables.env, plus the task token audience the CLI writes.
     extraEnvFrom: |
@@ -27,11 +32,13 @@ spec:
       podAnnotations:
         spi-dag-config-revision: airflow-osdu-dags-revision
         spi-dag-families: "${SPI_DAG_FAMILIES:=none}"
-      # osdu-api requests a token for the OSDU identity through this
-      # ServiceAccount; nothing else in platform runs as it.
+      # osdu-api requests a token for the OSDU identity through this account,
+      # which identity.bicep federates and spi up creates. It is not
+      # workload-identity-sa: worker pods and the registration Job run as that
+      # and must not inherit the pod-launcher Role bound here.
       serviceAccount:
         create: false
-        name: workload-identity-sa
+        name: airflow-osdu-scheduler
       labels:
         azure.workload.identity/use: "true"
       resources:

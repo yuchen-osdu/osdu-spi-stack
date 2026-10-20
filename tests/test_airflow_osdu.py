@@ -212,6 +212,11 @@ VALUES = {
     ("family", "message"),
     [
         ({**_local_family("a"), "default": "yes"}, "a: default must be true or false"),
+        ({**_local_family("a"), "workers": "yes"}, "a: workers must be true or false"),
+        (
+            {**_local_family("a"), "default": True, "workers": True},
+            "a default family may not declare workers",
+        ),
         ({**_local_family("a"), "requires": ["CSV_Parser"]}, "requires must list lowercase"),
         ({**_local_family("a"), "defualt": True}, "has unknown keys: defualt"),
         (_local_family("a", files=[{"path": "dir/a.py"}]), "cannot nest"),
@@ -684,6 +689,47 @@ def test_shipped_render_values_are_python_expressions_for_worker_pods():
     # The upstream templates pass these to KubernetesPodOperator themselves, so
     # a second value would be a duplicate keyword argument.
     assert not {"namespace", "image", "name", "task_id", "env_vars", "arguments"} & set(kwargs)
+
+
+def test_only_the_schedulers_own_account_may_launch_pods():
+    """The chart binds pod launching to the scheduler's account (and the
+    triggerer's), so workers and the registration Job, which run as
+    workload-identity-sa, must not share it, and core grants it only when a
+    selected family declares workers."""
+    from spi.dags import POD_LAUNCHING_KEY
+    from spi.templates import AIRFLOW_SCHEDULER_SERVICE_ACCOUNT
+
+    values = yaml.safe_load((OVERLAY / "release-patch.yaml").read_text(encoding="utf-8"))["spec"][
+        "values"
+    ]
+    assert values["scheduler"]["serviceAccount"] == {
+        "create": False,
+        "name": AIRFLOW_SCHEDULER_SERVICE_ACCOUNT,
+    }
+    assert values["allowPodLaunching"] == "${" + POD_LAUNCHING_KEY + ":=false}"
+    assert "serviceAccount" not in values["dagProcessor"]
+
+    account = re.search(
+        r'"service_account_name": ("[^"]+")',
+        load_dags.read_values(OVERLAY)["worker_pod_kwargs"],
+    )
+    assert account
+    worker = ast.literal_eval(account.group(1))
+    registration = yaml.safe_load(
+        (REPO_ROOT / "software/stacks/osdu/workflow-registration/job.yaml").read_text(
+            encoding="utf-8"
+        )
+    )["spec"]["template"]["spec"]["serviceAccountName"]
+    assert worker == registration == "workload-identity-sa" != AIRFLOW_SCHEDULER_SERVICE_ACCOUNT
+
+    bicep = (REPO_ROOT / "infra" / "modules" / "identity.bicep").read_text(encoding="utf-8")
+    assert (
+        f"param airflowSchedulerServiceAccountName string = '{AIRFLOW_SCHEDULER_SERVICE_ACCOUNT}'"
+        in bicep
+    )
+    assert (
+        "subject: 'system:serviceaccount:platform:${airflowSchedulerServiceAccountName}'" in bicep
+    )
 
 
 def test_shipped_worker_env_reads_variables_every_airflow_container_has():
