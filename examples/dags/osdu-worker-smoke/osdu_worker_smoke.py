@@ -15,8 +15,8 @@
 """Example add-on DAG family: one KubernetesPodOperator worker task.
 
 Written as a CImpl-style template, the way DDMS and EDS repositories publish
-their DAGs: the stack's loader replaces each {| TOKEN |} placeholder from the
-family's render map in dag-sources.yaml before Airflow parses the file. The
+their DAGs: the stack's loader replaces each placeholder from the family's
+render map in dag-sources.yaml before Airflow parses the file. The
 worker runs in its own pod as the OSDU Workload Identity and lists the
 caller's Entitlements groups, which proves a worker image can reach the OSDU
 services with a token the mesh accepts. It is not a product DAG.
