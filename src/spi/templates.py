@@ -460,6 +460,15 @@ metadata:
     osdu.spi/source: {json.dumps(source)}
 spec:
   backoffLimit: 2
+  # A pod that lands on a node before Istio CNI is ready fails istio-validation
+  # with 126; that is no loader failure, so it uses no retry. No containerName:
+  # the injected container is not in this template, and the API refuses one.
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onExitCodes:
+          operator: In
+          values: [126]
   activeDeadlineSeconds: {LOAD_JOB_DEADLINE_SECONDS}
   template:
     metadata:

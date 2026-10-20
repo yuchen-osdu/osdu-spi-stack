@@ -373,6 +373,13 @@ def test_load_job_is_kept_as_the_record_and_outlives_the_cli_wait():
     assert loads.WAIT_SECONDS > spec["activeDeadlineSeconds"]
 
 
+def test_a_pod_istio_cni_was_not_ready_for_does_not_use_a_retry():
+    """Seen on dag2: a load pod on a node 45 s old failed istio-validation with 126."""
+    assert _rendered_job()["spec"]["podFailurePolicy"] == {
+        "rules": [{"action": "Ignore", "onExitCodes": {"operator": "In", "values": [126]}}]
+    }
+
+
 def test_load_job_meets_what_admission_grants_the_init_jobs():
     pod = _rendered_job()["spec"]["template"]["spec"]
     container = pod["containers"][0]
