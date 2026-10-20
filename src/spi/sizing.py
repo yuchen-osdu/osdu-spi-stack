@@ -87,13 +87,31 @@ MIDDLEWARE_DEFAULTS: dict[str, dict[str, str]] = {
     },
 }
 
+# Core's Airflow overlay (software/components/airflow-osdu) runs tasks inside the
+# scheduler, so it carries its own defaults for the keys it re-declares, and adds
+# the task concurrency the scheduler's memory limit has to hold (ADR-044).
+CORE_DEFAULTS: dict[str, dict[str, str]] = {
+    "airflow": {
+        **_resources("AIRFLOW_SCHEDULER", ("500m", "2", "1536Mi", "4Gi")),
+        **_resources("AIRFLOW_DAG_PROCESSOR", ("100m", "1", "512Mi", "1536Mi")),
+        "AIRFLOW_PARALLELISM": "8",
+    },
+}
+
 
 def sizing_defaults() -> dict[str, dict[str, str]]:
-    """Return every sizable component mapped to its substitution keys and defaults."""
+    """Return every sizable component mapped to its keys and the defaults core renders.
+
+    A stack file always builds on the core profile, so these are the values an
+    override replaces; minimal renders MIDDLEWARE_DEFAULTS for Airflow.
+    """
 
     return {
         **{service: _service_defaults(service) for service in sizing_services()},
-        **MIDDLEWARE_DEFAULTS,
+        **{
+            component: {**defaults, **CORE_DEFAULTS.get(component, {})}
+            for component, defaults in MIDDLEWARE_DEFAULTS.items()
+        },
     }
 
 
@@ -122,7 +140,7 @@ _AIRFLOW_COMPONENTS = {
     "triggerer": "TRIGGERER",
 }
 
-_COUNT_SUFFIXES = ("_REPLICAS", "_COUNT", "_INSTANCES")
+_COUNT_SUFFIXES = ("_REPLICAS", "_COUNT", "_INSTANCES", "_PARALLELISM")
 _STORAGE_SUFFIX = "_STORAGE"
 _CPU_RE = re.compile(r"^(?:[1-9][0-9]*m|[0-9]+(?:\.[0-9]{1,3})?)$")
 _BYTES_RE = re.compile(r"^([1-9][0-9]*)(Ki|Mi|Gi|Ti)$")
@@ -147,9 +165,12 @@ def field_paths(component: str) -> dict[tuple[str, ...], str]:
 
     if component == "airflow":
         return {
-            (part, *path): f"AIRFLOW_{name}_{suffix}"
-            for part, name in _AIRFLOW_COMPONENTS.items()
-            for path, suffix in _RESOURCE_PATHS.items()
+            **{
+                (part, *path): f"AIRFLOW_{name}_{suffix}"
+                for part, name in _AIRFLOW_COMPONENTS.items()
+                for path, suffix in _RESOURCE_PATHS.items()
+            },
+            ("parallelism",): "AIRFLOW_PARALLELISM",
         }
     if component in _MIDDLEWARE_PATHS:
         prefix, extra = _MIDDLEWARE_PATHS[component]

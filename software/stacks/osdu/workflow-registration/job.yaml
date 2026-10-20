@@ -25,6 +25,7 @@ spec:
         azure.workload.identity/use: "true"
       annotations:
         spi-dag-config-revision: "${DAG_CONFIG_REVISION}"
+        spi-dag-families: "${SPI_DAG_FAMILIES:=}"
     spec:
       serviceAccountName: workload-identity-sa
       restartPolicy: Never
@@ -45,6 +46,9 @@ spec:
           image: apache/airflow:3.2.2
           command: ["python", "/opt/spi/register/register_workflows.py"]
           env:
+            # Add-on families on top of the catalog's defaults (spi-dags).
+            - name: SPI_DAG_FAMILIES
+              value: "${SPI_DAG_FAMILIES:=}"
             - name: AIRFLOW_URL
               value: http://airflow-api-server.platform.svc.cluster.local:8080/airflow
             - name: AIRFLOW_USERNAME
@@ -61,6 +65,13 @@ spec:
                 configMapKeyRef:
                   name: spi-airflow-osdu
                   key: AZURE_RESOURCE_ID
+            # Workflow reads by name only within a partition; system writes take none.
+            - name: DATA_PARTITION
+              valueFrom:
+                configMapKeyRef:
+                  name: spi-airflow-osdu
+                  key: DATA_PARTITION
+                  optional: true
           resources:
             requests:
               cpu: 100m

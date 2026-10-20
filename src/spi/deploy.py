@@ -42,6 +42,7 @@ from .bootstrap import (
 )
 from .config import Config, IngressMode, Profile
 from .console import console, display_result, display_yaml
+from .dags import apply_dag_selection
 from .deploy_record import upsert_deploy_record
 from .environment import Declared
 from .images import (
@@ -113,7 +114,9 @@ def _create_osdu_config(config: Config, infra_outputs: dict) -> None:
     display_result("osdu-config ConfigMap created")
 
     # Every profile writes it so a later switch to core finds it in place.
-    airflow_yaml = airflow_osdu_configmap(token_audience(aad_client_id, identity_client_id))
+    airflow_yaml = airflow_osdu_configmap(
+        token_audience(aad_client_id, identity_client_id), partition
+    )
     display_yaml(airflow_yaml, "ConfigMap: spi-airflow-osdu")
     kubectl_apply_yaml(airflow_yaml, "apply spi-airflow-osdu ConfigMap")
 
@@ -151,9 +154,12 @@ def refresh_airflow_osdu_config() -> None:
     if not osdu:
         console.print("  [dim]osdu-config not found; skipping spi-airflow-osdu refresh[/dim]")
         return
-    aad_client_id = (osdu.get("data") or {}).get("AAD_CLIENT_ID", "")
-    audience = token_audience(aad_client_id, read_workload_identity_client_id())
-    kubectl_apply_yaml(airflow_osdu_configmap(audience), "apply spi-airflow-osdu ConfigMap")
+    data = osdu.get("data") or {}
+    audience = token_audience(data.get("AAD_CLIENT_ID", ""), read_workload_identity_client_id())
+    kubectl_apply_yaml(
+        airflow_osdu_configmap(audience, data.get("PRIMARY_PARTITION", "")),
+        "apply spi-airflow-osdu ConfigMap",
+    )
 
 
 def _create_istio_auth(config: Config, infra_outputs: dict) -> None:
@@ -648,6 +654,7 @@ def deploy_azure(
     deployer_principal: Optional[Tuple[str, str]] = None,
     declared: Optional[Declared] = None,
     sizing: Optional[dict[str, str]] = None,
+    dags: Optional[tuple[str, ...]] = None,
 ) -> None:
     """Provision Azure infra, bootstrap Kubernetes, deploy via GitOps.
 
@@ -655,7 +662,7 @@ def deploy_azure(
     bootstrap and GitOps activation are skipped. A ``declared`` environment
     takes its fork trust and source policy from the declaration, not from the
     records the resource group retained. ``sizing`` replaces what `spi-sizing`
-    holds on core; None leaves it as it is.
+    holds on core, and ``dags`` what `spi-dags` selects; None leaves either as it is.
     """
     resolved_images: dict[str, ResolvedImage] = {}
     sources: dict[str, str] = {}
@@ -700,6 +707,8 @@ def deploy_azure(
     _ensure_image_lock(config, refresh_images, resolved_images, sources)
     if sizes:
         apply_sizing(sizing)
+    if dags is not None and config.profile is Profile.CORE:
+        apply_dag_selection(dags)
     _project_trusted_repos(config, declared)
     _create_osdu_config(config, infra_outputs)
     _create_istio_auth(config, infra_outputs)

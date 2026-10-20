@@ -13,12 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Register the declared OSDU DAGs with the workflow service and unpause them.
+"""Reconcile selected OSDU DAG families with Workflow and Airflow.
 
-Waits until Airflow has parsed exactly the DAG IDs dag-sources.yaml declares,
-with no import error in their families, then registers each as a system
-workflow and unpauses it. Every step is idempotent, so a re-run after a
-partial failure converges. Any failure exits non-zero.
+Selects default families plus the comma-separated SPI_DAG_FAMILIES names.
+Waits for exactly their live DAGs, ignoring stale and deselected catalog DAGs,
+with no import errors in selected families, then registers and unpauses them.
+Deselected catalog workflows bearing this script's exact description marker
+are paused and deregistered. DATA_PARTITION is required for their read-by-name,
+which falls back to system workflows; a listing guards against tenant records
+shadowing foreign system metadata. System writes never send that header.
+Every step is idempotent, so a re-run after a partial failure converges.
+Any failure exits non-zero.
 """
 
 from __future__ import annotations
@@ -50,8 +55,12 @@ class _Transient(Exception):
     pass
 
 
-def _send(method: str, url: str, *, token=None, body=None, form=None, expected=(200,)):
+def _send(
+    method: str, url: str, *, token=None, body=None, form=None, expected=(200,), partition=None
+):
     headers = {"Accept": "application/json"}
+    if partition is not None:
+        headers["data-partition-id"] = partition
     data = None
     if body is not None:
         data = json.dumps(body).encode()
@@ -107,6 +116,20 @@ def declared_dags(sources: dict) -> dict[str, str]:
     return owners
 
 
+def selected_families(sources: dict, requested: str = "") -> list[str]:
+    """Return default and explicitly requested family names in catalog order."""
+    families = sources.get("families") or []
+    extra = {name.strip() for name in requested.split(",") if name.strip()}
+    unknown = extra - {family["name"] for family in families}
+    if unknown:
+        raise RegistrationError(f"Unknown DAG families: {', '.join(sorted(unknown))}")
+    return [
+        family["name"]
+        for family in families
+        if family.get("default") is True or family["name"] in extra
+    ]
+
+
 def family_of(filename: str) -> str:
     """The family directory a parsed file sits in, absolute or bundle-relative."""
     path = PurePosixPath(filename)
@@ -151,10 +174,14 @@ def osdu_token() -> str:
 
 
 def parse_state(url: str, token: str, families: set[str]) -> tuple[set[str], list[str]]:
-    """Return the parsed DAG IDs and the import errors in the declared families."""
-    _, dags = request("GET", f"{url}/api/v2/dags?limit=1000", token=token)
+    """Return live DAG IDs and import errors in the selected families."""
+    _, dags = request("GET", f"{url}/api/v2/dags?limit=1000&exclude_stale=true", token=token)
     _, errors = request("GET", f"{url}/api/v2/importErrors?limit=1000", token=token)
-    parsed = {dag["dag_id"] for dag in dags.get("dags") or []}
+    parsed = {
+        dag["dag_id"]
+        for dag in dags.get("dags") or []
+        if not dag.get("is_stale", False) and dag.get("is_active", True)
+    }
     failures = [
         error["filename"]
         for error in errors.get("import_errors") or []
@@ -163,11 +190,13 @@ def parse_state(url: str, token: str, families: set[str]) -> tuple[set[str], lis
     return parsed, failures
 
 
-def wait_for_parse(url: str, wanted: set[str], families: set[str]) -> None:
+def wait_for_parse(
+    url: str, wanted: set[str], families: set[str], deselected: set[str] | None = None
+) -> None:
     deadline = time.monotonic() + PARSE_TIMEOUT_SECONDS
     while True:
         parsed, failures = parse_state(url, airflow_token(url), families)
-        missing, extra = wanted - parsed, parsed - wanted
+        missing, extra = wanted - parsed, parsed - wanted - (deselected or set())
         if not missing and not extra and not failures:
             print(f"Airflow parsed exactly the {len(wanted)} declared DAGs", flush=True)
             return
@@ -178,6 +207,10 @@ def wait_for_parse(url: str, wanted: set[str], families: set[str]) -> None:
         time.sleep(POLL_SECONDS)
 
 
+def workflow_description(dag_id: str, family: str) -> str:
+    return f"{dag_id} from the {family} DAG family"
+
+
 def register(workflow_url: str, token: str, dag_id: str, family: str) -> str:
     # The Azure workflow engine triggers the DAG named by workflowName.
     status, _ = request(
@@ -186,7 +219,7 @@ def register(workflow_url: str, token: str, dag_id: str, family: str) -> str:
         token=token,
         body={
             "workflowName": dag_id,
-            "description": f"{dag_id} from the {family} DAG family",
+            "description": workflow_description(dag_id, family),
             "registrationInstructions": {},
         },
         expected=(200, 201, 409),
@@ -203,20 +236,100 @@ def unpause(url: str, token: str, dag_id: str) -> None:
     )
 
 
+def deregister(
+    workflow_url: str,
+    token: str,
+    dag_id: str,
+    family: str,
+    *,
+    airflow_url: str,
+    airflow_access_token: str,
+    partition: str,
+) -> None:
+    name = urllib.parse.quote(dag_id, safe="")
+    # There is no system GET; the partition-scoped lookup falls back to system metadata.
+    status, workflow = request(
+        "GET",
+        f"{workflow_url}/workflow/{name}",
+        token=token,
+        partition=partition,
+        expected=(200, 404),
+    )
+    if (
+        status == 404
+        or workflow.get("workflowName") != dag_id
+        or workflow.get("description") != workflow_description(dag_id, family)
+    ):
+        print(f"{dag_id}: not registered", flush=True)
+        return
+    # A tenant record shadows system metadata in the name lookup; reject foreign collisions.
+    status, workflows = request(
+        "GET",
+        f"{workflow_url}/workflow?prefix={name}",
+        token=token,
+        partition=partition,
+        expected=(200, 404),
+    )
+    matches = (
+        [workflow for workflow in workflows if workflow.get("workflowName") == dag_id]
+        if status == 200
+        else []
+    )
+    if not matches or any(
+        workflow.get("description") != workflow_description(dag_id, family) for workflow in matches
+    ):
+        print(f"{dag_id}: not registered", flush=True)
+        return
+    # Keep the ownership marker until pausing succeeds, so interrupted cleanup can retry.
+    status, _ = request(
+        "PATCH",
+        f"{airflow_url}/api/v2/dags/{name}",
+        token=airflow_access_token,
+        body={"is_paused": True},
+        expected=(200, 404),
+    )
+    if status == 200:
+        print(f"{dag_id}: paused", flush=True)
+    status, _ = request(
+        "DELETE",
+        f"{workflow_url}/workflow/system/{name}",
+        token=token,
+        expected=(204, 404),
+    )
+    print(f"{dag_id}: {'deregistered' if status == 204 else 'not registered'}", flush=True)
+
+
 def main() -> int:
     airflow_url = os.environ["AIRFLOW_URL"].rstrip("/")
     workflow_url = os.environ["WORKFLOW_URL"].rstrip("/")
     try:
         sources = yaml.safe_load(SOURCES_PATH.read_text(encoding="utf-8")) or {}
         owners = declared_dags(sources)
-        wait_for_parse(airflow_url, set(owners), set(owners.values()))
-        token = osdu_token()
-        for dag_id, family in sorted(owners.items()):
-            print(f"{dag_id}: {register(workflow_url, token, dag_id, family)}", flush=True)
-        token = airflow_token(airflow_url)
-        for dag_id in sorted(owners):
-            unpause(airflow_url, token, dag_id)
+        families = selected_families(sources, os.environ.get("SPI_DAG_FAMILIES", ""))
+        print(f"families selected: {', '.join(families)}", flush=True)
+        wanted = {dag: family for dag, family in owners.items() if family in families}
+        deselected = {dag: family for dag, family in owners.items() if family not in families}
+        partition = os.environ.get("DATA_PARTITION", "").strip()
+        if deselected and not partition:
+            raise RegistrationError("DATA_PARTITION is required to inspect deselected workflows")
+        wait_for_parse(airflow_url, set(wanted), set(families), set(deselected))
+        workflow_token = osdu_token()
+        for dag_id, family in sorted(wanted.items()):
+            print(f"{dag_id}: {register(workflow_url, workflow_token, dag_id, family)}", flush=True)
+        api_token = airflow_token(airflow_url)
+        for dag_id in sorted(wanted):
+            unpause(airflow_url, api_token, dag_id)
             print(f"{dag_id}: unpaused", flush=True)
+        for dag_id, family in sorted(deselected.items()):
+            deregister(
+                workflow_url,
+                workflow_token,
+                dag_id,
+                family,
+                airflow_url=airflow_url,
+                airflow_access_token=api_token,
+                partition=partition,
+            )
     except (RegistrationError, OSError, KeyError, yaml.YAMLError) as error:
         print(f"Workflow registration failed: {error}", file=sys.stderr, flush=True)
         return 1

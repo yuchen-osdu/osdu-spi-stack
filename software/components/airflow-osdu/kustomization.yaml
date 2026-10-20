@@ -12,22 +12,38 @@ resources:
 configMapGenerator:
   - name: airflow-osdu-dags
     namespace: platform
+    # Scripts and DAG files: Flux postBuild substitution must not touch them.
     options:
       disableNameSuffixHash: true
+      annotations:
+        kustomize.toolkit.fluxcd.io/substitute: disabled
     files:
       - load_dags.py
       - dag-sources.yaml
       - requirements.txt
       - echo_dag.py
       - airflow_monitoring.py
+      - render-values.yaml
   - name: airflow-osdu-dags-revision
     namespace: osdu-flux
+    options:
+      annotations:
+        kustomize.toolkit.fluxcd.io/substitute: disabled
     files:
       - load_dags.py
       - dag-sources.yaml
       - requirements.txt
       - echo_dag.py
       - airflow_monitoring.py
+      - render-values.yaml
+      - airflow-variables.env
+  # Airflow Variables for every Airflow container (release-patch extraEnvFrom).
+  - name: airflow-osdu-variables
+    namespace: platform
+    options:
+      disableNameSuffixHash: true
+    envs:
+      - airflow-variables.env
   # Carries the same hashed name to spi-osdu-workflow-registration through
   # postBuild substitution, so a new DAG set re-runs registration too.
   - name: airflow-osdu-dags-state

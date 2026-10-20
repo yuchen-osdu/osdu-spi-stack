@@ -131,12 +131,14 @@ metadata:
 """
 
 
-def airflow_osdu_configmap(azure_resource_id: str) -> str:
+def airflow_osdu_configmap(azure_resource_id: str, data_partition: str) -> str:
     """Environment settings the core profile's Airflow scheduler reads.
 
     AZURE_RESOURCE_ID is the resource osdu-api requests task tokens for, so it
     must be an audience the osdu jwtRules accept: the one spi.info's
     token_audience derives for every other caller outside the services.
+    DATA_PARTITION is the primary partition, which the workflow registration
+    Job names to read a workflow back: Workflow has no system-scoped read.
     """
     return f"""\
 apiVersion: v1
@@ -148,6 +150,7 @@ metadata:
     app.kubernetes.io/managed-by: osdu-spi-stack
 data:
   AZURE_RESOURCE_ID: "{azure_resource_id}"
+  DATA_PARTITION: "{data_partition}"
 """
 
 

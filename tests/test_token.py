@@ -276,6 +276,7 @@ def test_airflow_tasks_mint_for_the_management_audience_by_default(monkeypatch):
 
     assert "namespace: platform\n" in applied
     assert 'AZURE_RESOURCE_ID: "https://management.azure.com"' in applied
+    assert f'DATA_PARTITION: "{Config.from_env("dev1").primary_partition}"' in applied
 
 
 def test_airflow_tasks_mint_for_an_overridden_app_registration(monkeypatch):
@@ -294,7 +295,7 @@ def test_reconcile_rederives_the_airflow_audience_from_live_config(aad_client_id
     with (
         patch(
             "spi.deploy.kubectl_json",
-            return_value={"data": {"AAD_CLIENT_ID": aad_client_id}},
+            return_value={"data": {"AAD_CLIENT_ID": aad_client_id, "PRIMARY_PARTITION": "opendes"}},
         ),
         patch("spi.deploy.read_workload_identity_client_id", return_value="uami-id"),
         patch("spi.deploy.kubectl_apply_yaml") as apply_yaml,
@@ -302,6 +303,7 @@ def test_reconcile_rederives_the_airflow_audience_from_live_config(aad_client_id
         deploy.refresh_airflow_osdu_config()
 
     assert f'AZURE_RESOURCE_ID: "{audience}"' in apply_yaml.call_args.args[0]
+    assert 'DATA_PARTITION: "opendes"' in apply_yaml.call_args.args[0]
 
 
 def test_reconcile_leaves_airflow_config_alone_without_osdu_config():
@@ -315,14 +317,17 @@ def test_reconcile_leaves_airflow_config_alone_without_osdu_config():
 
 
 def test_airflow_config_is_a_well_formed_configmap():
-    manifest = yaml.safe_load(airflow_osdu_configmap("https://management.azure.com"))
+    manifest = yaml.safe_load(airflow_osdu_configmap("https://management.azure.com", "opendes"))
 
     assert manifest["metadata"] == {
         "name": "spi-airflow-osdu",
         "namespace": "platform",
         "labels": {"app.kubernetes.io/managed-by": "osdu-spi-stack"},
     }
-    assert manifest["data"] == {"AZURE_RESOURCE_ID": "https://management.azure.com"}
+    assert manifest["data"] == {
+        "AZURE_RESOURCE_ID": "https://management.azure.com",
+        "DATA_PARTITION": "opendes",
+    }
 
 
 def test_workload_identity_sa_default_name_is_unchanged():

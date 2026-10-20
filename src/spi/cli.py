@@ -595,6 +595,18 @@ def _up_stack_file(path: Optional[Path], profile: Optional[Profile]) -> Optional
         raise typer.BadParameter(str(exc), param_hint="--file") from exc
 
 
+def _up_stack_dags(path: Optional[Path]) -> Optional[tuple[str, ...]]:
+    """The add-on DAG families a stack file selects, or None to leave the selection alone."""
+    from .environment import EnvironmentDeclarationError, load_stack_dags
+
+    if path is None:
+        return None
+    try:
+        return load_stack_dags(path)
+    except EnvironmentDeclarationError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--file") from exc
+
+
 def _declared_value(flag: str, given: Any, declared: Any) -> Any:
     """The declared value; an explicit option that disagrees with it is refused."""
     if given is not None and given != declared:
@@ -687,13 +699,15 @@ def up(
         "--file",
         "-f",
         help="Stack file that builds on core. Its resources: section sizes services and "
-        "middleware; without -f an existing sizing is left as it is.",
+        "middleware, and its dags: list adds DAG families; without -f an existing sizing "
+        "and DAG selection are left as they are.",
     ),
 ):
     """Provision Azure infrastructure and deploy the OSDU SPI stack."""
     # Argument errors surface before the first Azure read.
     _check_tag(tag, branch)
     sizing = _up_stack_file(stack_file, profile)
+    dags = _up_stack_dags(stack_file)
     declared = _up_declaration(env, declaration)
     if declared is not None:
         intent = declared.declaration
@@ -785,6 +799,7 @@ def up(
             deployer_principal=deployer_principal,
             declared=declared,
             sizing=sizing,
+            dags=dags,
         )
         if dry_run:
             console.print(

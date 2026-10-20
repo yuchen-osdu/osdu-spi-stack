@@ -233,6 +233,9 @@ spec:
     substituteFrom:
       - kind: ConfigMap
         name: airflow-osdu-dags-state
+      - kind: ConfigMap
+        name: spi-dags
+        optional: true
   # A new DAG revision changes the Job Pod template, an immutable field.
   force: true
   prune: true

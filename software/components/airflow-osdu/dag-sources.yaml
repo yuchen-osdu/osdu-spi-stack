@@ -1,11 +1,42 @@
 # DAG families the scheduler and dag-processor load at start (see ADR-044).
 #
-# Remote files are fetched at a full commit SHA and must match their sha256;
-# load_dags.py refuses anything else. Local files are keys of the same
-# ConfigMap. `dags` lists the DAG IDs each family must yield; registration
-# checks the parsed set against it and registers only these with Workflow.
+# load_dags.py loads every family marked `default: true`, plus the add-on
+# families SPI_DAG_FAMILIES names (spi up writes it from a stack file's
+# `dags:`), in catalog order, and fetches no other family. Any fetch, pin or
+# render failure, or a key this schema lacks, fails the whole load.
+# scripts/pin_dag_family.py prints the pins a family needs.
+#
+#   name        lowercase and unique; files land in /opt/airflow/dags/<name>/
+#   default     optional, false when absent: true loads it without a selection
+#   requires    optional list of services; spi up refuses the family when the
+#               stack does not deploy them, and the loader ignores it
+#   source      one of four types; `commit` is a full 40-character SHA, and
+#               the optional `strip_prefix` is a folder the files keep their
+#               path below
+#     local     the files are keys of this ConfigMap
+#     gitlab    url, project, commit, strip_prefix: each file fetched raw
+#     github    repository (owner/name), commit, strip_prefix: likewise
+#     archive   one tar.gz of the repository at the commit, from host gitlab
+#               (url, project) or github (repository). It takes the regular
+#               files below strip_prefix whose path below it matches an
+#               `include` glob (PurePosixPath.match, so it matches from the
+#               right; '**' is refused); links are skipped. `digest` is
+#               sha256:<hex> over their "<sha256>  <path>\n" lines sorted by
+#               path.
+#   files       every type but archive: `path` in the repository (local: the
+#               ConfigMap key) and, for gitlab and github, its `sha256`
+#   render      optional TOKEN: value map for families published as CImpl-style
+#               templates. After the pins are checked, every single-line
+#               {| ... |} span in the family's .py files holding TOKEN as a
+#               word becomes the value, verbatim. "@name" is the standard value
+#               `name` in render-values.yaml. A value for a token ending in
+#               IMAGE must pin a digest (@sha256:). A placeholder left over
+#               fails the load, as does any {| in a family without render.
+#   dags        the DAG IDs the family must yield; registration checks the
+#               parsed set against it and registers only these with Workflow
 families:
   - name: spi-smoke
+    default: true
     source:
       type: local
     files:
@@ -18,6 +49,7 @@ families:
   # ingestion-dags tag v0.30.0. osdu-ingest-r3-by-reference.py is left out until
   # its by-reference dataset flow is validated on Azure.
   - name: core-ingestion
+    default: true
     source:
       type: gitlab
       url: https://community.opengroup.org

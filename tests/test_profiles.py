@@ -21,6 +21,7 @@ Without these, an unbacked enum value deploys ~45 minutes of Azure infra and
 then stalls Flux on DependencyNotReady instead of failing up front.
 """
 
+import copy
 import itertools
 import json
 import re
@@ -129,14 +130,56 @@ def _built_resources(directory: Path, seen: set | None = None):
         return
 
     spec = yaml.safe_load(kustomization.read_text(encoding="utf-8")) or {}
+    built: list = []
     for entry in spec.get("resources", []):
         target = (directory / entry).resolve()
         if target.is_dir():
-            yield from _built_resources(target, seen)
+            built.extend(_built_resources(target, seen))
         elif target.is_file():
             for doc in yaml.safe_load_all(target.read_text(encoding="utf-8")):
                 if doc:
-                    yield target, doc
+                    built.append((target, doc))
+    for patch in spec.get("patches", []):
+        _apply_json6902(built, patch)
+    yield from built
+
+
+def _apply_json6902(built: list, patch: dict) -> None:
+    """Apply an inline JSON6902 patch the way kustomize does, for replace and add.
+
+    File-based strategic-merge patches only touch HelmRelease values, which no
+    test here inspects, so they are left out as before.
+    """
+    target = patch.get("target") or {}
+    ops = yaml.safe_load(patch["patch"]) if "patch" in patch else None
+    if not target or not isinstance(ops, list):
+        return
+    matched = [
+        doc
+        for _path, doc in built
+        if doc.get("kind") == target.get("kind")
+        and doc.get("metadata", {}).get("name") == target.get("name")
+        and str(doc.get("apiVersion", "")).startswith(target.get("group", ""))
+    ]
+    assert matched, f"patch target matches nothing: {target}"
+    for doc in matched:
+        for op in ops:
+            *parents, leaf = [
+                p.replace("~1", "/").replace("~0", "~") for p in op["path"][1:].split("/")
+            ]
+            node = doc
+            for part in parents:
+                node = node[int(part)] if isinstance(node, list) else node[part]
+            if op["op"] == "replace":
+                assert (int(leaf) < len(node)) if isinstance(node, list) else leaf in node, op
+                node[int(leaf) if isinstance(node, list) else leaf] = op["value"]
+            elif op["op"] == "add":
+                if isinstance(node, list):
+                    node.append(op["value"]) if leaf == "-" else node.insert(int(leaf), op["value"])
+                else:
+                    node[leaf] = op["value"]
+            else:
+                raise AssertionError(f"unmodelled JSON6902 op {op['op']}")
 
 
 def _rewritten_expansions(text: str) -> list:
@@ -411,6 +454,9 @@ class TestSubstitutionLeavesScriptsIntact:
         assert _rewritten_expansions("$" * dollars + "{VAR}") == []
 
 
+CORE_AIRFLOW_SUBSTITUTE_FROM = [{"kind": "ConfigMap", "name": "spi-dags", "optional": True}]
+
+
 class TestMinimalProfileScope:
     """The minimal profile is middleware-only: nothing at layer 5 or above."""
 
@@ -423,15 +469,28 @@ class TestMinimalProfileScope:
             )
 
     def test_core_runs_every_minimal_layer_unchanged(self):
-        """What is validated on minimal is what core runs."""
+        """What is validated on minimal is what core runs.
+
+        The one exception is spi-airflow: core points it at the overlay that
+        loads the OSDU DAGs, and reads the DAG selection (ADR-044). Its
+        dependencies, timeouts and every other field stay minimal's.
+        """
         minimal = {
             k["metadata"]["name"]: k
             for k in _flux_kustomizations(PROFILES_DIR / Profile.MINIMAL.value)
         }
         core = {
-            k["metadata"]["name"]: k
+            k["metadata"]["name"]: copy.deepcopy(k)
             for k in _flux_kustomizations(PROFILES_DIR / Profile.CORE.value)
         }
+        airflow = core["spi-airflow"]["spec"]
+        assert airflow["path"] == "./software/components/airflow-osdu"
+        airflow["path"] = minimal["spi-airflow"]["spec"]["path"]
+        airflow["postBuild"]["substituteFrom"] = [
+            source
+            for source in airflow["postBuild"]["substituteFrom"]
+            if source not in CORE_AIRFLOW_SUBSTITUTE_FROM
+        ]
         assert {name: core.get(name) for name in minimal} == minimal
 
 

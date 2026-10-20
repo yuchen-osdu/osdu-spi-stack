@@ -50,7 +50,7 @@ def _manifest(component: str) -> Path:
 def _sizing_placeholders(path: Path) -> dict:
     found: dict = {}
     for key, default in PLACEHOLDER.findall(path.read_text(encoding="utf-8")):
-        if key.endswith("_DO_NOT_DISRUPT"):
+        if key.endswith("_DO_NOT_DISRUPT") or key == "SPI_DAG_FAMILIES":
             continue
         assert found.setdefault(key, default) == default, f"{path.name}: {key} has two defaults"
     return found
@@ -58,7 +58,22 @@ def _sizing_placeholders(path: Path) -> dict:
 
 @pytest.mark.parametrize("component", sorted(sizing_defaults()))
 def test_manifest_carries_every_key_with_its_default(component):
-    assert _sizing_placeholders(_manifest(component)) == sizing_defaults()[component]
+    expected = sizing.MIDDLEWARE_DEFAULTS.get(component, sizing_defaults()[component])
+    assert _sizing_placeholders(_manifest(component)) == expected
+
+
+def test_core_airflow_overlay_carries_its_own_defaults():
+    """Core re-declares the scheduler and dag-processor sizes and adds parallelism."""
+    overlay = COMPONENTS / "airflow-osdu" / "release-patch.yaml"
+    assert _sizing_placeholders(overlay) == sizing.CORE_DEFAULTS["airflow"]
+    rendered = {**_sizing_placeholders(_manifest("airflow")), **_sizing_placeholders(overlay)}
+    assert rendered == sizing_defaults()["airflow"]
+
+
+def test_parallelism_is_a_whole_number():
+    assert sizing.overrides({"airflow": {"parallelism": 4}}) == {"AIRFLOW_PARALLELISM": "4"}
+    with pytest.raises(sizing.SizingError, match="whole number"):
+        sizing.overrides({"airflow": {"parallelism": 0}})
 
 
 def test_every_kustomization_applying_a_sized_manifest_reads_the_sizing_configmap():
