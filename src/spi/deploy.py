@@ -67,6 +67,7 @@ from .templates import (
     airflow_osdu_configmap,
     istio_auth_resources,
     osdu_config_configmap,
+    parse_init_values,
     spi_init_values_configmap,
     workload_identity_sa,
 )
@@ -177,24 +178,67 @@ def _create_istio_auth(config: Config, infra_outputs: dict) -> None:
     )
 
 
+def _operator_id(infra_outputs: dict) -> str:
+    """The id the mesh gives the token of the person running ``spi up``, or "".
+
+    The members Job seeds that id into the groups of the ``spi users`` admin
+    role, so whoever creates or updates the environment can call the APIs and
+    start ingestion runs as themselves. An application sign-in, an unreadable
+    token, or one of the environment's own identities yields "".
+    """
+    from .bootstrap import ClusterConfigError
+    from .identity import IdentityError, person_token
+
+    identity_client_id = infra_outputs.get("identity_client_id", "")
+    audience = token_audience(_resolve_aad_client_id(identity_client_id), identity_client_id)
+    try:
+        operator = person_token(resource=audience).user_id
+    except (ClusterConfigError, IdentityError) as exc:
+        console.print(f"  [warning]Not seeding you as an OSDU admin: {exc}[/warning]")
+        return ""
+    seeded = {
+        infra_outputs.get(key, "").lower()
+        for key in ("deploy_identity_client_id", "member_identity_client_id", "identity_client_id")
+    }
+    return "" if operator.lower() in seeded else operator
+
+
+def _live_operator() -> str:
+    """The operator the live spi-init-values already names, or ""."""
+    from .bootstrap import ClusterConfigError, read_init_values
+
+    try:
+        return str(parse_init_values(read_init_values()).get("entitlementsOperator") or "")
+    except ClusterConfigError:
+        return ""
+
+
 def _create_spi_init_values(config: Config, infra_outputs: dict) -> None:
     """Apply the spi-init-values ConfigMap that the osdu-spi-init HelmRelease
     consumes via valuesFrom. Must run before Flux reconciles the HelmRelease.
+
+    The person running ``spi up`` becomes the operator the members Job seeds as
+    an admin. When they cannot be named, the operator already recorded stays,
+    so the Job is not renamed and run again for nobody.
     """
     console.print("\n[bold]Creating SPI init values ConfigMap...[/bold]")
     members = [infra_outputs.get("deploy_identity_client_id", "")]
     member_users = [infra_outputs.get("member_identity_client_id", "")]
+    operator = _operator_id(infra_outputs) or _live_operator()
     yaml_content = spi_init_values_configmap(
         config.data_partitions,
         [m for m in members if m],
         member_users=[m for m in member_users if m],
         tenant_service_account=infra_outputs.get("identity_client_id", ""),
+        operator=operator,
     )
     display_yaml(yaml_content, "ConfigMap: spi-init-values")
     kubectl_apply_yaml(yaml_content, "apply spi-init-values ConfigMap")
     display_result(
         f"spi-init-values ConfigMap created for partitions: {', '.join(config.data_partitions)}"
     )
+    if operator:
+        display_result(f"{operator} will be seeded as an OSDU admin")
 
 
 def _resolve_image_lock(sources: dict[str, str] | None = None) -> dict[str, ResolvedImage]:

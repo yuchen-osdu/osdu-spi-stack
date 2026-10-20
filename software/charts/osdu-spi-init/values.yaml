@@ -36,6 +36,13 @@ entitlementsMembers: []
 #    the test caller who passes a service's role check but no data-manager check.
 entitlementsMemberUsers: []
 
+# -- The person who last ran spi up, as the x-user-id their own token
+#    presents. entitlements-members adds them to the groups of the spi users
+#    admin role (users, users.datalake.admins, users.datalake.ops, and
+#    users.datalake.impersonation), so whoever creates or updates an
+#    environment can call the APIs and start ingestion runs with their token.
+entitlementsOperator: ""
+
 # -- Bumped when entitlements-members seeds something new, so an environment
 #    whose member list is unchanged still renders a fresh Job. Must equal
 #    ENTITLEMENTS_MEMBERS_GENERATION in the CLI, which computes the Job name.
@@ -85,8 +92,8 @@ activeDeadlineSeconds: 600
 legalActiveDeadlineSeconds: 3600
 
 # -- activeDeadlineSeconds for the members Jobs. init_members.py's worst case
-#    is 2405 s; test_members_deadline_covers_its_wait_budget recomputes it.
-membersActiveDeadlineSeconds: 2460
+#    is 2525 s; test_members_deadline_covers_its_wait_budget recomputes it.
+membersActiveDeadlineSeconds: 2580
 
 # -- The scripts treat 409 as success, so a retried failure is a real error.
 backoffLimit: 2

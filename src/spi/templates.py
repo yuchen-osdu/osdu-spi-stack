@@ -312,6 +312,7 @@ def spi_init_values_configmap(
     legal_tag: str = LEGAL_TAG_BASE,
     member_users: Sequence[str] = (),
     tenant_service_account: str = "",
+    operator: str = "",
 ) -> str:
     """ConfigMap consumed by the osdu-spi-init HelmRelease via valuesFrom.
 
@@ -324,13 +325,16 @@ def spi_init_values_configmap(
     empty so the chart renders no Job. ``member_users`` are seeded into
     users, the service user groups, and service.storage.admin only.
     ``tenant_service_account`` is the OSDU workload identity's client id,
-    written to every partition record.
+    written to every partition record. ``operator`` is the person who last
+    ran ``spi up``, seeded into the groups of the ``admin`` role.
     """
     partition_lines = "\n".join(f"    - {p}" for p in partitions)
     member_lines = "".join(f"    - {m}\n" for m in sorted(set(members)))
     members_block = f"    entitlementsMembers:\n{member_lines}" if member_lines else ""
     user_lines = "".join(f"    - {m}\n" for m in sorted(set(member_users)))
     members_block += f"    entitlementsMemberUsers:\n{user_lines}" if user_lines else ""
+    if operator:
+        members_block += f"    entitlementsOperator: {json.dumps(operator)}\n"
     if tenant_service_account:
         members_block += f"    tenantServiceAccount: {tenant_service_account}\n"
     return f"""\
@@ -372,6 +376,11 @@ def parse_init_values(text: str) -> dict:
             continue
         value = value.strip()
         if value:
+            if len(value) >= 2 and value[0] == value[-1] == '"':
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    pass
             parsed[key.strip()] = value
             current = None
         else:
@@ -381,19 +390,28 @@ def parse_init_values(text: str) -> dict:
 
 
 def entitlements_members_job_name(
-    partition: str, members: Sequence[str], member_users: Sequence[str] = ()
+    partition: str,
+    members: Sequence[str],
+    member_users: Sequence[str] = (),
+    operator: str = "",
 ) -> str:
     """The Job name the chart renders for these member lists.
 
     Must match templates/entitlements-members.yaml: each list sortAlpha and
-    join ",", seeded as "<admins>|<users>#<generation>", or "<admins>#<generation>"
-    with no member users so existing Jobs keep their name, then sha256sum,
-    trunc 8. A render test holds the two together.
+    join ",", seeded as "<admins>|<users>|<operator>#<generation>" with an
+    operator, "<admins>|<users>#<generation>" with member users only, or
+    "<admins>#<generation>" with neither so existing Jobs keep their name,
+    then sha256sum, trunc 8. A render test holds the two together.
     """
     admins = ",".join(sorted(set(members)))
     users = ",".join(sorted(set(member_users)))
     generation = ENTITLEMENTS_MEMBERS_GENERATION
-    seed = f"{admins}|{users}#{generation}" if users else f"{admins}#{generation}"
+    if operator:
+        seed = f"{admins}|{users}|{operator}#{generation}"
+    elif users:
+        seed = f"{admins}|{users}#{generation}"
+    else:
+        seed = f"{admins}#{generation}"
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8]
     return f"{ENTITLEMENTS_MEMBERS_COMPONENT}-{partition}-{digest}"
 

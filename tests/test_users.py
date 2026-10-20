@@ -460,9 +460,15 @@ def invoke(monkeypatch, served, clock):
             patch("spi.users.load_environment", return_value=env),
             patch("spi.token.mint_token", return_value=minted),
             patch("spi.identity.person_token", return_value=signed_in),
+            patch("spi.bootstrap.release_operator", return_value=released) as release,
         ):
-            return runner.invoke(cli.app, ["users", *args]), server
+            outcome = runner.invoke(cli.app, ["users", *args]), server
+        releases.extend(call.args for call in release.call_args_list)
+        return outcome
 
+    releases: list = []
+    released = False
+    run.releases = releases
     return run
 
 
@@ -583,3 +589,14 @@ def test_remove_me_removes_the_signed_in_person(invoke):
     assert result.exit_code == 0
     assert "removed" in result.output
     assert ALICE not in server.groups["users"]
+    assert invoke.releases == [(ALICE,)]
+
+
+def test_removal_from_one_partition_keeps_the_operator_seeded(invoke):
+    two = users.Environment(BASE, ("opendes", "second"), DOMAIN, ENV.seeded)
+
+    result, _ = invoke(["remove", "--me", "--partition", "second", "--json"], env=two)
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["operatorReleased"] is False
+    assert invoke.releases == []

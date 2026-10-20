@@ -31,7 +31,7 @@ The core profile loads pinned DAG files and hash-locked libraries into the stock
 - **A run's caller must be impersonable.**
   - `osdu-api` sends `on-behalf-of` and `x-on-behalf-of` with the run's `userId` on every service call, unless the ID ends in `@service.local` or starts with `service-account-`.
   - Entitlements accepts the header only when the token's identity is in `users.datalake.delegation` and the named user is in `users.datalake.impersonation`. The OSDU identity is in both.
-  - The `entitlements-members` Job (ADR-015) adds the deploy identity to `users.datalake.impersonation`, so an ingestion run it starts through the workflow service can read schemas and write records. The `spi users add` roles that can start a run add a person to it too (ADR-039).
+  - The `entitlements-members` Job (ADR-015) adds the deploy identity to `users.datalake.impersonation`, so an ingestion run it starts through the workflow service can read schemas and write records. It also seeds the person who last ran `spi up` as an `admin`, and the `spi users add` roles that can start a run add a person to it too (ADR-039).
 - **Variables are environment-backed.** `AIRFLOW_VAR_CORE__SERVICE__*` carry `http://<service>.osdu.svc.cluster.local/api/...` on both components, because operators read some of them when the DAG file is parsed.
 - **The workflow service uses its Airflow 3 engine.**
   - `software/stacks/osdu/services/workflow.yaml` sets `OSDU_AIRFLOW_VERSION=airflow3` and `OSDU_AIRFLOW_AIRFLOW3_URL=http://airflow-api-server.platform.svc.cluster.local:8080/airflow`.

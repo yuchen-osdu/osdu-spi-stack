@@ -42,6 +42,7 @@ import pytest
 import yaml
 from _quantities import _millicores
 
+from spi import users
 from spi.shell import run_process
 from spi.templates import ENTITLEMENTS_MEMBERS_GENERATION, entitlements_members_job_name
 
@@ -226,6 +227,38 @@ def test_members_job_name_covers_member_users():
     assert env["MEMBER_USERS"] == "member-client-id"
 
 
+def test_members_job_name_covers_the_operator():
+    """A new person running spi up renders a new Job, under the name the CLI
+    computes, so the Job seeds them; the same person again changes nothing."""
+    members = ["deployer-client-id"]
+    sets = {
+        "coreEnabled": "false",
+        "legalEnabled": "false",
+        "entitlementsMembers[0]": members[0],
+        "entitlementsMemberUsers[0]": "member-client-id",
+    }
+    job = _jobs(
+        _render(["opendes"], {**sets, "entitlementsOperator": "alice@contoso.com"}),
+        "entitlements-members",
+    )[0]
+
+    assert job["metadata"]["name"] == entitlements_members_job_name(
+        "opendes", members, ["member-client-id"], "alice@contoso.com"
+    )
+    assert job["metadata"]["name"] != entitlements_members_job_name(
+        "opendes", members, ["member-client-id"]
+    )
+    env = {
+        e["name"]: e.get("value") for e in job["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["OPERATOR"] == "alice@contoso.com"
+
+    plain = _jobs(_render(["opendes"], sets), "entitlements-members")[0]
+    assert plain["metadata"]["name"] == entitlements_members_job_name(
+        "opendes", members, ["member-client-id"]
+    )
+
+
 def test_members_job_name_keeps_the_legacy_seed_without_member_users():
     """Before member users existed the seed was "<admins>#<generation>"; an
     environment with none must still render under that name, or a chart
@@ -370,6 +403,7 @@ def test_members_deadline_covers_its_wait_budget(init_scripts):
         + 1
         + 2 * const["MAX_USER_GROUPS"]
         + 2 * len(const["MEMBER_USER_GROUPS"])
+        + len(const["OPERATOR_GROUPS"])
     )
     assert const["REQUEST_BUDGET"] >= _TOKEN_TIMEOUT + calls * const["REQUEST_TIMEOUT"]
     budget += const["PARTITION_WAIT"] + const["PARTITION_RETRY_DELAY"] + const["REQUEST_TIMEOUT"]
@@ -592,7 +626,14 @@ def _groups_listing(names=tuple(_ALL_GROUPS)) -> bytes:
 
 
 def _run_members(
-    init_scripts, monkeypatch, capsys, *, members="deployer-client-id", member_users="", **routes
+    init_scripts,
+    monkeypatch,
+    capsys,
+    *,
+    members="deployer-client-id",
+    member_users="",
+    operator="",
+    **routes,
 ):
     """Execute init_members.py against a routed fake of urlopen.
 
@@ -603,6 +644,7 @@ def _run_members(
     monkeypatch.setenv("PARTITION", "opendes")
     monkeypatch.setenv("MEMBERS", members)
     monkeypatch.setenv("MEMBER_USERS", member_users)
+    monkeypatch.setenv("OPERATOR", operator)
     termination_log = Path(tempfile.mkdtemp()) / "termination-log"
     monkeypatch.setenv("TERMINATION_MESSAGE_PATH", str(termination_log))
     auth = types.ModuleType("auth")
@@ -693,6 +735,52 @@ def test_members_seeds_member_users_into_the_user_groups_and_storage_admin_only(
     assert member_posts == set(_USER_GROUPS.values())
     admin_posts = {g for m, g in posts if m == "deployer-client-id"}
     assert admin_posts == set(_GROUPS.values())
+
+
+def test_members_seeds_the_operator_into_the_admin_role_groups_only(
+    init_scripts, monkeypatch, capsys
+):
+    """The person who ran spi up gets exactly what spi users add gives an
+    admin, impersonation included, and no further listing is read for them."""
+    result = _run_members(init_scripts, monkeypatch, capsys, operator="alice@contoso.com")
+
+    assert result.exit_code == 0
+    assert "entitlements-members outcome: seeded" in result.stdout
+    operator_posts = {
+        p.url.rsplit("/groups/", 1)[1].removesuffix("/members")
+        for p in result.routed("post")
+        if json.loads(p.body)["email"] == "alice@contoso.com"
+    }
+    assert operator_posts == {_GROUPS[g] for g in users.ROLE_PRESETS["admin"]}
+    assert len(result.routed("get")) == len(_GROUPS)
+
+
+def test_the_operator_groups_are_the_spi_users_admin_role(init_scripts):
+    const = _script_constants(init_scripts["init_members.py"])
+    assert set(const["OPERATOR_GROUPS"]) == set(users.ROLE_PRESETS["admin"])
+    assert set(const["OPERATOR_GROUPS"]) <= set(const["ROOT_GROUPS"])
+
+
+def test_members_fails_closed_when_the_operator_is_refused(init_scripts, monkeypatch, capsys):
+    """The deploy identity's writes come first; the operator's first write is
+    refused, and the Job names the operator in its typed outcome."""
+    deploy_writes = len(_GROUPS)
+    posts: list[str] = []
+
+    def post(url):
+        posts.append(url)
+        if len(posts) > deploy_writes:
+            return _http_error(400, b'{"message":"bad member"}')(url)
+        return _FakeResponse(200, b"{}")
+
+    result = _run_members(
+        init_scripts, monkeypatch, capsys, operator="alice@contoso.com", post=post
+    )
+
+    assert result.exit_code == 1
+    assert "entitlements-members outcome: member_rejected" in result.stdout
+    assert "alice@contoso.com was not added" in result.termination_message
+    assert len(posts) == deploy_writes + 1
 
 
 def test_members_fails_closed_when_the_listing_exceeds_max_user_groups(

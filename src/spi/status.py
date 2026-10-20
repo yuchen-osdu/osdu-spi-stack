@@ -358,8 +358,10 @@ def _read_expected_members_jobs() -> list[str]:
     if not members:
         return []
     users = [m for m in values.get("entitlementsMemberUsers") or [] if isinstance(m, str)]
+    operator = str(values.get("entitlementsOperator") or "")
     return [
-        entitlements_members_job_name(p, members, users) for p in values.get("partitions") or []
+        entitlements_members_job_name(p, members, users, operator)
+        for p in values.get("partitions") or []
     ]
 
 

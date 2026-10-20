@@ -214,7 +214,8 @@ credentials and source projections; the ensure step repairs test-caller
 entitlements: `spi up` and `spi reconcile` write the deploy identity's client
 id into `spi-init-values`, and the `entitlements-members` Job in the
 non-gating `spi-osdu-members` Kustomization adds it to the root groups
-of every partition, reporting through `entitlements_seeded` in
+of every partition, and adds the person who ran `spi up` to the `admin`
+role's groups (ADR-039), reporting through `entitlements_seeded` in
 `spi info --json`. A Job name carries a hash of the member list, so a
 recreated identity renders a new Job and an unchanged one is left Complete.
 A failed Job is the `bootstrap_failed` blocker in `spi status --json`
