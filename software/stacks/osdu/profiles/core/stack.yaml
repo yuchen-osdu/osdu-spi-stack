@@ -210,7 +210,7 @@ spec:
 
 ---
 # Layer 6: registers the loaded DAGs as system workflows and unpauses them
-# (ADR-043). Non-gating: a failed registration leaves ingestion unavailable
+# (ADR-044). Non-gating: a failed registration leaves ingestion unavailable
 # but blocks nothing else, and spi status reports it.
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization

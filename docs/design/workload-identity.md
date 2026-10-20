@@ -171,7 +171,7 @@ person's token until it answers 200, for up to a minute.
 
 Every role that can start a workflow run is impersonable, because an ingestion
 DAG calls the services on behalf of the run's user
-([ADR-043](../decisions/043-osdu-dags-load-at-airflow-start-on-core.md)).
+([ADR-044](../decisions/044-osdu-dags-load-at-airflow-start-on-core.md)).
 Running `add` with another role replaces the role. `spi users add <id>` writes
 the same groups for an id typed for someone else and verifies nothing.
 `spi users list` shows each partition's members with kind and role, and

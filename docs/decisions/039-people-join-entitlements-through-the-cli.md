@@ -35,7 +35,7 @@ from the CLI, and `spi token --me` prints the person's own bearer.
   `editor`, `admin`, and `ops` also hold `users.datalake.impersonation`: their
   groups are in `service.workflow.creator`, and an ingestion DAG a person
   starts calls each service on that person's behalf, which entitlements
-  allows only for an impersonable user (ADR-043). A viewer cannot start a run.
+  allows only for an impersonable user (ADR-044). A viewer cannot start a run.
   The default is `admin`. Running `add` again with another role removes the
   other presets' groups, then adds that preset's groups; `users` stays. When
   an addition fails, the preset's groups the person did not hold before the

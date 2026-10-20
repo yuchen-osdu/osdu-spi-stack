@@ -1,5 +1,5 @@
 # Registers the DAGs dag-sources.yaml declares as system workflows and
-# unpauses them (ADR-043). It runs in platform, beside the ConfigMap that
+# unpauses them (ADR-044). It runs in platform, beside the ConfigMap that
 # declares the DAGs and the Airflow login, as the OSDU workload identity that
 # platform/workload-identity-sa federates to. The DAG configuration revision
 # in the Pod template changes with any loaded file, and the Kustomization's

@@ -1,7 +1,7 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 # The core profile's Airflow: the base release plus the pinned OSDU DAGs, the
-# hash-locked libraries, and the settings tasks need to reach OSDU (ADR-043).
+# hash-locked libraries, and the settings tasks need to reach OSDU (ADR-044).
 resources:
   - ../airflow
 

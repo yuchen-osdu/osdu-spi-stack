@@ -414,7 +414,7 @@ adds its client id to `users`,
 `users.datalake.delegation`, and `users.datalake.impersonation` for every
 partition, creating both impersonation groups first when the Azure tenant
 bootstrap has not. Impersonation membership lets an ingestion DAG the deploy
-identity starts call the services on its behalf (ADR-043). A new Job runs when the environment is built, the identity changes, or
+identity starts call the services on its behalf (ADR-044). A new Job runs when the environment is built, the identity changes, or
 the chart's seed generation is bumped. `spi info --json` reports
 `entitlements_domain` from `SERVICE_DOMAIN_NAME` on the live
 `osdu-entitlements` Deployment, with an empty value before that Deployment

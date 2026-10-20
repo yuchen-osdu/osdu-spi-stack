@@ -1,4 +1,4 @@
-# DAG families the scheduler and dag-processor load at start (see ADR-043).
+# DAG families the scheduler and dag-processor load at start (see ADR-044).
 #
 # Remote files are fetched at a full commit SHA and must match their sha256;
 # load_dags.py refuses anything else. Local files are keys of the same

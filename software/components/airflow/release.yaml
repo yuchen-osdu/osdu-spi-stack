@@ -29,7 +29,7 @@ spec:
     defaultAirflowTag: "3.2.2"
 
     # Tasks run as scheduler subprocesses, so no task pod needs its own DAGs,
-    # libraries, identity or admission-compliant template (ADR-043).
+    # libraries, identity or admission-compliant template (ADR-044).
     executor: LocalExecutor
 
     postgresql:

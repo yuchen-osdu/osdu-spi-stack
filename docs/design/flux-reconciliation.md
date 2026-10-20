@@ -74,7 +74,7 @@ tree reconciles under `minimal`.
 Legal-tag and entitlements-member seeding are non-gating branches:
 reference services wait for schema load, without depending on
 `spi-osdu-legal` or `spi-osdu-members`. Workflow registration is non-gating
-too: its Job re-runs when the loaded DAG set changes (ADR-043). Fork RBAC is
+too: its Job re-runs when the loaded DAG set changes (ADR-044). Fork RBAC is
 also independent of the middleware and service readiness chain.
 
 A downstream error may name only its direct dependency. Follow that dependency

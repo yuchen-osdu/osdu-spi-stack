@@ -7,7 +7,7 @@ spec:
   values:
     config:
       core:
-        # Tasks run inside the scheduler (ADR-043), so this caps the task
+        # Tasks run inside the scheduler (ADR-044), so this caps the task
         # processes its memory limit has to hold.
         parallelism: "8"
         # The registration Job unpauses exactly the declared DAG IDs.
