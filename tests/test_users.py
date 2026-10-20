@@ -448,7 +448,13 @@ def test_an_unknown_partition_is_refused():
 
 
 @pytest.fixture
-def invoke(monkeypatch, served, clock):
+def releases():
+    """Members `spi users remove` asked to stop seeding as the operator."""
+    return []
+
+
+@pytest.fixture
+def invoke(monkeypatch, served, clock, releases):
     """Run a users command against a served entitlements, signed in as alice."""
 
     def run(args, *, person=ALICE, env=ENV, **kwargs):
@@ -460,15 +466,12 @@ def invoke(monkeypatch, served, clock):
             patch("spi.users.load_environment", return_value=env),
             patch("spi.token.mint_token", return_value=minted),
             patch("spi.identity.person_token", return_value=signed_in),
-            patch("spi.bootstrap.release_operator", return_value=released) as release,
+            patch("spi.bootstrap.release_operator", return_value=False) as release,
         ):
             outcome = runner.invoke(cli.app, ["users", *args]), server
         releases.extend(call.args for call in release.call_args_list)
         return outcome
 
-    releases: list = []
-    released = False
-    run.releases = releases
     return run
 
 
@@ -583,20 +586,20 @@ def test_add_of_a_seeded_identity_exits_2(invoke):
     assert server.calls == []
 
 
-def test_remove_me_removes_the_signed_in_person(invoke):
+def test_remove_me_removes_the_signed_in_person(invoke, releases):
     result, server = invoke(["remove", "--me"], groups=admin_groups(ALICE))
 
     assert result.exit_code == 0
     assert "removed" in result.output
     assert ALICE not in server.groups["users"]
-    assert invoke.releases == [(ALICE,)]
+    assert releases == [(ALICE,)]
 
 
-def test_removal_from_one_partition_keeps_the_operator_seeded(invoke):
+def test_removal_from_one_partition_keeps_the_operator_seeded(invoke, releases):
     two = users.Environment(BASE, ("opendes", "second"), DOMAIN, ENV.seeded)
 
     result, _ = invoke(["remove", "--me", "--partition", "second", "--json"], env=two)
 
     assert result.exit_code == 0
     assert json.loads(result.stdout)["operatorReleased"] is False
-    assert invoke.releases == []
+    assert releases == []
