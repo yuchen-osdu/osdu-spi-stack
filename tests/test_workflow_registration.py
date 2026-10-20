@@ -201,6 +201,8 @@ def test_a_dag_declared_twice_is_rejected():
     ("requested", "expected"),
     [
         ("", ["spi-smoke", "core-ingestion"]),
+        # Flux's default when no add-on is selected.
+        ("none", ["spi-smoke", "core-ingestion"]),
         (" , \t, \n", ["spi-smoke", "core-ingestion"]),
         ("optional-first", ["optional-first", "spi-smoke", "core-ingestion"]),
         ("explicit-false", ["spi-smoke", "explicit-false", "core-ingestion"]),
@@ -223,7 +225,7 @@ def test_family_selection_preserves_catalog_order(requested, expected):
     assert register.selected_families(sources, requested) == expected
 
 
-@pytest.mark.parametrize("requested", [None, "", " , \t, \n"])
+@pytest.mark.parametrize("requested", [None, "", "none", " , \t, \n"])
 def test_defaults_only_ignore_deselected_dags(env, monkeypatch, capsys, requested):
     _add_family(env)
     if requested is not None:

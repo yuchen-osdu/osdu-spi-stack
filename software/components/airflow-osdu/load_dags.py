@@ -19,7 +19,8 @@ Runs as an init container on the scheduler and dag-processor. The catalog,
 dag-sources.yaml, names every DAG family; its header documents the schema.
 
 Selection: every family marked `default: true` loads, plus the families named
-in SPI_DAG_FAMILIES (comma-separated). A name the catalog lacks fails the load.
+in SPI_DAG_FAMILIES (comma-separated). `none`, Flux's default when no add-on is
+selected, names no family. A name the catalog lacks fails the load.
 Families load in catalog order, and a family that is not selected is never
 fetched.
 
@@ -69,6 +70,9 @@ _REPOSITORY = re.compile(r"^(?!\.\.?/)[A-Za-z0-9_.-]+/(?!\.\.?$)[A-Za-z0-9_.-]+$
 _TOKEN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _PINNED_IMAGE = re.compile(r"@sha256:[0-9a-f]{64}(?![0-9a-f])")
 # From an opening {| to its |} on the same line, or to the end of that line.
+# SPI_DAG_FAMILIES when no add-on is selected: Flux turns an empty default into
+# YAML null, which the Airflow chart refuses. No family may take the name.
+NO_SELECTION = "none"
 _LEFTOVER = re.compile(r"\{\|.*?(?:\|\}|$)", re.MULTILINE)
 _K8S_MODELS_IMPORT = re.compile(
     r"^\s*(from\s+kubernetes\.client\s+import\s+models\s+as\s+k8s_models"
@@ -452,7 +456,7 @@ def check_catalog(sources: object, values: dict[str, str], pinned: bool = True) 
     names = set()
     for family in families:
         name = family.get("name") if isinstance(family, dict) else None
-        if not isinstance(name, str) or not _NAME.match(name):
+        if not isinstance(name, str) or not _NAME.match(name) or name == NO_SELECTION:
             raise SourceError(f"invalid family name {name!r}")
         if name in names:
             raise SourceError(f"family names must be unique: {name}")
@@ -480,7 +484,7 @@ def read_values(config_dir: Path) -> dict[str, str]:
 
 def select(families: list[dict], requested: str) -> list[dict]:
     """The default families plus those `requested` names, in catalog order."""
-    names = {name.strip() for name in requested.split(",")} - {""}
+    names = {name.strip() for name in requested.split(",")} - {"", NO_SELECTION}
     unknown = sorted(names - {family["name"] for family in families})
     if unknown:
         raise SourceError(

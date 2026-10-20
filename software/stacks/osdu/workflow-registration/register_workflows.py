@@ -119,7 +119,8 @@ def declared_dags(sources: dict) -> dict[str, str]:
 def selected_families(sources: dict, requested: str = "") -> list[str]:
     """Return default and explicitly requested family names in catalog order."""
     families = sources.get("families") or []
-    extra = {name.strip() for name in requested.split(",") if name.strip()}
+    # "none" is Flux's default when no add-on is selected (see load_dags.py).
+    extra = {name.strip() for name in requested.split(",") if name.strip()} - {"none"}
     unknown = extra - {family["name"] for family in families}
     if unknown:
         raise RegistrationError(f"Unknown DAG families: {', '.join(sorted(unknown))}")

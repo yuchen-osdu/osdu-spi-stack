@@ -25,7 +25,7 @@ spec:
         azure.workload.identity/use: "true"
       annotations:
         spi-dag-config-revision: "${DAG_CONFIG_REVISION}"
-        spi-dag-families: "${SPI_DAG_FAMILIES:=}"
+        spi-dag-families: "${SPI_DAG_FAMILIES:=none}"
     spec:
       serviceAccountName: workload-identity-sa
       restartPolicy: Never
@@ -48,7 +48,7 @@ spec:
           env:
             # Add-on families on top of the catalog's defaults (spi-dags).
             - name: SPI_DAG_FAMILIES
-              value: "${SPI_DAG_FAMILIES:=}"
+              value: "${SPI_DAG_FAMILIES:=none}"
             - name: AIRFLOW_URL
               value: http://airflow-api-server.platform.svc.cluster.local:8080/airflow
             - name: AIRFLOW_USERNAME

@@ -299,6 +299,18 @@ def test_an_unknown_requested_family_fails_before_anything_is_written(three_fami
     assert [child.name for child in target.iterdir()] == ["previous.py"]
 
 
+def test_flux_default_none_selects_only_the_default_families():
+    families = [_local_family("core", default=True), _local_family("add-on")]
+
+    assert [f["name"] for f in load_dags.select(families, "none")] == ["core"]
+    assert [f["name"] for f in load_dags.select(families, "none,add-on")] == ["core", "add-on"]
+
+
+def test_no_family_may_be_named_none():
+    with pytest.raises(load_dags.SourceError, match="invalid family name 'none'"):
+        load_dags.check_catalog({"families": [_local_family("none")]}, {})
+
+
 def test_a_family_that_is_not_selected_is_never_fetched(dag_dirs, monkeypatch):
     config, _ = dag_dirs
     (config / "a.py").write_text("# a\n")

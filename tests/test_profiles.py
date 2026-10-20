@@ -973,3 +973,15 @@ class TestLoadRegistry:
         schemas = next(load for load in self._registry()["loads"] if load["name"] == "schemas")
         assert schemas["runner"] == "flux"
         assert schemas["source"] == {"type": "paired-image", "service": "schema"}
+
+
+def test_no_flux_placeholder_defaults_to_an_empty_value():
+    """Kustomize drops the quotes around a placeholder it renders, so Flux turns
+    an empty default into YAML null, which a schema expecting a string refuses."""
+    empty = re.compile(r"\$\{([A-Z0-9_]+):=\}")
+    offenders = [
+        f"{path.relative_to(REPO_ROOT)}: {match}"
+        for path in sorted((REPO_ROOT / "software").rglob("*.yaml"))
+        for match in empty.findall(path.read_text(encoding="utf-8"))
+    ]
+    assert offenders == []

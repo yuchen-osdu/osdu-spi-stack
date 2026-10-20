@@ -26,7 +26,7 @@ spec:
     scheduler:
       podAnnotations:
         spi-dag-config-revision: airflow-osdu-dags-revision
-        spi-dag-families: "${SPI_DAG_FAMILIES:=}"
+        spi-dag-families: "${SPI_DAG_FAMILIES:=none}"
       # osdu-api requests a token for the OSDU identity through this
       # ServiceAccount; nothing else in platform runs as it.
       serviceAccount:
@@ -64,7 +64,7 @@ spec:
           env:
             # Add-on families on top of the catalog's defaults (spi-dags).
             - name: SPI_DAG_FAMILIES
-              value: "${SPI_DAG_FAMILIES:=}"
+              value: "${SPI_DAG_FAMILIES:=none}"
           # An archive source is held in memory: up to 200 MiB, plus its files.
           resources:
             requests:
@@ -101,7 +101,7 @@ spec:
     dagProcessor:
       podAnnotations:
         spi-dag-config-revision: airflow-osdu-dags-revision
-        spi-dag-families: "${SPI_DAG_FAMILIES:=}"
+        spi-dag-families: "${SPI_DAG_FAMILIES:=none}"
       resources:
         requests:
           cpu: "${AIRFLOW_DAG_PROCESSOR_CPU_REQUEST:=100m}"
@@ -119,7 +119,7 @@ spec:
           env:
             # Add-on families on top of the catalog's defaults (spi-dags).
             - name: SPI_DAG_FAMILIES
-              value: "${SPI_DAG_FAMILIES:=}"
+              value: "${SPI_DAG_FAMILIES:=none}"
           # An archive source is held in memory: up to 200 MiB, plus its files.
           resources:
             requests:
