@@ -178,11 +178,7 @@ _ISTIO_CNI_NOT_READY = {
     "rules": [
         {
             "action": "Ignore",
-            "onExitCodes": {
-                "containerName": "istio-validation",
-                "operator": "In",
-                "values": [126],
-            },
+            "onExitCodes": {"operator": "In", "values": [126]},
         }
     ]
 }
@@ -202,6 +198,15 @@ def test_every_job_ignores_istio_cni_not_ready():
     for job in jobs:
         assert job["spec"]["podFailurePolicy"] == _ISTIO_CNI_NOT_READY, job["metadata"]["name"]
         assert job["spec"]["template"]["spec"]["restartPolicy"] == "Never"
+        # The API refuses a containerName the template lacks; Istio injects
+        # istio-validation at admission, so the rule must not name it.
+        names = {
+            c["name"]
+            for key in ("containers", "initContainers")
+            for c in job["spec"]["template"]["spec"].get(key) or []
+        }
+        for rule in job["spec"]["podFailurePolicy"]["rules"]:
+            assert rule["onExitCodes"].get("containerName") in names | {None}
 
     schema_load = yaml.safe_load(
         (REPO_ROOT / "software/stacks/osdu/schema-load/job.yaml").read_text(encoding="utf-8")

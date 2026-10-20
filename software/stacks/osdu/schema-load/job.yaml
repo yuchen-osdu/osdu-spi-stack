@@ -13,12 +13,12 @@ metadata:
 spec:
   backoffLimit: 2
   # A pod scheduled before Istio CNI is ready on a new node fails istio-validation
-  # with 126; that is no loader failure, so it uses no retry.
+  # with 126; that is no loader failure, so it uses no retry. No containerName:
+  # the injected container is not in this template, and the API refuses one.
   podFailurePolicy:
     rules:
       - action: Ignore
         onExitCodes:
-          containerName: istio-validation
           operator: In
           values: [126]
   # Counts from Job activation, before the Pod is scheduled: 1800s for node
