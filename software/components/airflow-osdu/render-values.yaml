@@ -4,8 +4,8 @@
 # expression the template places in code.
 #
 # They describe the worker pods KubernetesPodOperator starts from the
-# scheduler. Workers run beside it in platform as workload-identity-sa, the
-# OSDU Workload Identity. platform injects no Istio sidecar, and the AKS
+# scheduler. Workers run beside it in platform, on its nodes, as
+# workload-identity-sa, the OSDU Workload Identity. platform injects no Istio sidecar, and the AKS
 # Automatic Deployment Safeguards require requests, limits and a restricted
 # security context. worker_env holds Jinja that reads Airflow Variables when
 # the task runs, because KubernetesPodOperator templates env_vars.
@@ -23,6 +23,12 @@ values:
             "app.kubernetes.io/part-of": "osdu-dags",
         },
         "annotations": {"sidecar.istio.io/inject": "false"},
+        "node_selector": {"spi-pool": "platform"},
+        "tolerations": [
+            k8s_models.V1Toleration(
+                key="workload", operator="Equal", value="platform", effect="NoSchedule"
+            )
+        ],
         "container_resources": k8s_models.V1ResourceRequirements(
             requests={"cpu": "200m", "memory": "512Mi"},
             limits={"cpu": "1", "memory": "1Gi"},

@@ -645,12 +645,19 @@ def test_shipped_render_values_are_python_expressions_for_worker_pods():
         ast.parse(text, mode="eval")
     assert values["worker_namespace"] == "platform"
 
-    stub = SimpleNamespace(V1ResourceRequirements=lambda **fields: fields)
+    stub = SimpleNamespace(
+        V1ResourceRequirements=lambda **fields: fields, V1Toleration=lambda **fields: fields
+    )
     kwargs = eval(values["worker_pod_kwargs"], {"__builtins__": {}, "k8s_models": stub})
 
     assert kwargs["service_account_name"] == "workload-identity-sa"
     assert kwargs["labels"]["azure.workload.identity/use"] == "true"
     assert kwargs["annotations"] == {"sidecar.istio.io/inject": "false"}
+    # Workers land on the scheduler's nodes, not a node Karpenter adds for them.
+    assert kwargs["node_selector"] == {"spi-pool": "platform"}
+    assert kwargs["tolerations"] == [
+        {"key": "workload", "operator": "Equal", "value": "platform", "effect": "NoSchedule"}
+    ]
     assert kwargs["container_resources"] == {
         "requests": {"cpu": "200m", "memory": "512Mi"},
         "limits": {"cpu": "1", "memory": "1Gi"},
