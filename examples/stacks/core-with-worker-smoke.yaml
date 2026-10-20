@@ -1,0 +1,9 @@
+# Core plus the example add-on DAG family (ADR-044). The `dags:` key is
+# provisional until the stack catalog design settles its name.
+#
+#   spi up --env <name> -f examples/stacks/core-with-worker-smoke.yaml
+#
+# Removing the family from `dags:` and running spi up -f again unloads it,
+# pauses its DAG, and deregisters its workflow.
+dags:
+  - osdu-worker-smoke

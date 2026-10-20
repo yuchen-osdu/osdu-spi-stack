@@ -64,3 +64,47 @@ families:
     dags:
       - Osdu_ingest
       - manifest_ingestion
+
+  # Add-on families load only when a stack file's dags: names them.
+
+  # Example (POC): an archive-pinned CImpl-style template whose single task
+  # runs a KubernetesPodOperator worker. It stands in for a DDMS or EDS family.
+  - name: osdu-worker-smoke
+    requires:
+      - entitlements
+    source:
+      type: archive
+      host: github
+      repository: yuchen-osdu/osdu-spi-stack
+      # Tag poc-dag-example-2 keeps this commit reachable.
+      commit: 8a9e6891f3fd7d031a17ad0e6858f1813639c948
+      strip_prefix: examples/dags/osdu-worker-smoke
+      include:
+        - "*.py"
+      digest: sha256:25d485a6feaf5e355c4e9f84d72fcec6c557973dbe0c9ff7650b657fb82fcf4d
+    render:
+      DAG_NAME: spi_worker_smoke
+      NAMESPACE: "@worker_namespace"
+      DOCKER_IMAGE: apache/airflow:3.2.2@sha256:bef4d135ec7b64658cf64089973edd62cab8fd72203f280c7e0952213c17d912
+      ENV_VARS: "@worker_env"
+      K8S_POD_OPERATOR_KWARGS: "@worker_pod_kwargs"
+    dags:
+      - spi_worker_smoke
+
+  # By-reference ingestion reads and registers datasets, so it needs the
+  # Dataset service, which the stack does not deploy yet; spi up refuses it.
+  - name: ingestion-by-reference
+    requires:
+      - dataset
+    source:
+      type: archive
+      host: gitlab
+      url: https://community.opengroup.org
+      project: osdu/platform/data-flow/ingestion/ingestion-dags
+      commit: 193f921e377c4ec769ca20051f4a6c6a5ed3da20
+      strip_prefix: src/osdu_dags
+      include:
+        - osdu-ingest-r3-by-reference.py
+      digest: sha256:c01efbcc0660ae375188ea3a2993320589e9e3b3a3a52066c63ab226c141392b
+    dags:
+      - Osdu_ingest_by_reference

@@ -148,3 +148,23 @@ def test_every_catalog_requirement_names_a_lowercase_service():
     for family in dags.load_catalog():
         for service in family.get("requires") or []:
             assert service == service.lower() and service.replace("-", "").isalnum(), family
+
+
+def test_the_example_stack_file_selects_the_example_family():
+    path = dags.REPO_ROOT / "examples" / "stacks" / "core-with-worker-smoke.yaml"
+    names = load_stack_dags(path)
+    assert names == ("osdu-worker-smoke",)
+    assert dags.check_selection(names, dags.load_catalog(), dags.deployed_services()) == names
+
+
+def test_the_shipped_by_reference_family_is_refused_without_dataset():
+    with pytest.raises(dags.DagSelectionError, match="requires dataset"):
+        dags.check_selection(
+            ["ingestion-by-reference"], dags.load_catalog(), dags.deployed_services()
+        )
+
+
+def test_only_the_core_families_load_by_default():
+    defaults = [f["name"] for f in dags.load_catalog() if f.get("default") is True]
+    assert defaults == ["spi-smoke", "core-ingestion"]
+
