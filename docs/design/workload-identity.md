@@ -165,16 +165,21 @@ person's token until it answers 200, for up to a minute.
 | Role | Groups |
 |---|---|
 | `viewer` | `users`, `users.datalake.viewers` |
-| `editor` | `users`, `users.datalake.editors` |
-| `admin` (default) | `users`, `users.datalake.admins`, `users.datalake.ops` |
-| `ops` | `users`, `users.data.root`, `users.datalake.ops` |
+| `editor` | `users`, `users.datalake.editors`, `users.datalake.impersonation` |
+| `admin` (default) | `users`, `users.datalake.admins`, `users.datalake.ops`, `users.datalake.impersonation` |
+| `ops` | `users`, `users.data.root`, `users.datalake.ops`, `users.datalake.impersonation` |
 
+Every role that can start a workflow run is impersonable, because an ingestion
+DAG calls the services on behalf of the run's user
+([ADR-044](../decisions/044-osdu-dags-load-at-airflow-start-on-core.md)).
 Running `add` with another role replaces the role. `spi users add <id>` writes
 the same groups for an id typed for someone else and verifies nothing.
 `spi users list` shows each partition's members with kind and role, and
 `spi users remove` deletes a member from every group, refusing the three
 seeded identities. `spi token --me` prints the person's bearer for use with
-`curl`. Membership is not declared anywhere, so a reset removes it.
+`curl`. Membership is not declared anywhere, so a reset removes it. The one
+person `spi up` names is the operator: whoever ran it, read from their own
+token and seeded as an `admin` by the members Job once entitlements is up.
 
 ## Audiences used by OSDU callers
 

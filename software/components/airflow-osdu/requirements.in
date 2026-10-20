@@ -1,0 +1,16 @@
+# OSDU libraries the core DAGs import. Run scripts/lock_airflow_requirements.py
+# after any change; the scheduler installs only the generated requirements.txt.
+#
+# Extras are deliberately absent: osdu-api[azure] would pull a second Azure SDK
+# set beside the image's own, and osdu-airflow[AF3] requires Airflow 3.3 or later.
+
+# The OSDU libraries are published only to their GitLab project registries.
+# --find-links, not --extra-index-url: a GitLab index forwards misses to PyPI,
+# which would let a same-named public package win.
+--find-links https://community.opengroup.org/api/v4/projects/148/packages/pypi/simple/osdu-api/
+--find-links https://community.opengroup.org/api/v4/projects/668/packages/pypi/simple/osdu-airflow/
+--find-links https://community.opengroup.org/api/v4/projects/823/packages/pypi/simple/osdu-ingestion/
+
+osdu-api==1.2.4
+osdu-airflow==0.30.9
+osdu-ingestion==0.30.2

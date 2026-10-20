@@ -6,7 +6,7 @@ ADR-001 moved every data service with a managed Azure equivalent out of the clus
 
 - **Elasticsearch.** OSDU search and indexer services call the Elasticsearch REST API directly. Azure AI Search is not API-compatible.
 - **Redis.** OSDU services require custom CA TLS and specific database isolation (db 1 through 6). Azure Cache for Redis is reachable but adds network latency and cost for what is effectively a cache.
-- **PostgreSQL (for Airflow only).** Airflow's scheduler and workers need low-latency access to their metadata database; a single-database workload is an expensive fit for Azure Database for PostgreSQL.
+- **PostgreSQL (for Airflow only).** Airflow's scheduler and the tasks it runs need low-latency access to their metadata database; a single-database workload is an expensive fit for Azure Database for PostgreSQL.
 
 Airflow itself is in-cluster because it orchestrates ingestion workflows that call the in-cluster OSDU APIs.
 

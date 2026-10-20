@@ -38,9 +38,11 @@ from .bootstrap import (
     deploy_identity_facts,
     ensure_namespaces,
     install_gateway_api_crds,
+    read_workload_identity_client_id,
 )
 from .config import Config, IngressMode, Profile
 from .console import console, display_result, display_yaml
+from .dags import apply_dag_selection, check_dag_removal
 from .deploy_record import upsert_deploy_record
 from .environment import Declared
 from .images import (
@@ -48,6 +50,7 @@ from .images import (
     ResolvedImage,
     resolve_image_lock,
 )
+from .info import token_audience
 from .ingress import (
     create_ingress_config,
     discover_dns_zone,
@@ -57,13 +60,16 @@ from .ingress import (
 from .paths import INFRA_ROOT
 from .pins import ServicePin, apply_image_lock, describe_pin, read_lock
 from .secrets import ensure_secrets, get_or_create_seed
-from .shell import kubectl_apply_yaml, run_command, run_process
+from .shell import kubectl_apply_yaml, kubectl_json, run_command, run_process
 from .sizing import apply_sizing, check_storage
 from .templates import (
+    AIRFLOW_SCHEDULER_SERVICE_ACCOUNT,
     TESTER_NAMESPACE,
     TESTER_SERVICE_ACCOUNTS,
+    airflow_osdu_configmap,
     istio_auth_resources,
     osdu_config_configmap,
+    parse_init_values,
     spi_init_values_configmap,
     workload_identity_sa,
 )
@@ -108,6 +114,13 @@ def _create_osdu_config(config: Config, infra_outputs: dict) -> None:
     kubectl_apply_yaml(yaml_content, "apply osdu-config ConfigMap")
     display_result("osdu-config ConfigMap created")
 
+    # Every profile writes it so a later switch to core finds it in place.
+    airflow_yaml = airflow_osdu_configmap(
+        token_audience(aad_client_id, identity_client_id), partition
+    )
+    display_yaml(airflow_yaml, "ConfigMap: spi-airflow-osdu")
+    kubectl_apply_yaml(airflow_yaml, "apply spi-airflow-osdu ConfigMap")
+
     for ns in ["platform", "osdu"]:
         sa_yaml = workload_identity_sa(
             namespace=ns,
@@ -116,6 +129,16 @@ def _create_osdu_config(config: Config, infra_outputs: dict) -> None:
         )
         display_yaml(sa_yaml, f"ServiceAccount: workload-identity-sa in {ns}")
         kubectl_apply_yaml(sa_yaml, f"apply workload-identity-sa in {ns}")
+    # Every profile writes it, like spi-airflow-osdu, so a later switch to core
+    # finds the scheduler's account in place.
+    sa_yaml = workload_identity_sa(
+        namespace="platform",
+        client_id=infra_outputs.get("identity_client_id", ""),
+        tenant_id=infra_outputs.get("tenant_id", ""),
+        name=AIRFLOW_SCHEDULER_SERVICE_ACCOUNT,
+    )
+    display_yaml(sa_yaml, f"ServiceAccount: {AIRFLOW_SCHEDULER_SERVICE_ACCOUNT} in platform")
+    kubectl_apply_yaml(sa_yaml, f"apply {AIRFLOW_SCHEDULER_SERVICE_ACCOUNT} in platform")
     for sa_name, output_key in TESTER_SERVICE_ACCOUNTS:
         client_id = infra_outputs.get(output_key, "")
         if not client_id:
@@ -129,6 +152,25 @@ def _create_osdu_config(config: Config, infra_outputs: dict) -> None:
         display_yaml(sa_yaml, f"ServiceAccount: {sa_name} in {TESTER_NAMESPACE}")
         kubectl_apply_yaml(sa_yaml, f"apply {sa_name} in {TESTER_NAMESPACE}")
     display_result("Workload Identity ServiceAccounts created")
+
+
+def refresh_airflow_osdu_config() -> None:
+    """Re-derive spi-airflow-osdu from the live osdu-config and identity.
+
+    ``spi reconcile`` can move an environment onto a commit whose core
+    Airflow reads this ConfigMap, without the ``spi up`` that writes it. An
+    environment with no osdu-config is left alone; ``spi up`` writes both.
+    """
+    osdu = kubectl_json(["get", "configmap", "osdu-config", "-n", "osdu"])
+    if not osdu:
+        console.print("  [dim]osdu-config not found; skipping spi-airflow-osdu refresh[/dim]")
+        return
+    data = osdu.get("data") or {}
+    audience = token_audience(data.get("AAD_CLIENT_ID", ""), read_workload_identity_client_id())
+    kubectl_apply_yaml(
+        airflow_osdu_configmap(audience, data.get("PRIMARY_PARTITION", "")),
+        "apply spi-airflow-osdu ConfigMap",
+    )
 
 
 def _create_istio_auth(config: Config, infra_outputs: dict) -> None:
@@ -153,24 +195,67 @@ def _create_istio_auth(config: Config, infra_outputs: dict) -> None:
     )
 
 
+def _operator_id(infra_outputs: dict) -> str:
+    """The id the mesh gives the token of the person running ``spi up``, or "".
+
+    The members Job seeds that id into the groups of the ``spi users`` admin
+    role, so whoever creates or updates the environment can call the APIs and
+    start ingestion runs as themselves. An application sign-in, an unreadable
+    token, or one of the environment's own identities yields "".
+    """
+    from .bootstrap import ClusterConfigError
+    from .identity import IdentityError, person_token
+
+    identity_client_id = infra_outputs.get("identity_client_id", "")
+    audience = token_audience(_resolve_aad_client_id(identity_client_id), identity_client_id)
+    try:
+        operator = person_token(resource=audience).user_id
+    except (ClusterConfigError, IdentityError) as exc:
+        console.print(f"  [warning]Not seeding you as an OSDU admin: {exc}[/warning]")
+        return ""
+    seeded = {
+        infra_outputs.get(key, "").lower()
+        for key in ("deploy_identity_client_id", "member_identity_client_id", "identity_client_id")
+    }
+    return "" if operator.lower() in seeded else operator
+
+
+def _live_operator() -> str:
+    """The operator the live spi-init-values already names, or ""."""
+    from .bootstrap import ClusterConfigError, read_init_values
+
+    try:
+        return str(parse_init_values(read_init_values()).get("entitlementsOperator") or "")
+    except ClusterConfigError:
+        return ""
+
+
 def _create_spi_init_values(config: Config, infra_outputs: dict) -> None:
     """Apply the spi-init-values ConfigMap that the osdu-spi-init HelmRelease
     consumes via valuesFrom. Must run before Flux reconciles the HelmRelease.
+
+    The person running ``spi up`` becomes the operator the members Job seeds as
+    an admin. When they cannot be named, the operator already recorded stays,
+    so the Job is not renamed and run again for nobody.
     """
     console.print("\n[bold]Creating SPI init values ConfigMap...[/bold]")
     members = [infra_outputs.get("deploy_identity_client_id", "")]
     member_users = [infra_outputs.get("member_identity_client_id", "")]
+    operator = _operator_id(infra_outputs) or _live_operator()
     yaml_content = spi_init_values_configmap(
         config.data_partitions,
         [m for m in members if m],
         member_users=[m for m in member_users if m],
         tenant_service_account=infra_outputs.get("identity_client_id", ""),
+        operator=operator,
     )
     display_yaml(yaml_content, "ConfigMap: spi-init-values")
     kubectl_apply_yaml(yaml_content, "apply spi-init-values ConfigMap")
     display_result(
         f"spi-init-values ConfigMap created for partitions: {', '.join(config.data_partitions)}"
     )
+    if operator:
+        display_result(f"{operator} will be seeded as an OSDU admin")
 
 
 def _resolve_image_lock(sources: dict[str, str] | None = None) -> dict[str, ResolvedImage]:
@@ -580,6 +665,7 @@ def deploy_azure(
     deployer_principal: Optional[Tuple[str, str]] = None,
     declared: Optional[Declared] = None,
     sizing: Optional[dict[str, str]] = None,
+    dags: Optional[tuple[str, ...]] = None,
 ) -> None:
     """Provision Azure infra, bootstrap Kubernetes, deploy via GitOps.
 
@@ -587,7 +673,7 @@ def deploy_azure(
     bootstrap and GitOps activation are skipped. A ``declared`` environment
     takes its fork trust and source policy from the declaration, not from the
     records the resource group retained. ``sizing`` replaces what `spi-sizing`
-    holds on core; None leaves it as it is.
+    holds on core, and ``dags`` what `spi-dags` selects; None leaves either as it is.
     """
     resolved_images: dict[str, ResolvedImage] = {}
     sources: dict[str, str] = {}
@@ -621,6 +707,9 @@ def deploy_azure(
     sizes = sizing is not None and config.profile is Profile.CORE
     if sizes:
         check_storage(sizing)
+    # Before any cluster write: removing a family must not end its runs.
+    if dags is not None and config.profile is Profile.CORE:
+        check_dag_removal(dags)
     istio_revision = ensure_namespaces()
     create_istio_revision_configmap(
         istio_revision,
@@ -632,6 +721,8 @@ def deploy_azure(
     _ensure_image_lock(config, refresh_images, resolved_images, sources)
     if sizes:
         apply_sizing(sizing)
+    if dags is not None and config.profile is Profile.CORE:
+        apply_dag_selection(dags)
     _project_trusted_repos(config, declared)
     _create_osdu_config(config, infra_outputs)
     _create_istio_auth(config, infra_outputs)

@@ -52,6 +52,9 @@ var osduDbContainers = [
   { name: 'WorkflowRun', partitionKey: '/partitionKey' }
   { name: 'WorkflowRunV2', partitionKey: '/partitionKey' }
   { name: 'WorkflowRunStatus', partitionKey: '/partitionKey' }
+  // Workflow clears a run's tasks-sharing record when the run ends, and returns
+  // 500 when the container is missing.
+  { name: 'WorkflowTasksSharingInfoV2', partitionKey: '/partitionKey' }
   { name: 'WorkflowV2', partitionKey: '/partitionKey' }
 ]
 

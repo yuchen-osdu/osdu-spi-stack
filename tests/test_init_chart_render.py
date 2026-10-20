@@ -26,6 +26,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -42,6 +43,7 @@ import pytest
 import yaml
 from _quantities import _millicores
 
+from spi import users
 from spi.shell import run_process
 from spi.templates import ENTITLEMENTS_MEMBERS_GENERATION, entitlements_members_job_name
 
@@ -172,6 +174,68 @@ def test_component_split_matches_the_three_releases():
     ]
 
 
+_ISTIO_CNI_NOT_READY = {
+    "rules": [
+        {
+            "action": "Ignore",
+            "onExitCodes": {"operator": "In", "values": [126]},
+        }
+    ]
+}
+
+
+def test_every_job_ignores_istio_cni_not_ready():
+    """A pod scheduled on a node whose Istio CNI is not ready yet fails
+    istio-validation with 126; that must not use one of the Job's retries."""
+    docs = _render(["opendes", "second"], _MEMBERS)
+    jobs = [doc for doc in docs if doc.get("kind") == "Job"]
+    assert {job["metadata"]["labels"]["app.kubernetes.io/component"] for job in jobs} == {
+        "partition-init",
+        "entitlements-init",
+        "legal-init",
+        "entitlements-members",
+    }
+    for job in jobs:
+        assert job["spec"]["podFailurePolicy"] == _ISTIO_CNI_NOT_READY, job["metadata"]["name"]
+        assert job["spec"]["template"]["spec"]["restartPolicy"] == "Never"
+        # The API refuses a containerName the template lacks; Istio injects
+        # istio-validation at admission, so the rule must not name it.
+        names = {
+            c["name"]
+            for key in ("containers", "initContainers")
+            for c in job["spec"]["template"]["spec"].get(key) or []
+        }
+        for rule in job["spec"]["podFailurePolicy"]["rules"]:
+            assert rule["onExitCodes"].get("containerName") in names | {None}
+
+    schema_load = yaml.safe_load(
+        (REPO_ROOT / "software/stacks/osdu/schema-load/job.yaml").read_text(encoding="utf-8")
+    )
+    assert schema_load["spec"]["podFailurePolicy"] == _ISTIO_CNI_NOT_READY
+    assert schema_load["spec"]["template"]["spec"]["restartPolicy"] == "Never"
+
+
+def test_pod_failure_policy_lookup_names_the_rendered_job():
+    """podFailurePolicy is immutable, so the helper looks the Job up to keep an
+    existing Job unchanged; the name it looks up must be the Job's own name."""
+    var = re.compile(r"\{\{\s*(\$\w+)\s*\}\}")
+    for template in sorted((CHART_DIR / "templates").glob("*.yaml")):
+        text = template.read_text(encoding="utf-8")
+        include = re.search(
+            r'include "osdu-spi-init\.podFailurePolicy" \(dict "root" \$ "name" '
+            r'\(printf "([^"]+)"((?: \$\w+)+)\)\)',
+            text,
+        )
+        if "kind: Job" not in text:
+            assert include is None, template.name
+            continue
+        assert include is not None, template.name
+        name_line = re.search(r"^  name: (.+?)\s*$", text, re.MULTILINE)
+        assert name_line is not None, template.name
+        assert var.sub("%s", name_line.group(1)) == include.group(1), template.name
+        assert var.findall(name_line.group(1)) == include.group(2).split(), template.name
+
+
 def test_members_job_renders_one_per_partition_under_the_cli_computed_name():
     """The CLI reads the Job back by a name it computes from the same member
     list, so the chart's hash expression and templates.py must agree."""
@@ -224,6 +288,38 @@ def test_members_job_name_covers_member_users():
         e["name"]: e.get("value") for e in job["spec"]["template"]["spec"]["containers"][0]["env"]
     }
     assert env["MEMBER_USERS"] == "member-client-id"
+
+
+def test_members_job_name_covers_the_operator():
+    """A new person running spi up renders a new Job, under the name the CLI
+    computes, so the Job seeds them; the same person again changes nothing."""
+    members = ["deployer-client-id"]
+    sets = {
+        "coreEnabled": "false",
+        "legalEnabled": "false",
+        "entitlementsMembers[0]": members[0],
+        "entitlementsMemberUsers[0]": "member-client-id",
+    }
+    job = _jobs(
+        _render(["opendes"], {**sets, "entitlementsOperator": "alice@contoso.com"}),
+        "entitlements-members",
+    )[0]
+
+    assert job["metadata"]["name"] == entitlements_members_job_name(
+        "opendes", members, ["member-client-id"], "alice@contoso.com"
+    )
+    assert job["metadata"]["name"] != entitlements_members_job_name(
+        "opendes", members, ["member-client-id"]
+    )
+    env = {
+        e["name"]: e.get("value") for e in job["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["OPERATOR"] == "alice@contoso.com"
+
+    plain = _jobs(_render(["opendes"], sets), "entitlements-members")[0]
+    assert plain["metadata"]["name"] == entitlements_members_job_name(
+        "opendes", members, ["member-client-id"]
+    )
 
 
 def test_members_job_name_keeps_the_legacy_seed_without_member_users():
@@ -353,6 +449,19 @@ def test_legal_init_deadline_covers_its_wait_budget(init_scripts):
 _TOKEN_TIMEOUT = 60
 
 
+def test_members_seed_the_workflow_suite_group(init_scripts):
+    """The workflow acceptance suite refuses a caller outside
+    service.workflow.system-admin, which Azure tenant provisioning never
+    creates; the Job creates it and adds every member next to the root groups."""
+    const = _script_constants(init_scripts["init_members.py"])
+    assert "service.workflow.system-admin" in const["CREATED_GROUPS"]
+    assert const["MEMBER_GROUPS"][: len(const["ROOT_GROUPS"])] == const["ROOT_GROUPS"]
+    assert set(const["MEMBER_GROUPS"]) - set(const["ROOT_GROUPS"]) == {
+        "service.workflow.system-admin"
+    }
+    assert "service.workflow.system-admin" not in const["OPERATOR_GROUPS"]
+
+
 def test_members_deadline_covers_its_wait_budget(init_scripts):
     """The members Job renders with its own deadline; the script's wait plus
     REQUEST_BUDGET must fit inside it, and REQUEST_BUDGET itself must cover
@@ -366,10 +475,11 @@ def test_members_deadline_covers_its_wait_budget(init_scripts):
     calls = (
         1
         + len(const["CREATED_GROUPS"])
-        + 2 * len(const["ROOT_GROUPS"])
+        + 2 * len(const["MEMBER_GROUPS"])
         + 1
         + 2 * const["MAX_USER_GROUPS"]
         + 2 * len(const["MEMBER_USER_GROUPS"])
+        + len(const["OPERATOR_GROUPS"])
     )
     assert const["REQUEST_BUDGET"] >= _TOKEN_TIMEOUT + calls * const["REQUEST_TIMEOUT"]
     budget += const["PARTITION_WAIT"] + const["PARTITION_RETRY_DELAY"] + const["REQUEST_TIMEOUT"]
@@ -565,11 +675,14 @@ _GROUPS = {
     "users.datalake.admins": "users.datalake.admins@opendes.dataservices.energy",
     "users.data.root": "users.data.root@opendes.dataservices.energy",
     "users.datalake.delegation": "users.datalake.delegation@opendes.dataservices.energy",
+    "users.datalake.impersonation": "users.datalake.impersonation@opendes.dataservices.energy",
+    "service.workflow.system-admin": "service.workflow.system-admin@opendes.dataservices.energy",
 }
-# Created by the Job when the listing lacks them; only delegation takes members.
+# Created by the Job when the listing lacks them; the deploy identity joins all three.
 _CREATED_GROUPS = {
     "users.datalake.delegation": _GROUPS["users.datalake.delegation"],
-    "users.datalake.impersonation": "users.datalake.impersonation@opendes.dataservices.energy",
+    "users.datalake.impersonation": _GROUPS["users.datalake.impersonation"],
+    "service.workflow.system-admin": _GROUPS["service.workflow.system-admin"],
 }
 _BOOTSTRAP_GROUPS = tuple(n for n in _GROUPS if n not in _CREATED_GROUPS)
 
@@ -591,7 +704,14 @@ def _groups_listing(names=tuple(_ALL_GROUPS)) -> bytes:
 
 
 def _run_members(
-    init_scripts, monkeypatch, capsys, *, members="deployer-client-id", member_users="", **routes
+    init_scripts,
+    monkeypatch,
+    capsys,
+    *,
+    members="deployer-client-id",
+    member_users="",
+    operator="",
+    **routes,
 ):
     """Execute init_members.py against a routed fake of urlopen.
 
@@ -602,6 +722,7 @@ def _run_members(
     monkeypatch.setenv("PARTITION", "opendes")
     monkeypatch.setenv("MEMBERS", members)
     monkeypatch.setenv("MEMBER_USERS", member_users)
+    monkeypatch.setenv("OPERATOR", operator)
     termination_log = Path(tempfile.mkdtemp()) / "termination-log"
     monkeypatch.setenv("TERMINATION_MESSAGE_PATH", str(termination_log))
     auth = types.ModuleType("auth")
@@ -668,14 +789,14 @@ def test_members_seeds_every_root_group_and_verifies(init_scripts, monkeypatch, 
     assert "entitlements-members outcome: seeded" in result.stdout
     assert result.routed("create") == []
     posts = result.routed("post")
-    assert len(posts) == 10
+    assert len(posts) == 2 * len(_GROUPS)
     assert {json.loads(p.body)["email"] for p in posts} == {"a-id", "b-id"}
     assert {json.loads(p.body)["role"] for p in posts} == {"MEMBER"}
     assert {p.url.rsplit("/groups/", 1)[1].removesuffix("/members") for p in posts} == set(
         _GROUPS.values()
     )
     assert all(p.headers["Data-partition-id"] == "opendes" for p in posts)
-    assert len(result.routed("get")) == 5
+    assert len(result.routed("get")) == len(_GROUPS)
 
 
 def test_members_seeds_member_users_into_the_user_groups_and_storage_admin_only(
@@ -692,6 +813,52 @@ def test_members_seeds_member_users_into_the_user_groups_and_storage_admin_only(
     assert member_posts == set(_USER_GROUPS.values())
     admin_posts = {g for m, g in posts if m == "deployer-client-id"}
     assert admin_posts == set(_GROUPS.values())
+
+
+def test_members_seeds_the_operator_into_the_admin_role_groups_only(
+    init_scripts, monkeypatch, capsys
+):
+    """The person who ran spi up gets exactly what spi users add gives an
+    admin, impersonation included, and no further listing is read for them."""
+    result = _run_members(init_scripts, monkeypatch, capsys, operator="alice@contoso.com")
+
+    assert result.exit_code == 0
+    assert "entitlements-members outcome: seeded" in result.stdout
+    operator_posts = {
+        p.url.rsplit("/groups/", 1)[1].removesuffix("/members")
+        for p in result.routed("post")
+        if json.loads(p.body)["email"] == "alice@contoso.com"
+    }
+    assert operator_posts == {_GROUPS[g] for g in users.ROLE_PRESETS["admin"]}
+    assert len(result.routed("get")) == len(_GROUPS)
+
+
+def test_the_operator_groups_are_the_spi_users_admin_role(init_scripts):
+    const = _script_constants(init_scripts["init_members.py"])
+    assert set(const["OPERATOR_GROUPS"]) == set(users.ROLE_PRESETS["admin"])
+    assert set(const["OPERATOR_GROUPS"]) <= set(const["ROOT_GROUPS"])
+
+
+def test_members_fails_closed_when_the_operator_is_refused(init_scripts, monkeypatch, capsys):
+    """The deploy identity's writes come first; the operator's first write is
+    refused, and the Job names the operator in its typed outcome."""
+    deploy_writes = len(_GROUPS)
+    posts: list[str] = []
+
+    def post(url):
+        posts.append(url)
+        if len(posts) > deploy_writes:
+            return _http_error(400, b'{"message":"bad member"}')(url)
+        return _FakeResponse(200, b"{}")
+
+    result = _run_members(
+        init_scripts, monkeypatch, capsys, operator="alice@contoso.com", post=post
+    )
+
+    assert result.exit_code == 1
+    assert "entitlements-members outcome: member_rejected" in result.stdout
+    assert "alice@contoso.com was not added" in result.termination_message
+    assert len(posts) == deploy_writes + 1
 
 
 def test_members_fails_closed_when_the_listing_exceeds_max_user_groups(
@@ -742,13 +909,17 @@ def test_members_creates_the_impersonation_groups_the_bootstrap_lacks(
     assert [json.loads(c.body)["name"] for c in creates] == [
         "users.datalake.delegation",
         "users.datalake.impersonation",
+        "service.workflow.system-admin",
     ]
     assert all(json.loads(c.body)["description"] for c in creates)
     posted_to = {
         p.url.rsplit("/groups/", 1)[1].removesuffix("/members") for p in result.routed("post")
     }
     assert _CREATED_GROUPS["users.datalake.delegation"] in posted_to
-    assert _CREATED_GROUPS["users.datalake.impersonation"] not in posted_to
+    # An ingestion DAG the deploy identity starts acts on its behalf.
+    assert _CREATED_GROUPS["users.datalake.impersonation"] in posted_to
+    # The workflow acceptance suite checks its caller holds this group.
+    assert _CREATED_GROUPS["service.workflow.system-admin"] in posted_to
 
 
 def test_members_derives_the_created_group_email_when_the_service_omits_it(
@@ -812,7 +983,7 @@ def test_members_fails_when_a_root_group_is_missing(init_scripts, monkeypatch, c
     assert result.routed("post") == []
     assert result.termination_message == (
         "entitlements-members outcome: group_missing: "
-        "root groups not visible to the owner: users.datalake.admins, users.data.root; "
+        "member groups not visible to the owner: users.datalake.admins, users.data.root; "
         "deployer-client-id not seeded"
     )
 

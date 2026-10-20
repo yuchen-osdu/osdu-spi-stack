@@ -304,9 +304,14 @@ class StackFile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     resources: dict[str, Any] = Field(default_factory=dict)
+    # Provisional (ADR-044): add-on DAG families to load beside core's defaults.
+    dags: tuple[str, ...] = ()
 
     _empty_resources = field_validator("resources", mode="before")(
         lambda value: {} if value is None else value
+    )
+    _empty_dags = field_validator("dags", mode="before")(
+        lambda value: () if value is None else value
     )
 
 
@@ -333,6 +338,21 @@ def load_stack_file(path: Path) -> dict[str, str]:
         messages = "; ".join(_describe_error(error) for error in exc.errors())
         raise EnvironmentDeclarationError(f"{path}: {messages}") from exc
     except SizingError as exc:
+        raise EnvironmentDeclarationError(f"{path}: {exc}") from exc
+
+
+def load_stack_dags(path: Path) -> tuple[str, ...]:
+    """The add-on DAG families a stack file selects, checked against the catalog."""
+    from .dags import DagSelectionError, check_selection, deployed_services, load_catalog
+
+    data = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader) or {}
+    try:
+        stack = StackFile.model_validate(data)
+        return check_selection(stack.dags, load_catalog(), deployed_services())
+    except ValidationError as exc:
+        messages = "; ".join(_describe_error(error) for error in exc.errors())
+        raise EnvironmentDeclarationError(f"{path}: {messages}") from exc
+    except DagSelectionError as exc:
         raise EnvironmentDeclarationError(f"{path}: {exc}") from exc
 
 

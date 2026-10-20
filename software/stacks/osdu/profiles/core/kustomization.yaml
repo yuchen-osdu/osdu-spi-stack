@@ -3,3 +3,22 @@ kind: Kustomization
 resources:
   - ../minimal
   - stack.yaml
+
+# Core keeps minimal's spi-airflow and points it at the overlay that adds the
+# pinned OSDU DAGs, the hash-locked libraries and the task identity, and reads
+# the add-on DAG families the CLI selects in spi-dags (ADR-044).
+patches:
+  - target:
+      group: kustomize.toolkit.fluxcd.io
+      kind: Kustomization
+      name: spi-airflow
+    patch: |-
+      - op: replace
+        path: /spec/path
+        value: ./software/components/airflow-osdu
+      - op: add
+        path: /spec/postBuild/substituteFrom/-
+        value:
+          kind: ConfigMap
+          name: spi-dags
+          optional: true

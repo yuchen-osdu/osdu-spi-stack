@@ -1,0 +1,116 @@
+# DAG families the scheduler and dag-processor load at start (see ADR-044).
+#
+# load_dags.py loads every family marked `default: true`, plus the add-on
+# families SPI_DAG_FAMILIES names (spi up writes it from a stack file's
+# `dags:`), in catalog order, and fetches no other family. Any fetch, pin or
+# render failure, or a key this schema lacks, fails the whole load.
+# scripts/pin_dag_family.py prints the pins a family needs.
+#
+#   name        lowercase and unique; files land in /opt/airflow/dags/<name>/
+#   default     optional, false when absent: true loads it without a selection
+#   requires    optional list of services; spi up refuses the family when the
+#               stack does not deploy them, and the loader ignores it
+#   source      one of four types; `commit` is a full 40-character SHA, and
+#               the optional `strip_prefix` is a folder the files keep their
+#               path below
+#     local     the files are keys of this ConfigMap
+#     gitlab    url, project, commit, strip_prefix: each file fetched raw
+#     github    repository (owner/name), commit, strip_prefix: likewise
+#     archive   one tar.gz of the repository at the commit, from host gitlab
+#               (url, project) or github (repository). It takes the regular
+#               files below strip_prefix whose path below it matches an
+#               `include` glob (PurePosixPath.match, so it matches from the
+#               right; '**' is refused); links are skipped. `digest` is
+#               sha256:<hex> over their "<sha256>  <path>\n" lines sorted by
+#               path.
+#   files       every type but archive: `path` in the repository (local: the
+#               ConfigMap key) and, for gitlab and github, its `sha256`
+#   render      optional TOKEN: value map for families published as CImpl-style
+#               templates. After the pins are checked, every single-line
+#               {| ... |} span in the family's .py files holding TOKEN as a
+#               word becomes the value, verbatim. "@name" is the standard value
+#               `name` in render-values.yaml. A value for a token ending in
+#               IMAGE must pin a digest (@sha256:). A placeholder left over
+#               fails the load, as does any {| in a family without render.
+#   dags        the DAG IDs the family must yield; registration checks the
+#               parsed set against it and registers only these with Workflow
+#   workers     optional, false when absent: true when the family's DAGs start
+#               KubernetesPodOperator pods. Selecting one lets the scheduler's
+#               own account launch pods in platform (spi up writes
+#               SPI_AIRFLOW_POD_LAUNCHING); otherwise it holds no launch rights.
+#               A default family may not declare it, so core grants none.
+families:
+  - name: spi-smoke
+    default: true
+    source:
+      type: local
+    files:
+      - path: echo_dag.py
+      - path: airflow_monitoring.py
+    dags:
+      - Echo_DAG
+      - airflow_monitoring
+
+  # ingestion-dags tag v0.30.0. osdu-ingest-r3-by-reference.py is left out until
+  # its by-reference dataset flow is validated on Azure.
+  - name: core-ingestion
+    default: true
+    source:
+      type: gitlab
+      url: https://community.opengroup.org
+      project: osdu/platform/data-flow/ingestion/ingestion-dags
+      commit: 193f921e377c4ec769ca20051f4a6c6a5ed3da20
+      strip_prefix: src/osdu_dags
+    files:
+      - path: src/osdu_dags/osdu-ingest-r3.py
+        sha256: 1126389b8bac1037bdb7aece7a1dff1229e4024088d0e9704ba9b2a699d89006
+      - path: src/osdu_dags/manifest_ingestion.py
+        sha256: 482c802e3fbdcb42e2b57ecb8217c1404f219a86ede82b05b9814894584ae003
+    dags:
+      - Osdu_ingest
+      - manifest_ingestion
+
+  # Add-on families load only when a stack file's dags: names them.
+
+  # Example (POC): an archive-pinned CImpl-style template whose single task
+  # runs a KubernetesPodOperator worker. It stands in for a DDMS or EDS family.
+  - name: osdu-worker-smoke
+    requires:
+      - entitlements
+    workers: true
+    source:
+      type: archive
+      host: github
+      repository: yuchen-osdu/osdu-spi-stack
+      # Tag poc-dag-example-2 keeps this commit reachable.
+      commit: 8a9e6891f3fd7d031a17ad0e6858f1813639c948
+      strip_prefix: examples/dags/osdu-worker-smoke
+      include:
+        - "*.py"
+      digest: sha256:25d485a6feaf5e355c4e9f84d72fcec6c557973dbe0c9ff7650b657fb82fcf4d
+    render:
+      DAG_NAME: spi_worker_smoke
+      NAMESPACE: "@worker_namespace"
+      DOCKER_IMAGE: apache/airflow:3.2.2@sha256:bef4d135ec7b64658cf64089973edd62cab8fd72203f280c7e0952213c17d912
+      ENV_VARS: "@worker_env"
+      K8S_POD_OPERATOR_KWARGS: "@worker_pod_kwargs"
+    dags:
+      - spi_worker_smoke
+
+  # By-reference ingestion reads and registers datasets, so it needs the
+  # Dataset service, which the stack does not deploy yet; spi up refuses it.
+  - name: ingestion-by-reference
+    requires:
+      - dataset
+    source:
+      type: archive
+      host: gitlab
+      url: https://community.opengroup.org
+      project: osdu/platform/data-flow/ingestion/ingestion-dags
+      commit: 193f921e377c4ec769ca20051f4a6c6a5ed3da20
+      strip_prefix: src/osdu_dags
+      include:
+        - osdu-ingest-r3-by-reference.py
+      digest: sha256:c01efbcc0660ae375188ea3a2993320589e9e3b3a3a52066c63ab226c141392b
+    dags:
+      - Osdu_ingest_by_reference

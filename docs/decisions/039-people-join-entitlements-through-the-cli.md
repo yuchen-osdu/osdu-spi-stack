@@ -32,6 +32,10 @@ from the CLI, and `spi token --me` prints the person's own bearer.
   `service.schema-service.admin` and lets only its members manage other
   groups' members, so an admin without it cannot delete a legal tag or add a
   colleague. `ops` is `users`, `users.data.root`, and `users.datalake.ops`.
+  `editor`, `admin`, and `ops` also hold `users.datalake.impersonation`: their
+  groups are in `service.workflow.creator`, and an ingestion DAG a person
+  starts calls each service on that person's behalf, which entitlements
+  allows only for an impersonable user (ADR-044). A viewer cannot start a run.
   The default is `admin`. Running `add` again with another role removes the
   other presets' groups, then adds that preset's groups; `users` stays. When
   an addition fails, the preset's groups the person did not hold before the
@@ -53,6 +57,15 @@ from the CLI, and `spi token --me` prints the person's own bearer.
   from the cluster config and the workload ServiceAccount; `spi up` owns them.
   A group address is refused too, since entitlements would nest the group and
   give the role to every member of it.
+- **`spi up` makes the person running it an admin.** It reads that person's id
+  the way `add --me` does and writes it to `spi-init-values` as
+  `entitlementsOperator`; the members Job (ADR-015) adds it to the `admin`
+  role's groups once entitlements is up, which can be long after `spi up`
+  returns. An application sign-in, such as fork CI as the deploy identity,
+  names no person and leaves the recorded operator in place. `spi reconcile`
+  keeps the operator, and `remove` of the operator from every partition clears
+  it, so a later Job does not add them back. Only the last person to run
+  `spi up` is recorded: an earlier one keeps the membership the Job gave them.
 - **`list` reads role groups, not every group.** Members of `users` are the
   roster; the role is the preset whose role groups the member holds directly,
   `custom` for another mix, `none` for `users` alone, and `seeded` for the
@@ -70,7 +83,9 @@ than a typed one.
 Rejected: declare people in the environment file and seed them with the
 members Job. Membership would survive a reset, but it takes effect only after
 a reconcile, puts personal identifiers in a reviewed file, and a Job cannot
-verify with the person's token.
+verify with the person's token. The operator differs: `spi up` reads them
+from their own token at run time, nothing is reviewed, and the Job is the
+only writer that can wait for entitlements to come up.
 
 Rejected: write as the workload identity from an in-cluster Job. The deploy
 identity already holds the authority and the CLI already mints its token, so
@@ -79,7 +94,21 @@ one command can write and verify.
 ## Consequences
 
 - Membership lives only in entitlements. An environment reset or a new
-  partition drops it, and each person runs `spi users add --me` again.
+  partition drops it, and each person runs `spi users add --me` again; the
+  `spi up` that rebuilds the environment seeds the person running it.
+- `spi up` does not verify the operator's membership with their token; `spi
+  status` holds the environment pending until the Job that seeds them
+  completes, and `spi users list` shows them as `admin` afterwards.
+- A role the operator sets for themselves holds until the members Job runs
+  again for another reason, such as a new deploy identity or seed generation,
+  which restores `admin`.
+- Impersonation is what lets the platform act as a person. Every member of
+  `users.datalake.delegation` (the OSDU and deploy identities) may call any
+  service as an `editor`, `admin`, or `ops` member, which adds nothing to the
+  root-level rights those identities already hold.
+- A member added before the roles carried `users.datalake.impersonation` lists
+  as `custom` and cannot start an ingestion run; `spi users add` with the same
+  role adds the group.
 - The id belongs to one token shape. A person added with a v1 token is not a
   member when they present a v2 token, for which the filter writes `oid`;
   changing `AAD_CLIENT_ID` to an app registration means running `add --me`

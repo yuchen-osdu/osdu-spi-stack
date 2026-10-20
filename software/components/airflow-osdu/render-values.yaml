@@ -1,0 +1,60 @@
+# Standard values for the `render:` maps in dag-sources.yaml (see
+# load_dags.py). A family writes `TOKEN: "@name"` to have the text of `name`
+# replace its {| TOKEN |} placeholders verbatim, so every value is a Python
+# expression the template places in code.
+#
+# They describe the worker pods KubernetesPodOperator starts from the
+# scheduler. Workers run beside it in platform, on its nodes, as
+# workload-identity-sa, the OSDU Workload Identity, which holds no pod-launch
+# rights: only the scheduler's own account does, and only while a selected
+# family declares workers. platform injects no Istio sidecar, and the AKS
+# Automatic Deployment Safeguards require requests, limits and a restricted
+# security context. worker_env holds Jinja that reads Airflow Variables when
+# the task runs, because KubernetesPodOperator templates env_vars.
+#
+# worker_pod_kwargs has no namespace: the upstream templates pass namespace=
+# themselves (from worker_namespace or the `namespace` Variable), and a second
+# value would be a duplicate keyword argument.
+values:
+  worker_namespace: platform
+  worker_pod_kwargs: |-
+    {
+        "service_account_name": "workload-identity-sa",
+        "labels": {
+            "azure.workload.identity/use": "true",
+            "app.kubernetes.io/part-of": "osdu-dags",
+        },
+        "annotations": {"sidecar.istio.io/inject": "false"},
+        "node_selector": {"spi-pool": "platform"},
+        "tolerations": [
+            k8s_models.V1Toleration(
+                key="workload", operator="Equal", value="platform", effect="NoSchedule"
+            )
+        ],
+        "container_resources": k8s_models.V1ResourceRequirements(
+            requests={"cpu": "200m", "memory": "512Mi"},
+            limits={"cpu": "1", "memory": "1Gi"},
+        ),
+        "container_security_context": {
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+            "runAsNonRoot": True,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
+        "startup_timeout_seconds": 300,
+        "on_finish_action": "delete_succeeded_pod",
+    }
+  worker_env: |-
+    {
+        "CLOUD_PROVIDER": "azure",
+        "AZURE_RESOURCE_ID": "{{ var.value.azure_resource_id }}",
+        "storage_service_endpoint": "{{ var.value.core__service__storage__url }}",
+        "search_service_endpoint": "{{ var.value.core__service__search__url }}",
+        "schema_service_endpoint": "{{ var.value.core__service__schema__url }}",
+        "workflow_service_endpoint": "{{ var.value.core__service__workflow__url }}",
+        "entitlements_service_endpoint": "{{ var.value.core__service__entitlements__url }}",
+        "partition_service_endpoint": "{{ var.value.core__service__partition__url }}",
+        "file_service_endpoint": "{{ var.value.core__service__file__url }}",
+        "legal_service_endpoint": "{{ var.value.core__service__legal__url }}",
+        "unit_service_endpoint": "{{ var.value.core__service__unit__url }}",
+    }

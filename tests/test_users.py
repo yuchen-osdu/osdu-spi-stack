@@ -57,6 +57,7 @@ class Entitlements:
                 "users.datalake.editors",
                 "users.datalake.admins",
                 "users.datalake.ops",
+                "users.datalake.impersonation",
             )
         }
         for group, members in (groups or {}).items():
@@ -148,20 +149,35 @@ def admin_groups(member):
     return {group: {member} for group in users.ROLE_PRESETS["admin"]}
 
 
+IMP = users.IMPERSONATION_GROUP
+
+
 @pytest.mark.parametrize(
     "groups, role",
     [
         (["users"], "none"),
         (["users", "users.datalake.viewers"], "viewer"),
-        (["users.datalake.admins", "users.datalake.ops", "service.legal.user"], "admin"),
+        (["users.datalake.editors", IMP], "editor"),
+        (["users.datalake.admins", "users.datalake.ops", IMP, "service.legal.user"], "admin"),
+        (["users.datalake.admins", "users.datalake.ops"], "custom"),
         (["users.datalake.admins"], "custom"),
-        (["users.data.root", "users.datalake.ops"], "ops"),
+        (["users.data.root", "users.datalake.ops", IMP], "ops"),
         (["users.datalake.ops"], "custom"),
         (["users.datalake.viewers", "users.datalake.admins"], "custom"),
+        (["users.datalake.viewers", IMP], "custom"),
     ],
 )
 def test_role_is_the_preset_whose_role_groups_are_held(groups, role):
     assert users.role_of(groups) == role
+
+
+def test_every_role_that_can_start_a_workflow_run_is_impersonable():
+    """Azure's tenant provisioning puts the editors, admins, and ops groups in
+    service.workflow.creator. An ingestion DAG calls each service on behalf of
+    the run's user, which entitlements allows only for an impersonable user."""
+    can_start_runs = {"users.datalake.editors", "users.datalake.admins", "users.datalake.ops"}
+    for role, preset in users.ROLE_PRESETS.items():
+        assert (IMP in preset) == bool(can_start_runs & set(preset)), role
 
 
 def test_add_writes_the_role_preset_for_a_new_member(served):
@@ -175,6 +191,7 @@ def test_add_writes_the_role_preset_for_a_new_member(served):
             "users": "added",
             "users.datalake.admins": "added",
             "users.datalake.ops": "added",
+            IMP: "added",
         }
     }
     assert all(ALICE in server.groups[group] for group in result["partitions"]["opendes"])
@@ -191,9 +208,23 @@ def test_add_with_another_role_replaces_the_role_and_keeps_users(served):
         "users.datalake.viewers": "added",
         "users.datalake.admins": "removed",
         "users.datalake.ops": "removed",
+        IMP: "removed",
     }
     assert ALICE in server.groups["users"]
     assert ALICE not in server.groups["users.datalake.admins"]
+    assert ALICE not in server.groups[IMP]
+
+
+def test_add_upgrades_an_admin_added_before_admins_were_impersonable(served):
+    server = served(
+        groups={"users": {ALICE}, "users.datalake.admins": {ALICE}, "users.datalake.ops": {ALICE}}
+    )
+
+    result = users.add_user(ENV, "deploy", ALICE, "admin", ENV.partitions)
+
+    assert result["previousRole"] == "custom"
+    assert result["partitions"]["opendes"][IMP] == "added"
+    assert ALICE in server.groups[IMP]
 
 
 def test_add_with_the_role_already_held_changes_nothing(served):
@@ -206,6 +237,7 @@ def test_add_with_the_role_already_held_changes_nothing(served):
         "users": "already",
         "users.datalake.admins": "already",
         "users.datalake.ops": "already",
+        IMP: "already",
     }
     assert ALICE in server.groups["users.datalake.admins"]
 
@@ -252,7 +284,9 @@ def test_a_failed_add_takes_back_a_group_whose_answer_was_lost(served):
 
 def test_previous_role_is_mixed_when_partitions_disagree(served):
     server = served(groups=admin_groups(ALICE))
-    server.elsewhere = {"second": {"users": {ALICE}, "users.datalake.editors": {ALICE}}}
+    server.elsewhere = {
+        "second": {"users": {ALICE}, "users.datalake.editors": {ALICE}, IMP: {ALICE}}
+    }
     two = users.Environment(BASE, ("opendes", "second"), DOMAIN, ENV.seeded)
 
     result = users.add_user(two, "deploy", ALICE, "viewer", two.partitions)
@@ -414,7 +448,13 @@ def test_an_unknown_partition_is_refused():
 
 
 @pytest.fixture
-def invoke(monkeypatch, served, clock):
+def releases():
+    """Members `spi users remove` asked to stop seeding as the operator."""
+    return []
+
+
+@pytest.fixture
+def invoke(monkeypatch, served, clock, releases):
     """Run a users command against a served entitlements, signed in as alice."""
 
     def run(args, *, person=ALICE, env=ENV, **kwargs):
@@ -426,8 +466,11 @@ def invoke(monkeypatch, served, clock):
             patch("spi.users.load_environment", return_value=env),
             patch("spi.token.mint_token", return_value=minted),
             patch("spi.identity.person_token", return_value=signed_in),
+            patch("spi.bootstrap.release_operator", return_value=False) as release,
         ):
-            return runner.invoke(cli.app, ["users", *args]), server
+            outcome = runner.invoke(cli.app, ["users", *args]), server
+        releases.extend(call.args for call in release.call_args_list)
+        return outcome
 
     return run
 
@@ -470,6 +513,7 @@ def test_add_for_someone_else_is_reported_as_not_verified(invoke):
         "users": "added",
         "users.data.root": "added",
         "users.datalake.ops": "added",
+        IMP: "added",
     }
     assert not [url for method, url in server.calls if url.endswith("/groups")]
 
@@ -542,9 +586,20 @@ def test_add_of_a_seeded_identity_exits_2(invoke):
     assert server.calls == []
 
 
-def test_remove_me_removes_the_signed_in_person(invoke):
+def test_remove_me_removes_the_signed_in_person(invoke, releases):
     result, server = invoke(["remove", "--me"], groups=admin_groups(ALICE))
 
     assert result.exit_code == 0
     assert "removed" in result.output
     assert ALICE not in server.groups["users"]
+    assert releases == [(ALICE,)]
+
+
+def test_removal_from_one_partition_keeps_the_operator_seeded(invoke, releases):
+    two = users.Environment(BASE, ("opendes", "second"), DOMAIN, ENV.seeded)
+
+    result, _ = invoke(["remove", "--me", "--partition", "second", "--json"], env=two)
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["operatorReleased"] is False
+    assert releases == []

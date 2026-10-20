@@ -902,7 +902,37 @@ class TestDeploySizing:
         monkeypatch.setattr(deploy, "ensure_namespaces", lambda: calls.append("cluster write"))
         monkeypatch.setattr(deploy, "check_storage", lambda values: calls.append(("check", values)))
         monkeypatch.setattr(deploy, "apply_sizing", lambda values: calls.append(("write", values)))
+        monkeypatch.setattr(
+            deploy, "check_dag_removal", lambda names: calls.append(("removal", names))
+        )
+        monkeypatch.setattr(
+            deploy, "apply_dag_selection", lambda names: calls.append(("select", names))
+        )
         return calls
+
+    @pytest.mark.parametrize(
+        ("profile", "dags", "expected"),
+        [
+            (
+                Profile.CORE,
+                ("osdu-worker-smoke",),
+                [
+                    ("removal", ("osdu-worker-smoke",)),
+                    "cluster write",
+                    ("select", ("osdu-worker-smoke",)),
+                ],
+            ),
+            (Profile.CORE, (), [("removal", ()), "cluster write", ("select", ())]),
+            (Profile.CORE, None, ["cluster write"]),
+            (Profile.MINIMAL, (), ["cluster write"]),
+        ],
+    )
+    def test_core_checks_dag_removal_before_any_cluster_write_then_writes_the_selection(
+        self, written, profile, dags, expected
+    ):
+        deploy.deploy_azure(Config.from_env("shared", profile=profile), dags=dags)
+
+        assert written == expected
 
     @pytest.mark.parametrize(
         ("profile", "sizing", "expected"),

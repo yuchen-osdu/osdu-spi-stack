@@ -1,0 +1,159 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: airflow
+  namespace: osdu-flux
+spec:
+  values:
+    config:
+      core:
+        # Tasks run inside the scheduler (ADR-044), so this caps the task
+        # processes its memory limit has to hold.
+        parallelism: "${AIRFLOW_PARALLELISM:=8}"
+        # The registration Job unpauses exactly the declared DAG IDs.
+        dags_are_paused_at_creation: "True"
+
+    # The chart binds pod launching to the scheduler's (and triggerer's)
+    # account. Only a selected family that declares workers turns it on; spi up
+    # writes the flag beside the family selection (spi-dags).
+    allowPodLaunching: ${SPI_AIRFLOW_POD_LAUNCHING:=false}
+
+    # Airflow Variables the DAGs read, for every Airflow container: the stack's
+    # map in airflow-variables.env, plus the task token audience the CLI writes.
+    extraEnvFrom: |
+      - configMapRef:
+          name: airflow-osdu-variables
+      - prefix: AIRFLOW_VAR_
+        configMapRef:
+          name: spi-airflow-osdu
+          optional: true
+
+    scheduler:
+      podAnnotations:
+        spi-dag-config-revision: airflow-osdu-dags-revision
+        spi-dag-families: "${SPI_DAG_FAMILIES:=none}"
+      # osdu-api requests a token for the OSDU identity through this account,
+      # which identity.bicep federates and spi up creates. It is not
+      # workload-identity-sa: worker pods and the registration Job run as that
+      # and must not inherit the pod-launcher Role bound here.
+      serviceAccount:
+        create: false
+        name: airflow-osdu-scheduler
+      labels:
+        azure.workload.identity/use: "true"
+      resources:
+        requests:
+          cpu: "${AIRFLOW_SCHEDULER_CPU_REQUEST:=500m}"
+          memory: "${AIRFLOW_SCHEDULER_MEMORY_REQUEST:=1536Mi}"
+        limits:
+          cpu: "${AIRFLOW_SCHEDULER_CPU_LIMIT:=2}"
+          memory: "${AIRFLOW_SCHEDULER_MEMORY_LIMIT:=4Gi}"
+      # The library install runs before the scheduler starts.
+      startupProbe:
+        failureThreshold: 18
+      env:
+        - name: _PIP_ADDITIONAL_REQUIREMENTS
+          value: "-r /opt/spi/osdu/requirements.txt"
+        - name: CLOUD_PROVIDER
+          value: azure
+        - name: AZURE_ENABLE_WORKLOAD_IDENTITY
+          value: "true"
+        # The audience spi.info.token_audience derives, written by the CLI.
+        - name: AZURE_RESOURCE_ID
+          valueFrom:
+            configMapKeyRef:
+              name: spi-airflow-osdu
+              key: AZURE_RESOURCE_ID
+      extraInitContainers:
+        - name: load-osdu-dags
+          image: "{{ .Values.defaultAirflowRepository }}:{{ .Values.defaultAirflowTag }}"
+          command: ["python", "/opt/spi/osdu/load_dags.py"]
+          env:
+            # Add-on families on top of the catalog's defaults (spi-dags).
+            - name: SPI_DAG_FAMILIES
+              value: "${SPI_DAG_FAMILIES:=none}"
+          # An archive source is held in memory: up to 200 MiB, plus its files.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: osdu-dag-config
+              mountPath: /opt/spi/osdu
+              readOnly: true
+            - name: osdu-dags
+              mountPath: /opt/airflow/dags
+      extraVolumes:
+        - name: osdu-dag-config
+          configMap:
+            name: airflow-osdu-dags
+        - name: osdu-dags
+          emptyDir: {}
+      extraVolumeMounts:
+        - name: osdu-dag-config
+          mountPath: /opt/spi/osdu
+          readOnly: true
+        - name: osdu-dags
+          mountPath: /opt/airflow/dags
+
+    # Parses the same files with the same libraries and Variables, but runs no
+    # task, so it carries no Azure identity.
+    dagProcessor:
+      podAnnotations:
+        spi-dag-config-revision: airflow-osdu-dags-revision
+        spi-dag-families: "${SPI_DAG_FAMILIES:=none}"
+      resources:
+        requests:
+          cpu: "${AIRFLOW_DAG_PROCESSOR_CPU_REQUEST:=100m}"
+          memory: "${AIRFLOW_DAG_PROCESSOR_MEMORY_REQUEST:=512Mi}"
+        limits:
+          cpu: "${AIRFLOW_DAG_PROCESSOR_CPU_LIMIT:=1}"
+          memory: "${AIRFLOW_DAG_PROCESSOR_MEMORY_LIMIT:=1536Mi}"
+      env:
+        - name: _PIP_ADDITIONAL_REQUIREMENTS
+          value: "-r /opt/spi/osdu/requirements.txt"
+      extraInitContainers:
+        - name: load-osdu-dags
+          image: "{{ .Values.defaultAirflowRepository }}:{{ .Values.defaultAirflowTag }}"
+          command: ["python", "/opt/spi/osdu/load_dags.py"]
+          env:
+            # Add-on families on top of the catalog's defaults (spi-dags).
+            - name: SPI_DAG_FAMILIES
+              value: "${SPI_DAG_FAMILIES:=none}"
+          # An archive source is held in memory: up to 200 MiB, plus its files.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: osdu-dag-config
+              mountPath: /opt/spi/osdu
+              readOnly: true
+            - name: osdu-dags
+              mountPath: /opt/airflow/dags
+      extraVolumes:
+        - name: osdu-dag-config
+          configMap:
+            name: airflow-osdu-dags
+        - name: osdu-dags
+          emptyDir: {}
+      extraVolumeMounts:
+        - name: osdu-dag-config
+          mountPath: /opt/spi/osdu
+          readOnly: true
+        - name: osdu-dags
+          mountPath: /opt/airflow/dags

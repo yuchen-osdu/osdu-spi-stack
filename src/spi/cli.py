@@ -37,6 +37,7 @@ from .build import BuildError, build_image
 from .checks import PREREQ_TOOLS, check_prerequisites
 from .config import Config, IngressMode, Profile
 from .console import console, display_result, error_console
+from .deploy import refresh_airflow_osdu_config
 from .environment import Declared
 from .guard import get_suspend_status, verify_spi_cluster
 from .images import (
@@ -594,6 +595,18 @@ def _up_stack_file(path: Optional[Path], profile: Optional[Profile]) -> Optional
         raise typer.BadParameter(str(exc), param_hint="--file") from exc
 
 
+def _up_stack_dags(path: Optional[Path]) -> Optional[tuple[str, ...]]:
+    """The add-on DAG families a stack file selects, or None to leave the selection alone."""
+    from .environment import EnvironmentDeclarationError, load_stack_dags
+
+    if path is None:
+        return None
+    try:
+        return load_stack_dags(path)
+    except EnvironmentDeclarationError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--file") from exc
+
+
 def _declared_value(flag: str, given: Any, declared: Any) -> Any:
     """The declared value; an explicit option that disagrees with it is refused."""
     if given is not None and given != declared:
@@ -686,13 +699,15 @@ def up(
         "--file",
         "-f",
         help="Stack file that builds on core. Its resources: section sizes services and "
-        "middleware; without -f an existing sizing is left as it is.",
+        "middleware, and its dags: list adds DAG families; without -f an existing sizing "
+        "and DAG selection are left as they are.",
     ),
 ):
     """Provision Azure infrastructure and deploy the OSDU SPI stack."""
     # Argument errors surface before the first Azure read.
     _check_tag(tag, branch)
     sizing = _up_stack_file(stack_file, profile)
+    dags = _up_stack_dags(stack_file)
     declared = _up_declaration(env, declaration)
     if declared is not None:
         intent = declared.declaration
@@ -784,6 +799,7 @@ def up(
             deployer_principal=deployer_principal,
             declared=declared,
             sizing=sizing,
+            dags=dags,
         )
         if dry_run:
             console.print(
@@ -1975,7 +1991,7 @@ def users_remove(
     _users_target(member, me, output_json)
     ctx = _verify_cluster(stderr=output_json)
 
-    from .bootstrap import ClusterConfigError
+    from .bootstrap import ClusterConfigError, release_operator
     from .identity import IdentityError, person_token
     from .status import STATUS_API_VERSION
     from .token import TokenError, mint_token
@@ -1988,17 +2004,27 @@ def users_remove(
         partitions = select_partitions(env, partition)
         member_id = person_token().user_id if me else str(member)
         outcome = remove_user(env, mint_token(caller="deploy").access_token, member_id, partitions)
+        # The members Job seeds the operator in every partition; a removal from
+        # all of them stops it adding the person back the next time it runs.
+        released = partition is None and release_operator(member_id)
     except UsersError as exc:
         raise _users_fail(str(exc), output_json, code=2 if exc.code == "seeded_identity" else 1)
     except (ClusterConfigError, IdentityError, TokenError) as exc:
         raise _users_fail(str(exc), output_json)
 
     if output_json:
-        document = {"apiVersion": STATUS_API_VERSION, "member": member_id, "partitions": outcome}
+        document = {
+            "apiVersion": STATUS_API_VERSION,
+            "member": member_id,
+            "partitions": outcome,
+            "operatorReleased": released,
+        }
         typer.echo(json.dumps(document, indent=2))
         return
     for name, change in outcome.items():
         console.print(f"  {name}  {change:<8} {member_id}")
+    if released:
+        console.print(f"  [dim]spi up no longer seeds {member_id} as an admin[/dim]")
 
 
 @app.command()
@@ -2129,6 +2155,7 @@ def reconcile(
     console.print("\n[bold]Refreshing cluster config for Flux substitution...[/bold]")
     create_istio_revision_configmap()
     refresh_spi_init_values()
+    refresh_airflow_osdu_config()
 
     if resume:
         console.print("\n[bold]Resuming GitRepository...[/bold]")

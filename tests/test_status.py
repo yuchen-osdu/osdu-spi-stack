@@ -407,6 +407,23 @@ def test_completed_expected_members_job_opens_the_gate(monkeypatch):
     assert snapshot.reason is None
 
 
+def test_a_new_operator_gates_until_the_job_that_seeds_them_completes(monkeypatch):
+    values = _init_values()
+    values["data"]["values.yaml"] += 'entitlementsOperator: "alice@contoso.com"\n'
+    seeds_operator = status.entitlements_members_job_name(
+        "opendes", ["deployer-client-id"], (), "alice@contoso.com"
+    )
+
+    _wire(monkeypatch, init_values=values, jobs=[_members_job(EXPECTED_JOB, succeeded=1)])
+    snapshot = status.collect_status()
+    assert snapshot.deployable is False
+    assert snapshot.reason is not None
+    assert snapshot.reason.message == f"{seeds_operator}: not yet rendered"
+
+    _wire(monkeypatch, init_values=values, jobs=[_members_job(seeds_operator, succeeded=1)])
+    assert status.collect_status().deployable is True
+
+
 def test_values_without_members_are_never_gated(monkeypatch):
     """An environment bootstrapped before the CLI wrote members has no seed to wait for."""
     _wire(monkeypatch, init_values=_init_values(members=()), jobs=[])

@@ -25,16 +25,19 @@ from subprocess import CompletedProcess
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from spi import deploy, token
 from spi.bootstrap import ensure_namespaces
 from spi.config import Config
 from spi.status import STATUS_API_VERSION
 from spi.templates import (
+    AIRFLOW_SCHEDULER_SERVICE_ACCOUNT,
     DEPLOYER_SERVICE_ACCOUNT,
     MEMBER_SERVICE_ACCOUNT,
     NO_ACCESS_SERVICE_ACCOUNT,
     TESTER_NAMESPACE,
+    airflow_osdu_configmap,
     workload_identity_sa,
 )
 
@@ -254,7 +257,95 @@ def test_deploy_skips_tester_accounts_without_identity_outputs():
     applied = "".join(call.args[0] for call in apply_yaml.call_args_list)
 
     assert DEPLOYER_SERVICE_ACCOUNT not in applied
-    assert applied.count("kind: ServiceAccount") == 2
+    # workload-identity-sa in platform and osdu, and the core scheduler's account.
+    assert applied.count("kind: ServiceAccount") == 3
+
+
+def test_deploy_applies_the_airflow_schedulers_account_for_the_osdu_identity():
+    with (
+        patch("spi.deploy.display_yaml"),
+        patch("spi.deploy.kubectl_apply_yaml") as apply_yaml,
+    ):
+        deploy._create_osdu_config(
+            Config.from_env("dev1"), {"identity_client_id": "uami-id", "tenant_id": "tenant-id"}
+        )
+    applied = [call.args[0] for call in apply_yaml.call_args_list]
+
+    scheduler = next(y for y in applied if f"name: {AIRFLOW_SCHEDULER_SERVICE_ACCOUNT}\n" in y)
+    assert "namespace: platform\n" in scheduler
+    assert 'azure.workload.identity/client-id: "uami-id"' in scheduler
+    assert 'azure.workload.identity/tenant-id: "tenant-id"' in scheduler
+
+
+def _applied_airflow_config(outputs: dict) -> str:
+    with (
+        patch("spi.deploy.display_yaml"),
+        patch("spi.deploy.kubectl_apply_yaml") as apply_yaml,
+    ):
+        deploy._create_osdu_config(Config.from_env("dev1"), outputs)
+    applied = [call.args[0] for call in apply_yaml.call_args_list]
+    return next(y for y in applied if "name: spi-airflow-osdu\n" in y)
+
+
+def test_airflow_tasks_mint_for_the_management_audience_by_default(monkeypatch):
+    monkeypatch.delenv("AAD_CLIENT_ID", raising=False)
+
+    applied = _applied_airflow_config({"identity_client_id": "uami-id"})
+
+    assert "namespace: platform\n" in applied
+    assert 'AZURE_RESOURCE_ID: "https://management.azure.com"' in applied
+    assert f'DATA_PARTITION: "{Config.from_env("dev1").primary_partition}"' in applied
+
+
+def test_airflow_tasks_mint_for_an_overridden_app_registration(monkeypatch):
+    monkeypatch.setenv("AAD_CLIENT_ID", "app-registration-id")
+
+    applied = _applied_airflow_config({"identity_client_id": "uami-id"})
+
+    assert 'AZURE_RESOURCE_ID: "app-registration-id"' in applied
+
+
+@pytest.mark.parametrize(
+    ("aad_client_id", "audience"),
+    [("uami-id", "https://management.azure.com"), ("app-registration-id", "app-registration-id")],
+)
+def test_reconcile_rederives_the_airflow_audience_from_live_config(aad_client_id, audience):
+    with (
+        patch(
+            "spi.deploy.kubectl_json",
+            return_value={"data": {"AAD_CLIENT_ID": aad_client_id, "PRIMARY_PARTITION": "opendes"}},
+        ),
+        patch("spi.deploy.read_workload_identity_client_id", return_value="uami-id"),
+        patch("spi.deploy.kubectl_apply_yaml") as apply_yaml,
+    ):
+        deploy.refresh_airflow_osdu_config()
+
+    assert f'AZURE_RESOURCE_ID: "{audience}"' in apply_yaml.call_args.args[0]
+    assert 'DATA_PARTITION: "opendes"' in apply_yaml.call_args.args[0]
+
+
+def test_reconcile_leaves_airflow_config_alone_without_osdu_config():
+    with (
+        patch("spi.deploy.kubectl_json", return_value=None),
+        patch("spi.deploy.kubectl_apply_yaml") as apply_yaml,
+    ):
+        deploy.refresh_airflow_osdu_config()
+
+    apply_yaml.assert_not_called()
+
+
+def test_airflow_config_is_a_well_formed_configmap():
+    manifest = yaml.safe_load(airflow_osdu_configmap("https://management.azure.com", "opendes"))
+
+    assert manifest["metadata"] == {
+        "name": "spi-airflow-osdu",
+        "namespace": "platform",
+        "labels": {"app.kubernetes.io/managed-by": "osdu-spi-stack"},
+    }
+    assert manifest["data"] == {
+        "AZURE_RESOURCE_ID": "https://management.azure.com",
+        "DATA_PARTITION": "opendes",
+    }
 
 
 def test_workload_identity_sa_default_name_is_unchanged():

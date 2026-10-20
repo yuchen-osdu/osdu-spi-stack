@@ -233,6 +233,8 @@ def refresh_spi_init_values() -> None:
     member_users = [member_id] if member_id else []
     # An unreadable annotation is not an absent account; keep what was written.
     tenant_account = tenant_account or (values.get("tenantServiceAccount") or "")
+    # Only spi up names the operator; a reconcile keeps whoever it recorded.
+    operator = str(values.get("entitlementsOperator") or "")
     if (
         members == list(values.get("entitlementsMembers") or [])
         and member_users == list(values.get("entitlementsMemberUsers") or [])
@@ -241,10 +243,33 @@ def refresh_spi_init_values() -> None:
         return
     legal_tag = values.get("legalTag") or LEGAL_TAG_BASE
     yaml_content = spi_init_values_configmap(
-        partitions, members, legal_tag, member_users, tenant_account
+        partitions, members, legal_tag, member_users, tenant_account, operator
     )
     display_yaml(yaml_content, f"ConfigMap: {INIT_VALUES_CONFIGMAP}")
     kubectl_apply_yaml(yaml_content, f"refresh {INIT_VALUES_CONFIGMAP} ConfigMap")
+
+
+def release_operator(member: str) -> bool:
+    """Stop the members Job seeding ``member`` when it is the recorded operator.
+
+    ``spi users remove`` calls this after deleting the member, so a Job that
+    runs again later does not add back a person who removed themselves. The
+    re-rendered values name no operator, which renames the Job; it re-seeds
+    the identities alone. Returns whether the values changed.
+    """
+    values = parse_init_values(read_init_values())
+    operator = str(values.get("entitlementsOperator") or "")
+    if not operator or operator.lower() != member.lower():
+        return False
+    yaml_content = spi_init_values_configmap(
+        list(values.get("partitions") or []),
+        list(values.get("entitlementsMembers") or []),
+        values.get("legalTag") or LEGAL_TAG_BASE,
+        list(values.get("entitlementsMemberUsers") or []),
+        str(values.get("tenantServiceAccount") or ""),
+    )
+    kubectl_apply_yaml(yaml_content, f"release the operator from {INIT_VALUES_CONFIGMAP}")
+    return True
 
 
 def create_storage_classes() -> None:
