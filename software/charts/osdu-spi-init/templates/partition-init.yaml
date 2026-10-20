@@ -24,6 +24,7 @@ metadata:
     osdu.spi/partition: {{ $partition }}
 spec:
   backoffLimit: {{ $.Values.backoffLimit }}
+  {{- include "osdu-spi-init.podFailurePolicy" (dict "root" $ "name" (printf "partition-init-%s-%s" $partition $recordHash)) | nindent 2 }}
   activeDeadlineSeconds: {{ $.Values.activeDeadlineSeconds }}
   template:
     metadata:

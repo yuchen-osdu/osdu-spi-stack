@@ -589,7 +589,8 @@ data:
     which tenant-provisioning made OWNER of the root groups, and adds each
     configured member as x-user-id to users, users.datalake.ops,
     users.datalake.admins, users.data.root, users.datalake.delegation, and
-    users.datalake.impersonation for the partition. Impersonation membership
+    users.datalake.impersonation for the partition, and to
+    service.workflow.system-admin. Impersonation membership
     lets an ingestion DAG the member starts act on its behalf: osdu-airflow
     forwards the run's userId as on-behalf-of on every service call. Each
     configured member user, the test caller who is
@@ -604,7 +605,10 @@ data:
     impersonate) and users.datalake.impersonation (who may be impersonated).
     The entitlements acceptance suite requires both, so the Job creates them
     when absent; the creator is their OWNER and ops membership lets any
-    configured member manage them afterwards.
+    configured member manage them afterwards. It creates
+    service.workflow.system-admin the same way: the workflow acceptance suite
+    checks its caller holds it, although the Azure provider authorizes the
+    system workflow APIs by service principal rather than by that group.
 
     Flow:
       1. Wait for entitlements /info to return 200. Any later call that a
@@ -616,7 +620,7 @@ data:
          the listing carries more than MAX_USER_GROUPS service.<name>.user
          groups or lacks one of MEMBER_USER_GROUPS.
       3. POST /groups for each impersonation group the listing lacks.
-      4. Select the six root groups by name, users, every service.<name>.user
+      4. Select MEMBER_GROUPS by name, users, every service.<name>.user
          group, and MEMBER_USER_GROUPS for the member users, and
          OPERATOR_GROUPS for the operator.
       5. POST each principal to each of its groups. 200 adds, 409 is
@@ -656,7 +660,18 @@ data:
     CREATED_GROUPS = {
         "users.datalake.delegation": "Users who can impersonate",
         "users.datalake.impersonation": "Users who can be impersonated",
+        "service.workflow.system-admin": "Workflow system administrators",
     }
+    # Every configured member: the root groups and the workflow suite's group.
+    MEMBER_GROUPS = (
+        "users",
+        "users.datalake.ops",
+        "users.datalake.admins",
+        "users.data.root",
+        "users.datalake.delegation",
+        "users.datalake.impersonation",
+        "service.workflow.system-admin",
+    )
     MEMBER_USER_GROUP_RE = re.compile(r"^service\.[a-z0-9-]+\.user$")
     # Storage defines no .user group; its suite declares the member caller with admin.
     MEMBER_USER_GROUPS = ("service.storage.admin",)
@@ -675,13 +690,13 @@ data:
     # The Job's activeDeadlineSeconds must cover the worst case or the pod dies
     # before printing an outcome: each poll attempt costs WAIT_DELAY plus
     # WAIT_SOCKET_TIMEOUT; REQUEST_BUDGET covers the 60 s token exchange,
-    # fifteen 30 s calls for the one member the CLI seeds (one listing, two
-    # creates, then a write and a read per root group), and up to
+    # eighteen 30 s calls for the one member the CLI seeds (one listing, three
+    # creates, then a write and a read per member group), and up to
     # MAX_USER_GROUPS plus len(MEMBER_USER_GROUPS) more write-and-read pairs
     # plus a users write for the one member user. Partition retries add at most
     # PARTITION_WAIT plus one delay and one more call.
     REQUEST_TIMEOUT = 30
-    REQUEST_BUDGET = 1680
+    REQUEST_BUDGET = 1770
     PARTITION_WAIT = 600
     PARTITION_RETRY_DELAY = 5.0
     INFO_ATTEMPTS = 30
@@ -813,17 +828,17 @@ data:
                 return 1
             if not emails.get(name) and emails.get("users", "").startswith("users@"):
                 emails[name] = f"{name}@{emails['users'].split('@', 1)[1]}"
-        absent = [name for name in ROOT_GROUPS if not emails.get(name)]
+        absent = [name for name in MEMBER_GROUPS if not emails.get(name)]
         if absent:
             outcome(
                 "group_missing",
-                f"root groups not visible to the owner: {', '.join(absent)}; "
+                f"member groups not visible to the owner: {', '.join(absent)}; "
                 f"{', '.join(members)} not seeded",
             )
             return 1
 
         user_groups = ["users"] + matched_groups + list(MEMBER_USER_GROUPS)
-        seeds = [(member, name) for member in members for name in ROOT_GROUPS]
+        seeds = [(member, name) for member in members for name in MEMBER_GROUPS]
         seeds += [(member, name) for member in member_users for name in user_groups]
         if operator:
             seeds += [(operator, name) for name in OPERATOR_GROUPS]

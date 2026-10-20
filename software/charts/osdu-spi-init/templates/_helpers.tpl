@@ -128,3 +128,24 @@ volumes:
   }
 }
 {{- end }}
+
+{{/*
+A pod that lands on a node before Istio CNI is ready fails istio-validation
+with exit code 126. That says nothing about the script, so it uses no retry;
+backoffLimit stays for real failures. Needs restartPolicy: Never (podSpec).
+A Job's podFailurePolicy is immutable, so a Job that already exists without
+one is rendered unchanged and Helm has nothing to patch; every new Job, for a
+new partition or a new environment, gets the rule. Takes (dict "root" $ "name").
+*/}}
+{{- define "osdu-spi-init.podFailurePolicy" -}}
+{{- $existing := lookup "batch/v1" "Job" .root.Values.namespace .name -}}
+{{- if or (not $existing) (and $existing.spec $existing.spec.podFailurePolicy) }}
+podFailurePolicy:
+  rules:
+    - action: Ignore
+      onExitCodes:
+        containerName: istio-validation
+        operator: In
+        values: [126]
+{{- end }}
+{{- end }}

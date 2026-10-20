@@ -26,6 +26,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -171,6 +172,63 @@ def test_component_split_matches_the_three_releases():
     assert [doc["metadata"]["name"] for doc in members] == [
         entitlements_members_job_name("opendes", ["deployer-client-id"])
     ]
+
+
+_ISTIO_CNI_NOT_READY = {
+    "rules": [
+        {
+            "action": "Ignore",
+            "onExitCodes": {
+                "containerName": "istio-validation",
+                "operator": "In",
+                "values": [126],
+            },
+        }
+    ]
+}
+
+
+def test_every_job_ignores_istio_cni_not_ready():
+    """A pod scheduled on a node whose Istio CNI is not ready yet fails
+    istio-validation with 126; that must not use one of the Job's retries."""
+    docs = _render(["opendes", "second"], _MEMBERS)
+    jobs = [doc for doc in docs if doc.get("kind") == "Job"]
+    assert {job["metadata"]["labels"]["app.kubernetes.io/component"] for job in jobs} == {
+        "partition-init",
+        "entitlements-init",
+        "legal-init",
+        "entitlements-members",
+    }
+    for job in jobs:
+        assert job["spec"]["podFailurePolicy"] == _ISTIO_CNI_NOT_READY, job["metadata"]["name"]
+        assert job["spec"]["template"]["spec"]["restartPolicy"] == "Never"
+
+    schema_load = yaml.safe_load(
+        (REPO_ROOT / "software/stacks/osdu/schema-load/job.yaml").read_text(encoding="utf-8")
+    )
+    assert schema_load["spec"]["podFailurePolicy"] == _ISTIO_CNI_NOT_READY
+    assert schema_load["spec"]["template"]["spec"]["restartPolicy"] == "Never"
+
+
+def test_pod_failure_policy_lookup_names_the_rendered_job():
+    """podFailurePolicy is immutable, so the helper looks the Job up to keep an
+    existing Job unchanged; the name it looks up must be the Job's own name."""
+    var = re.compile(r"\{\{\s*(\$\w+)\s*\}\}")
+    for template in sorted((CHART_DIR / "templates").glob("*.yaml")):
+        text = template.read_text(encoding="utf-8")
+        include = re.search(
+            r'include "osdu-spi-init\.podFailurePolicy" \(dict "root" \$ "name" '
+            r'\(printf "([^"]+)"((?: \$\w+)+)\)\)',
+            text,
+        )
+        if "kind: Job" not in text:
+            assert include is None, template.name
+            continue
+        assert include is not None, template.name
+        name_line = re.search(r"^  name: (.+?)\s*$", text, re.MULTILINE)
+        assert name_line is not None, template.name
+        assert var.sub("%s", name_line.group(1)) == include.group(1), template.name
+        assert var.findall(name_line.group(1)) == include.group(2).split(), template.name
 
 
 def test_members_job_renders_one_per_partition_under_the_cli_computed_name():
@@ -386,6 +444,19 @@ def test_legal_init_deadline_covers_its_wait_budget(init_scripts):
 _TOKEN_TIMEOUT = 60
 
 
+def test_members_seed_the_workflow_suite_group(init_scripts):
+    """The workflow acceptance suite refuses a caller outside
+    service.workflow.system-admin, which Azure tenant provisioning never
+    creates; the Job creates it and adds every member next to the root groups."""
+    const = _script_constants(init_scripts["init_members.py"])
+    assert "service.workflow.system-admin" in const["CREATED_GROUPS"]
+    assert const["MEMBER_GROUPS"][: len(const["ROOT_GROUPS"])] == const["ROOT_GROUPS"]
+    assert set(const["MEMBER_GROUPS"]) - set(const["ROOT_GROUPS"]) == {
+        "service.workflow.system-admin"
+    }
+    assert "service.workflow.system-admin" not in const["OPERATOR_GROUPS"]
+
+
 def test_members_deadline_covers_its_wait_budget(init_scripts):
     """The members Job renders with its own deadline; the script's wait plus
     REQUEST_BUDGET must fit inside it, and REQUEST_BUDGET itself must cover
@@ -399,7 +470,7 @@ def test_members_deadline_covers_its_wait_budget(init_scripts):
     calls = (
         1
         + len(const["CREATED_GROUPS"])
-        + 2 * len(const["ROOT_GROUPS"])
+        + 2 * len(const["MEMBER_GROUPS"])
         + 1
         + 2 * const["MAX_USER_GROUPS"]
         + 2 * len(const["MEMBER_USER_GROUPS"])
@@ -600,11 +671,13 @@ _GROUPS = {
     "users.data.root": "users.data.root@opendes.dataservices.energy",
     "users.datalake.delegation": "users.datalake.delegation@opendes.dataservices.energy",
     "users.datalake.impersonation": "users.datalake.impersonation@opendes.dataservices.energy",
+    "service.workflow.system-admin": "service.workflow.system-admin@opendes.dataservices.energy",
 }
-# Created by the Job when the listing lacks them; the deploy identity joins both.
+# Created by the Job when the listing lacks them; the deploy identity joins all three.
 _CREATED_GROUPS = {
     "users.datalake.delegation": _GROUPS["users.datalake.delegation"],
     "users.datalake.impersonation": _GROUPS["users.datalake.impersonation"],
+    "service.workflow.system-admin": _GROUPS["service.workflow.system-admin"],
 }
 _BOOTSTRAP_GROUPS = tuple(n for n in _GROUPS if n not in _CREATED_GROUPS)
 
@@ -831,6 +904,7 @@ def test_members_creates_the_impersonation_groups_the_bootstrap_lacks(
     assert [json.loads(c.body)["name"] for c in creates] == [
         "users.datalake.delegation",
         "users.datalake.impersonation",
+        "service.workflow.system-admin",
     ]
     assert all(json.loads(c.body)["description"] for c in creates)
     posted_to = {
@@ -839,6 +913,8 @@ def test_members_creates_the_impersonation_groups_the_bootstrap_lacks(
     assert _CREATED_GROUPS["users.datalake.delegation"] in posted_to
     # An ingestion DAG the deploy identity starts acts on its behalf.
     assert _CREATED_GROUPS["users.datalake.impersonation"] in posted_to
+    # The workflow acceptance suite checks its caller holds this group.
+    assert _CREATED_GROUPS["service.workflow.system-admin"] in posted_to
 
 
 def test_members_derives_the_created_group_email_when_the_service_omits_it(
@@ -902,7 +978,7 @@ def test_members_fails_when_a_root_group_is_missing(init_scripts, monkeypatch, c
     assert result.routed("post") == []
     assert result.termination_message == (
         "entitlements-members outcome: group_missing: "
-        "root groups not visible to the owner: users.datalake.admins, users.data.root; "
+        "member groups not visible to the owner: users.datalake.admins, users.data.root; "
         "deployer-client-id not seeded"
     )
 

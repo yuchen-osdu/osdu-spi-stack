@@ -411,10 +411,13 @@ a template revision that includes
 The deploy identity is the positive caller: the `entitlements-members` Job
 adds its client id to `users`,
 `users.datalake.ops`, `users.datalake.admins`, `users.data.root`,
-`users.datalake.delegation`, and `users.datalake.impersonation` for every
-partition, creating both impersonation groups first when the Azure tenant
-bootstrap has not. Impersonation membership lets an ingestion DAG the deploy
-identity starts call the services on its behalf (ADR-044). A new Job runs when the environment is built, the identity changes, or
+`users.datalake.delegation`, `users.datalake.impersonation`, and
+`service.workflow.system-admin` for every partition, creating those three
+groups first when the Azure tenant bootstrap has not. Impersonation membership
+lets an ingestion DAG the deploy identity starts call the services on its
+behalf (ADR-044). The Workflow acceptance suite checks that its caller holds
+`service.workflow.system-admin`; the Azure provider authorizes the system
+workflow APIs by service principal, so the group grants nothing at runtime. A new Job runs when the environment is built, the identity changes, or
 the chart's seed generation is bumped. `spi info --json` reports
 `entitlements_domain` from `SERVICE_DOMAIN_NAME` on the live
 `osdu-entitlements` Deployment, with an empty value before that Deployment
