@@ -28,6 +28,7 @@ from spi.bootstrap import (
     deploy_identity_facts,
     ensure_namespaces,
     refresh_spi_init_values,
+    release_operator,
     render_istio_revision_configmap,
 )
 from spi.images import ResolvedImage
@@ -288,6 +289,17 @@ class TestRefreshSpiInitValues:
 
         apply_yaml.assert_not_called()
 
+    def test_keeps_the_operator_spi_up_recorded(self):
+        """Only spi up names the operator; a reconcile run by anyone must not
+        drop them, or the members Job would run again without them."""
+        apply_yaml = self._run(
+            "partitions:\n  - opendes\nlegalTag: demo-legaltag\nentitlementsMembers:\n  - old\n"
+            'entitlementsOperator: "alice@contoso.com"\n',
+            "new",
+        )
+
+        assert 'entitlementsOperator: "alice@contoso.com"\n' in apply_yaml.call_args.args[0]
+
     def test_skips_a_cluster_without_values_or_identity(self):
         self._run(None, "id").assert_not_called()
         self._run("partitions:\n  - opendes\n", "").assert_not_called()
@@ -303,6 +315,45 @@ class TestRefreshSpiInitValues:
 
         apply_yaml.assert_not_called()
         assert "Could not read spi-init-values: Forbidden" in capsys.readouterr().out
+
+
+class TestReleaseOperator:
+    """`spi users remove` stops the members Job adding back the operator."""
+
+    VALUES = (
+        "partitions:\n  - opendes\nlegalTag: custom-tag\nentitlementsMembers:\n  - id\n"
+        "entitlementsMemberUsers:\n  - member\ntenantServiceAccount: osdu-id\n"
+        'entitlementsOperator: "alice@contoso.com"\n'
+    )
+
+    def _run(self, member: str):
+        with (
+            patch("spi.bootstrap.read_init_values", return_value=self.VALUES),
+            patch("spi.bootstrap.kubectl_apply_yaml") as apply_yaml,
+        ):
+            released = release_operator(member)
+        return released, apply_yaml
+
+    def test_drops_the_operator_and_keeps_everything_else(self):
+        released, apply_yaml = self._run("Alice@Contoso.com")
+
+        assert released is True
+        applied = apply_yaml.call_args.args[0]
+        assert "entitlementsOperator" not in applied
+        for kept in (
+            "    - opendes\n",
+            "legalTag: custom-tag\n",
+            "entitlementsMembers:\n    - id\n",
+            "entitlementsMemberUsers:\n    - member\n",
+            "tenantServiceAccount: osdu-id\n",
+        ):
+            assert kept in applied
+
+    def test_leaves_values_alone_for_anyone_else(self):
+        released, apply_yaml = self._run("bob@contoso.com")
+
+        assert released is False
+        apply_yaml.assert_not_called()
 
 
 class TestReconcileRefreshesClusterConfig:

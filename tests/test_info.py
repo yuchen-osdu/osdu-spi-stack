@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from spi import cli, info
@@ -108,7 +109,7 @@ def _wire(
     monkeypatch.setattr(
         info,
         "_entitlements_seeded",
-        lambda partition, members, member_users=(): bool(members) and members_seeded,
+        lambda partition, members, member_users=(), operator="": bool(members) and members_seeded,
     )
     monkeypatch.setattr(info, "read_entitlements_domain", lambda: entitlements_domain)
     monkeypatch.setattr(info, "_read_deploy_record", lambda: record)
@@ -383,6 +384,28 @@ def test_init_values_carry_the_tenant_service_account():
 
     assert parse_init_values(values_yaml)["tenantServiceAccount"] == "osdu-client-id"
     assert "tenantServiceAccount" not in spi_init_values_configmap(["opendes"])
+
+
+def test_init_values_carry_the_operator_quoted_and_read_it_back():
+    rendered = spi_init_values_configmap(["opendes"], ["id"], operator="alice@contoso.com")
+    values_yaml = rendered.split("values.yaml: |\n", 1)[1]
+
+    assert '    entitlementsOperator: "alice@contoso.com"\n' in values_yaml
+    assert yaml.safe_load(values_yaml)["entitlementsOperator"] == "alice@contoso.com"
+    assert parse_init_values(values_yaml)["entitlementsOperator"] == "alice@contoso.com"
+    assert "entitlementsOperator" not in spi_init_values_configmap(["opendes"], ["id"])
+
+
+def test_entitlements_seeded_asks_for_the_job_the_operator_names(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        info, "kubectl_json", lambda args: seen.append(args) or {"status": {"succeeded": 1}}
+    )
+
+    assert info._entitlements_seeded("opendes", ["id"], ["member"], "alice@contoso.com")
+    assert seen[0][2] == entitlements_members_job_name(
+        "opendes", ["id"], ["member"], "alice@contoso.com"
+    )
 
 
 def test_init_values_parser_reads_every_list_block():

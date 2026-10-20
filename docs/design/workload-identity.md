@@ -177,7 +177,9 @@ the same groups for an id typed for someone else and verifies nothing.
 `spi users list` shows each partition's members with kind and role, and
 `spi users remove` deletes a member from every group, refusing the three
 seeded identities. `spi token --me` prints the person's bearer for use with
-`curl`. Membership is not declared anywhere, so a reset removes it.
+`curl`. Membership is not declared anywhere, so a reset removes it. The one
+person `spi up` names is the operator: whoever ran it, read from their own
+token and seeded as an `admin` by the members Job once entitlements is up.
 
 ## Audiences used by OSDU callers
 
