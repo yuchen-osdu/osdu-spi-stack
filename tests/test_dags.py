@@ -167,4 +167,3 @@ def test_the_shipped_by_reference_family_is_refused_without_dataset():
 def test_only_the_core_families_load_by_default():
     defaults = [f["name"] for f in dags.load_catalog() if f.get("default") is True]
     assert defaults == ["spi-smoke", "core-ingestion"]
-
